@@ -19,8 +19,15 @@ use nom::{
 make_parser!(short_switch -> char,
     preceded(char('-'), satisfy(|c| c.is_alphanumeric())));
 
+// long flag name: first char must be alphanumeric to reject the
+// `------------` style separator lines that show up in `less --help`
+// (and therefore in zstdless/bzless help output, which wrap less).
+// without this guard, the parser happily eats the whole run of dashes
+// after `--` and produces a flag named `------…`.
 make_parser!(long_switch -> &'a str,
-    preceded(tag("--"), take_while1(is_option_char)));
+    preceded(tag("--"), verify(take_while1(is_option_char), |s: &str| {
+        s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+    })));
 
 make_parser!(negatable_long_switch -> &'a str,
     preceded(tag("--[no-]"), take_while1(is_option_char)));
@@ -121,6 +128,35 @@ make_parser!(slash_sep -> (),
 switch_pair!(long_slash_short,
     long_switch, slash_sep, short_switch => |l, s| Switch::Both(s, l));
 
+// `-s PARAM, --long` form — ripgrep and other clap-via-roff manpages emit
+// the placeholder between the short and long forms:
+//   `\-e PATTERN, \-\-regexp=PATTERN`
+//   `\-f PATTERNFILE, \-\-file=PATTERNFILE`
+// the placeholder is matched conservatively (uppercase identifier or
+// `<angle>` form) so we don't eat normal description words. the trailing
+// `=PATTERN` / ` PATTERN` is left for `opt(param_parser)` to consume.
+make_parser!(placeholder_token -> &'a str,
+    alt((
+        delimited(char('<'), take_till1(|c: char| c == '>'), char('>')),
+        verify(
+            take_while1(|c: char|
+                c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '_' || c == '-'
+            ),
+            |s: &str| {
+                let first = match s.chars().next() { Some(c) => c, None => return false };
+                if !(first.is_ascii_uppercase() || first == '_') { return false; }
+                s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            }
+        ),
+    ))
+);
+
+fn short_param_comma_long(s: &str) -> IResult<&str, Switch<'_>> {
+    let (rem, (short, _, _ph, _, long)) =
+        (short_switch, space1, placeholder_token, comma, long_switch).parse(s)?;
+    Ok((rem, Switch::Both(short, long)))
+}
+
 make_parser!(short_as_switch -> Switch<'a>, short_switch => Switch::Short);
 make_parser!(negatable_long_as_switch -> Switch<'a>, negatable_long_switch => Switch::Long);
 make_parser!(long_as_switch -> Switch<'a>, long_switch => Switch::Long);
@@ -131,6 +167,7 @@ make_parser!(pub switch_parser -> Switch<'a>,
         short_space_negatable_long,
         short_comma_long,
         short_space_long,
+        short_param_comma_long,
         long_slash_short,
         short_as_switch,
         negatable_long_as_switch,

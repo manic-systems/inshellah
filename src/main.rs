@@ -1863,7 +1863,6 @@ fn cmd_complete(
         .filter(|t| !t.is_empty())
         .cloned()
         .collect();
-    let lookup_depth = lookup_tokens.len();
     let resolve_depth = resolve_tokens.len();
     let need_resolve = match &found {
         Some((_, _, depth)) => *depth < resolve_depth,
@@ -1912,14 +1911,28 @@ fn cmd_complete(
         None => Vec::new(),
         Some((matched_name, r, depth)) => {
             let mut scored: Vec<(i32, String)> = Vec::new();
-            // subcommand candidates (skip if match is too shallow)
-            if *depth >= lookup_depth.saturating_sub(1) {
+            // subcommand candidates (skip if match is too shallow). when
+            // `systemctl status` isn't in the cache, `find_result` falls
+            // back to `systemctl` at depth 1; we must NOT then offer
+            // `systemctl`'s subs (`poweroff`, `preset`, ...) — the user has
+            // already typed past that point. requiring depth >= resolve_depth
+            // (the count of complete, non-partial tokens) keeps subs
+            // exclusive to a full-prefix match and lets the dynamic completer
+            // — systemctl unit names, etc. — take over otherwise.
+            //
+            // also: when the typed token *exactly* equals a candidate we
+            // drop it. the user has already written the full word; echoing
+            // it back masks any downstream dynamic completer.
+            if *depth >= resolve_depth {
                 let subs: Vec<ManpageSubcommand> = if !r.subcommands.is_empty() {
                     r.subcommands.clone()
                 } else {
                     subcommands_of(&dirs, matched_name)
                 };
                 for sc in &subs {
+                    if !last_token.is_empty() && last_token == sc.name {
+                        continue;
+                    }
                     let s = fuzzy_score(&last_token, &sc.name);
                     if s > 0 {
                         scored.push((s, completion_json(&sc.name, &sc.desc)));
@@ -1961,6 +1974,9 @@ fn cmd_complete(
                             }
                         }
                     };
+                    if !last_token.is_empty() && last_token == flag {
+                        continue;
+                    }
                     let s = fuzzy_score(&last_token, &flag);
                     if s > 0 {
                         scored.push((s, completion_json(&flag, &desc)));

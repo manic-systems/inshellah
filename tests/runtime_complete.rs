@@ -242,6 +242,149 @@ fn complete_returns_flags_only_after_hyphen() {
 }
 
 #[test]
+fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
+    // `systemctl --user status p` — `systemctl status` isn't cached as its
+    // own file (the real systemctl manpage describes all verbs in one
+    // place), so `find_result` falls back to the parent `systemctl`. the
+    // completer must NOT then offer systemctl's top-level subs filtered by
+    // "p" (poweroff, preset, ...) — the user has already typed `status`.
+    // it must return null so the downstream dynamic completer (unit names)
+    // can take over.
+    let root = unique_temp_dir("inshellah-shallow-fallback");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let parent = ManpageResult {
+        entries: Vec::new(),
+        subcommands: vec![
+            ManpageSubcommand {
+                name: "status".to_string(),
+                desc: "show status".to_string(),
+            },
+            ManpageSubcommand {
+                name: "poweroff".to_string(),
+                desc: "power off".to_string(),
+            },
+            ManpageSubcommand {
+                name: "preset".to_string(),
+                desc: "set preset".to_string(),
+            },
+        ],
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "fakectl", "manpage", &parent).expect("cache");
+
+    // intermediate flag `--user` plus an uncached deep keyword `status`.
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("fakectl")
+        .arg("--user")
+        .arg("status")
+        .arg("p")
+        .env("PATH", "")
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert_eq!(
+        stdout.trim(),
+        "null",
+        "should not surface parent subs past an uncached keyword; stdout = {stdout}"
+    );
+
+    // sanity: at the right depth, parent subs are still offered.
+    let top_partial = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("fakectl")
+        .arg("p")
+        .env("PATH", "")
+        .output()
+        .expect("run inshellah complete");
+    let top_stdout = String::from_utf8(top_partial.stdout).expect("stdout");
+    assert!(
+        top_stdout.contains(r#""value":"poweroff""#)
+            && top_stdout.contains(r#""value":"preset""#),
+        "partial at the right depth should still match parent subs; stdout = {top_stdout}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_drops_exact_subcommand_match() {
+    // when the typed token exactly equals a cached subcommand, the binary
+    // returns null so a downstream dynamic completer (systemctl unit names,
+    // git remote names, etc.) can take over instead of echoing the
+    // already-typed word back.
+    let root = unique_temp_dir("inshellah-exact-subcommand-drop");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let result = ManpageResult {
+        entries: Vec::new(),
+        subcommands: vec![
+            ManpageSubcommand {
+                name: "status".to_string(),
+                desc: "show status".to_string(),
+            },
+            ManpageSubcommand {
+                name: "start".to_string(),
+                desc: "start unit".to_string(),
+            },
+        ],
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "demo", "manpage", &result).expect("cache");
+
+    let exact = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("demo")
+        .arg("status")
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        exact.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&exact.stderr)
+    );
+    let exact_stdout = String::from_utf8(exact.stdout).expect("stdout");
+    assert_eq!(
+        exact_stdout.trim(),
+        "null",
+        "exact match should hand off; stdout = {exact_stdout}"
+    );
+
+    let partial = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("demo")
+        .arg("sta")
+        .output()
+        .expect("run inshellah complete");
+    let partial_stdout = String::from_utf8(partial.stdout).expect("stdout");
+    assert!(
+        partial_stdout.contains(r#""value":"status""#)
+            && partial_stdout.contains(r#""value":"start""#),
+        "partial should still match both; stdout = {partial_stdout}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn complete_resolves_absolute_path_after_elevation_wrapper() {
     let root = unique_temp_dir("inshellah-absolute-elevation-complete");
     let bin_dir = root.join("bin");

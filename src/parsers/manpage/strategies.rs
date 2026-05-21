@@ -55,7 +55,20 @@ fn collect_description_lines(lines: &[GroffLine], start: usize) -> (String, usiz
                 }
                 i += 1;
             }
-            GroffLine::Blank | GroffLine::Comment => {
+            GroffLine::Blank => {
+                // a blank line ends the description, but only after we've
+                // collected some text — leading blanks between the tag and
+                // the first description line are still skipped. this caps
+                // clap-style "summary\n\nexpanded body" entries (jj, etc.)
+                // at the summary, which is what completion tooltips want.
+                // `.IP`-style help already stops at blanks (collect_text_lines
+                // breaks on any non-Text line); this brings `.TP` in line.
+                if !acc.is_empty() {
+                    break;
+                }
+                i += 1;
+            }
+            GroffLine::Comment => {
                 i += 1;
             }
             GroffLine::Macro { .. } => {
@@ -211,14 +224,210 @@ fn combine_short_long_alternates(
 // strategy b: .IP style (curl, hand-written manpages).
 // .IP takes an inline tag argument: .IP "-v, --verbose"
 // the description follows as text lines.
-make_macro_walker!(pub strategy_ip -> Vec<ManpageEntry>, on macro "IP" =>
-    |lines, i, args| {
-        let tag = strip_groff_escapes(args);
-        let (desc, rest) = collect_text_lines(&lines[i + 1..]);
-        let new_i = lines.len() - rest.len();
-        parse_tag_to_entry(&tag, desc).map(|e| (e, new_i))
+//
+// .RS/.RE depth-aware: man pages frequently nest .IP inside .RS blocks to
+// list example values (e.g. bat's `.IP "caret"` under `--nonprintable-notation`).
+// those nested tags look like flag definitions and confuse the parser, so we
+// only treat `.IP` at outer scope as a flag entry.
+pub fn strategy_ip(lines: &[GroffLine]) -> Vec<ManpageEntry> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut rs_depth: u32 = 0;
+    while i < lines.len() {
+        if let GroffLine::Macro { name, args } = &lines[i] {
+            match name.as_str() {
+                "RS" => {
+                    rs_depth += 1;
+                    i += 1;
+                    continue;
+                }
+                "RE" => {
+                    rs_depth = rs_depth.saturating_sub(1);
+                    i += 1;
+                    continue;
+                }
+                "IP" if rs_depth == 0 => {
+                    let tag = strip_groff_escapes(args);
+                    let (desc, rest) = collect_text_lines(&lines[i + 1..]);
+                    let new_i = lines.len() - rest.len();
+                    if let Some(entry) = parse_tag_to_entry(&tag, desc) {
+                        out.push(entry);
+                        i = new_i;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
     }
-);
+    out
+}
+
+// strategy b': .HP style (bat, help2man with hanging paragraphs).
+// .HP introduces a hanging-indent paragraph: the next text line is the tag,
+// followed by an empty `.IP` macro that starts the description body. example
+// value listings are wrapped in `.RS/.RE` and skipped during description
+// collection.
+//
+//   .HP
+//   \fB\-A\fR, \fB\-\-show\-all\fR
+//   .IP
+//   Show non-printable characters ...
+pub fn strategy_hp(lines: &[GroffLine]) -> Vec<ManpageEntry> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let GroffLine::Macro { name, .. } = &lines[i] else {
+            i += 1;
+            continue;
+        };
+        if name != "HP" {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < lines.len() && matches!(&lines[j], GroffLine::Blank | GroffLine::Comment) {
+            j += 1;
+        }
+        let Some(tag) = lines.get(j).and_then(tag_from_line) else {
+            i += 1;
+            continue;
+        };
+        let mut body_start = j + 1;
+        if let Some(GroffLine::Macro { name, .. }) = lines.get(body_start)
+            && name == "IP"
+        {
+            body_start += 1;
+        }
+        let (desc, new_i) = collect_hp_description(lines, body_start);
+        if let Some(entry) = parse_tag_to_entry(&tag, desc) {
+            out.push(entry);
+        }
+        i = if new_i > i { new_i } else { i + 1 };
+    }
+    out
+}
+
+/// description collector for `.HP` entries. stops at the next flag-boundary
+/// macro (`.HP`, `.TP`, `.PP`, `.SH`, `.SS`) and skips entire `.RS/.RE`
+/// example blocks — those are sub-value listings, not part of the flag's
+/// own description text.
+fn collect_hp_description(lines: &[GroffLine], start: usize) -> (String, usize) {
+    let mut acc: Vec<String> = Vec::new();
+    let mut i = start;
+    while i < lines.len() {
+        match &lines[i] {
+            GroffLine::Macro { name, .. }
+                if matches!(name.as_str(), "HP" | "TP" | "TQ" | "PP" | "SH" | "SS") =>
+            {
+                break;
+            }
+            GroffLine::Macro { name, .. } if name == "RS" => {
+                i += 1;
+                let mut depth: u32 = 1;
+                while i < lines.len() && depth > 0 {
+                    if let GroffLine::Macro { name, .. } = &lines[i] {
+                        if name == "RS" {
+                            depth += 1;
+                        } else if name == "RE" {
+                            depth -= 1;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            GroffLine::Text(t) => {
+                acc.push(t.clone());
+                i += 1;
+            }
+            GroffLine::Macro { name, args }
+                if matches!(
+                    name.as_str(),
+                    "B" | "BI" | "BR" | "I" | "IR" | "IB" | "RB" | "RI"
+                ) =>
+            {
+                let text = tag_of_macro(name, args);
+                if !text.is_empty() {
+                    acc.push(text);
+                }
+                i += 1;
+            }
+            GroffLine::Blank => {
+                if !acc.is_empty() {
+                    break;
+                }
+                i += 1;
+            }
+            GroffLine::Comment => {
+                i += 1;
+            }
+            GroffLine::Macro { .. } => {
+                i += 1;
+            }
+        }
+    }
+    (acc.join(" "), i)
+}
+
+// strategy b'': bare Text tag immediately followed by `.RS/.RE` (ripgrep,
+// some help2man variants). like the `.PP+.RS` shape, but with no `.PP`
+// anchor between flag entries — flags sit directly under `.SS` headers
+// separated only by `.sp`:
+//
+//   .SS INPUT OPTIONS
+//   \fB\-e\fP \fIPATTERN\fP, \fB\-\-regexp\fP=\fIPATTERN\fP
+//   .RS 4
+//   A pattern to search for ...
+//   .RE
+//   .sp
+//   \fB\-f\fP \fIPATTERNFILE\fP, \fB\-\-file\fP=\fIPATTERNFILE\fP
+//   .RS 4
+//   ...
+//
+// we only treat a top-level Text line as a tag when an `.RS` immediately
+// follows (skipping blanks/comments) and the text starts with `-`. nested
+// Text lines inside an existing `.RS` block are skipped via depth tracking
+// so description paragraphs that happen to begin with a flag reference
+// don't get mis-recognized.
+pub fn strategy_text_rs(lines: &[GroffLine]) -> Vec<ManpageEntry> {
+    let mut out = Vec::new();
+    let mut rs_depth: u32 = 0;
+    let mut i = 0;
+    while i < lines.len() {
+        match &lines[i] {
+            GroffLine::Macro { name, .. } if name == "RS" => {
+                rs_depth += 1;
+                i += 1;
+            }
+            GroffLine::Macro { name, .. } if name == "RE" => {
+                rs_depth = rs_depth.saturating_sub(1);
+                i += 1;
+            }
+            GroffLine::Text(tag) if rs_depth == 0 && tag.trim_start().starts_with('-') => {
+                let mut j = i + 1;
+                while j < lines.len()
+                    && matches!(&lines[j], GroffLine::Blank | GroffLine::Comment)
+                {
+                    j += 1;
+                }
+                if let Some(GroffLine::Macro { name, .. }) = lines.get(j)
+                    && name == "RS"
+                {
+                    let (desc, new_i) = collect_pp_rs_desc(lines, j);
+                    if let Some(entry) = parse_tag_to_entry(tag, desc) {
+                        out.push(entry);
+                        i = if new_i > i { new_i } else { i + 1 };
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
 
 // strategy c: .PP + .RS/.RE style (git, docbook-generated manpages).
 // flag entries are introduced by .PP (paragraph), with the flag name as
@@ -243,18 +452,36 @@ fn collect_pp_rs_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
     while i < lines.len() {
         match &lines[i] {
             GroffLine::Macro { name, .. } if name == "RS" => {
+                // depth-tracked .RS walk. some manpages nest a sub-value
+                // .RS/.RE inside the flag's main .RS block — without
+                // tracking depth here, the inner `.RE` would end the
+                // description early and leave the outer block half-parsed.
+                let mut depth: u32 = 1;
                 i += 1;
-                // inside .RS — collect until .RE or boundary macro
-                while i < lines.len() {
+                while i < lines.len() && depth > 0 {
                     match &lines[i] {
-                        GroffLine::Macro { name, .. } if name == "RE" => {
-                            return (acc.join(" "), i + 1);
-                        }
-                        GroffLine::Text(t) => {
-                            acc.push(t.clone());
+                        GroffLine::Macro { name, .. } if name == "RS" => {
+                            depth += 1;
                             i += 1;
                         }
-                        GroffLine::Macro { name, .. } if name == "PP" || name == "SH" => {
+                        GroffLine::Macro { name, .. } if name == "RE" => {
+                            depth -= 1;
+                            i += 1;
+                        }
+                        GroffLine::Text(t) => {
+                            // skip Text inside nested .RS blocks (sub-value
+                            // listings, not part of the flag's own desc).
+                            if depth == 1 {
+                                acc.push(t.clone());
+                            }
+                            i += 1;
+                        }
+                        GroffLine::Macro { name, .. }
+                            if name == "PP" || name == "SH" || name == "SS" =>
+                        {
+                            // section/paragraph boundary — abort even with
+                            // an unclosed .RS (malformed manpage) so we
+                            // don't run off to EOF.
                             return (acc.join(" "), i);
                         }
                         _ => i += 1,
@@ -421,6 +648,7 @@ pub fn extract_entries(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let pp = count_macro("PP", lines);
     let rs = count_macro("RS", lines);
     let ur = count_macro("UR", lines);
+    let hp = count_macro("HP", lines);
 
     let mut specialized: Vec<(&str, Vec<ManpageEntry>)> = Vec::new();
     if tp > 0 {
@@ -434,6 +662,12 @@ pub fn extract_entries(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     }
     if ur > 0 && ip > 0 {
         specialized.push(("nix", strategy_nix(lines)));
+    }
+    if hp > 0 {
+        specialized.push(("HP", strategy_hp(lines)));
+    }
+    if rs > 0 {
+        specialized.push(("Text+RS", strategy_text_rs(lines)));
     }
     let candidates: Vec<(&str, Vec<ManpageEntry>)> = {
         let filtered: Vec<_> = specialized

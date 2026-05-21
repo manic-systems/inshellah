@@ -815,6 +815,23 @@ fn nushell_module() {
 }
 
 #[test]
+fn long_switch_rejects_dash_only_separator_lines() {
+    // less's `--help` (and therefore zstdless/bzless wrappers) is full of
+    // separator lines like `---------------------------------------------------`.
+    // the first two chars look like a `--` prefix; the rest is just dashes.
+    // without an alphanumeric-first guard, the parser would treat the whole
+    // separator as a flag named `------…`.
+    let r = parse("  ---------------------------------------------------\n  -a, --all                  show all\n");
+    assert_eq!(
+        r.entries.len(),
+        1,
+        "separator should not parse as a flag, got {} entries",
+        r.entries.len()
+    );
+    assert!(matches!(&r.entries[0].switch, Switch::Both('a', l) if *l == "all"));
+}
+
+#[test]
 fn dedup_entries_help() {
     let txt = "  -v, --verbose              verbose output\n  --verbose                  verbose mode\n  -v                         be verbose\n";
     let r = parse(txt);

@@ -69,6 +69,18 @@ pub struct ManpageResult {
     pub description: String,
 }
 
+impl ManpageResult {
+    /// canonicalize the entry list before persistence: fold non-adjacent
+    /// Short/Long pairs into `Both`, then dedup by key. always called once
+    /// at the end of a parse path so the JSON cache holds the canonical
+    /// shape and downstream consumers (runtime completer, static `extern`
+    /// generation) don't have to repeat the work.
+    pub fn normalize(&mut self) {
+        let entries = std::mem::take(&mut self.entries);
+        self.entries = dedup_entries(merge_short_long_pairs(entries));
+    }
+}
+
 impl From<&Switch<'_>> for OwnedSwitch {
     fn from(s: &Switch<'_>) -> Self {
         match s {
@@ -121,8 +133,8 @@ impl From<&Subcommand<'_>> for ManpageSubcommand {
 
 impl From<&HelpResult<'_>> for ManpageResult {
     fn from(r: &HelpResult<'_>) -> Self {
-        ManpageResult {
-            entries: merge_short_long_pairs(r.entries.iter().map(Into::into).collect()),
+        let mut result = ManpageResult {
+            entries: r.entries.iter().map(Into::into).collect(),
             subcommands: r.subcommands.iter().map(Into::into).collect(),
             // positional names are stored lowercased so output is
             // stable across the various places we extract them from
@@ -133,8 +145,91 @@ impl From<&HelpResult<'_>> for ManpageResult {
                 .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
                 .collect(),
             description: r.desc.to_string(),
+        };
+        result.normalize();
+        result
+    }
+}
+
+fn entry_key(e: &ManpageEntry) -> String {
+    match &e.switch {
+        OwnedSwitch::Short(c) => format!("-{c}"),
+        OwnedSwitch::Long(l) | OwnedSwitch::Both(_, l) => format!("--{l}"),
+    }
+}
+
+fn entry_score(e: &ManpageEntry) -> i32 {
+    let switch_bonus = if matches!(e.switch, OwnedSwitch::Both(_, _)) {
+        10
+    } else {
+        0
+    };
+    let param_bonus = if e.param.is_some() { 5 } else { 0 };
+    let desc_bonus = (e.desc.len() / 10).min(5) as i32;
+    switch_bonus + param_bonus + desc_bonus
+}
+
+/// collapse duplicate flag entries that refer to the same flag.
+///
+/// real-world manpages emit duplicates for several reasons:
+///   - clap subcommand pages list inherited global flags alongside the
+///     subcommand's own (e.g. every `homectl <verb>.1` mentions `--json`)
+///   - tools like btrfs document a flag once as a "deprecated alias" and
+///     once under the "Global options" group
+///   - help text occasionally restates a flag in an example block that the
+///     parser also picks up
+///
+/// for each key (the canonical `-c` / `--long` form), we keep the highest
+/// scoring entry: `Both` outranks bare Short/Long, param-bearing outranks
+/// param-less, longer description outranks shorter. after that we strip
+/// standalone Short entries whose char is already covered by a `Both`,
+/// since they're now redundant with the merged form.
+///
+/// preserves original ordering: the surviving entry sits where the first
+/// occurrence of its key appeared.
+pub fn dedup_entries(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+
+    if entries.len() < 2 {
+        return entries;
+    }
+
+    let mut best: HashMap<String, usize> = HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        let key = entry_key(e);
+        match best.get(&key) {
+            Some(&prev) if entry_score(&entries[prev]) >= entry_score(e) => {}
+            _ => {
+                best.insert(key, i);
+            }
         }
     }
+
+    let mut covered: HashSet<char> = HashSet::new();
+    for &idx in best.values() {
+        if let OwnedSwitch::Both(c, _) = &entries[idx].switch {
+            covered.insert(*c);
+        }
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<ManpageEntry> = Vec::with_capacity(entries.len());
+    for e in entries.iter() {
+        let key = entry_key(e);
+        if seen.contains(&key) {
+            continue;
+        }
+        if let OwnedSwitch::Short(c) = &e.switch
+            && covered.contains(c)
+        {
+            continue;
+        }
+        seen.insert(key.clone());
+        let best_idx = *best.get(&key).unwrap();
+        out.push(entries[best_idx].clone());
+    }
+    out
 }
 
 /// merge non-adjacent Short/Long entries that share an identical, non-empty
@@ -224,7 +319,7 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
 /// extraction pipeline.
 pub fn parse_manpage_lines(lines: &[GroffLine]) -> ManpageResult {
     let mut result = parse_manpage_lines_raw(lines);
-    result.entries = merge_short_long_pairs(result.entries);
+    result.normalize();
     result
 }
 
@@ -331,13 +426,13 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
     let subs: Vec<(String, ManpageResult)> = sub_sections
         .into_iter()
         .map(|(name, desc, lines)| {
-            let entries = merge_short_long_pairs(strategies::extract_entries(&lines));
-            let sub_result = ManpageResult {
-                entries,
+            let mut sub_result = ManpageResult {
+                entries: strategies::extract_entries(&lines),
                 subcommands: Vec::new(),
                 positionals: Default::default(),
                 description: desc,
             };
+            sub_result.normalize();
             (name, sub_result)
         })
         .collect();
@@ -386,6 +481,214 @@ write to FILE
 \fB\-h\fR, \fB\-\-help\fR
 show this help and exit
 "#;
+
+    const HP_MANPAGE: &str = r#".TH BAT "1"
+.SH NAME
+bat \- demo
+.SH "OPTIONS"
+.HP
+\fB\-A\fR, \fB\-\-show\-all\fR
+.IP
+Show non-printable characters.
+.HP
+\fB\-\-nonprintable\-notation\fR <notation>
+.IP
+Specify how to display non-printable characters.
+
+Possible values:
+.RS
+.IP "caret"
+Use character sequences like ^G ...
+.IP "unicode"
+Use special Unicode code points ...
+.RE
+.HP
+\fB\-l\fR, \fB\-\-language\fR <language>
+.IP
+Set the language.
+"#;
+
+    #[test]
+    fn hp_strategy_extracts_flags_and_skips_rs_example_values() {
+        // bat's manpage uses .HP for flag tags and nests example values in
+        // .RS/.RE — the parser should pick up the three real flags and
+        // ignore the inner .IP "caret" / .IP "unicode" example tags.
+        let r = parse_manpage_string(HP_MANPAGE);
+        let names: Vec<String> = r
+            .entries
+            .iter()
+            .map(|e| match &e.switch {
+                OwnedSwitch::Long(l) | OwnedSwitch::Both(_, l) => l.clone(),
+                OwnedSwitch::Short(c) => c.to_string(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["show-all", "nonprintable-notation", "language"],
+            "expected 3 flags, got {names:?}"
+        );
+        assert!(
+            !r.entries.iter().any(|e| matches!(
+                &e.switch,
+                OwnedSwitch::Long(l) if l == "caret" || l == "unicode"
+            )),
+            "inner .RS .IP example values must not be picked up as flags: {:?}",
+            r.entries
+        );
+        assert!(matches!(
+            r.entries[0].switch,
+            OwnedSwitch::Both('A', ref l) if l == "show-all"
+        ));
+        assert!(matches!(
+            r.entries[2].switch,
+            OwnedSwitch::Both('l', ref l) if l == "language"
+        ));
+    }
+
+    const TEXT_RS_NESTED_MANPAGE: &str = r#".TH TOOL "1"
+.SH NAME
+tool \- demo
+.SH "OPTIONS"
+.SS INPUT
+\fB\-x\fR, \fB\-\-foo\fR
+.RS 4
+First flag desc. Possible values:
+.RS
+some value
+.RE
+After the inner block.
+.RE
+.sp
+\fB\-y\fR, \fB\-\-bar\fR
+.RS 4
+Second flag desc.
+.RE
+"#;
+
+    #[test]
+    fn text_rs_strategy_handles_nested_rs_in_description() {
+        // when a flag's `.RS` body contains a nested `.RS/.RE` (sub-value
+        // listing), depth tracking in `collect_pp_rs_desc` must keep the
+        // outer block intact instead of ending early at the inner `.RE`.
+        // without it, the second flag's tag (`-y, --bar`) would be
+        // mis-recognized as new top-level text and parsed twice / out of
+        // order, or the first desc would be truncated.
+        let r = parse_manpage_string(TEXT_RS_NESTED_MANPAGE);
+        assert_eq!(r.entries.len(), 2, "expected exactly 2 flags, got {}", r.entries.len());
+        assert!(matches!(
+            r.entries[0].switch,
+            OwnedSwitch::Both('x', ref l) if l == "foo"
+        ));
+        assert!(
+            r.entries[0].desc.contains("First flag desc"),
+            "outer .RS body should be captured, got: {:?}",
+            r.entries[0].desc
+        );
+        assert!(
+            r.entries[0].desc.contains("After the inner block"),
+            "text after the nested .RE must still belong to the outer block, got: {:?}",
+            r.entries[0].desc
+        );
+        assert!(
+            !r.entries[0].desc.contains("some value"),
+            "inner .RS sub-value text should be skipped, got: {:?}",
+            r.entries[0].desc
+        );
+        assert!(matches!(
+            r.entries[1].switch,
+            OwnedSwitch::Both('y', ref l) if l == "bar"
+        ));
+        assert!(r.entries[1].desc.contains("Second flag desc"));
+    }
+
+    const TEXT_RS_MANPAGE: &str = r#".TH RG "1"
+.SH NAME
+rg \- demo
+.SH "OPTIONS"
+.SS INPUT OPTIONS
+\fB\-e\fR \fIPATTERN\fR, \fB\-\-regexp\fR=\fIPATTERN\fR
+.RS 4
+A pattern to search for. This option can be provided multiple times.
+.RE
+.sp
+\fB\-f\fR \fIPATTERNFILE\fR, \fB\-\-file\fR=\fIPATTERNFILE\fR
+.RS 4
+Search for patterns from the given file.
+.RE
+.sp
+\fB\-x\fR, \fB\-\-line\-regexp\fR
+.RS 4
+Only show matches surrounded by line boundaries.
+.RE
+"#;
+
+    #[test]
+    fn text_rs_strategy_extracts_ripgrep_style_flags() {
+        // rg's manpage layout: bare Text tag immediately followed by `.RS/.RE`,
+        // separated by `.sp` — no `.PP` to anchor on. covers both the
+        // `-s PARAM, --long=PARAM` form and the simpler `-s, --long` form.
+        let r = parse_manpage_string(TEXT_RS_MANPAGE);
+        assert_eq!(r.entries.len(), 3, "expected 3 entries, got {}", r.entries.len());
+        // -e, --regexp with PARAM between short and comma
+        assert!(matches!(
+            r.entries[0].switch,
+            OwnedSwitch::Both('e', ref l) if l == "regexp"
+        ));
+        assert!(matches!(
+            r.entries[0].param,
+            Some(OwnedParam::Mandatory(ref p)) if p == "PATTERN"
+        ));
+        assert!(r.entries[0].desc.starts_with("A pattern to search for"));
+        // -f, --file with PARAM
+        assert!(matches!(
+            r.entries[1].switch,
+            OwnedSwitch::Both('f', ref l) if l == "file"
+        ));
+        // -x, --line-regexp without PARAM (plain comma form)
+        assert!(matches!(
+            r.entries[2].switch,
+            OwnedSwitch::Both('x', ref l) if l == "line-regexp"
+        ));
+    }
+
+    const TP_CLAP_DUAL_PARAGRAPH: &str = r#".TH JJ "1"
+.SH NAME
+jj \- demo
+.SH OPTIONS
+.TP
+\fB\-\-at\-operation\fR <OP>
+Operation to load the repo at
+
+Operation to load the repo at. By default, Jujutsu loads the repo at the most recent operation, and lots of additional sentences that go on for paragraphs.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+"#;
+
+    #[test]
+    fn tp_strategy_stops_description_at_blank_line() {
+        // clap-generated manpages emit "summary\n\nexpanded body" — we want
+        // just the summary for completion tooltips, not the multi-paragraph
+        // wall of text. leading blanks (between tag and first body line)
+        // are still skipped, blanks only terminate once we've collected text.
+        let r = parse_manpage_string(TP_CLAP_DUAL_PARAGRAPH);
+        let at_op = r
+            .entries
+            .iter()
+            .find(|e| matches!(&e.switch, OwnedSwitch::Long(l) if l == "at-operation"))
+            .expect("--at-operation entry");
+        assert_eq!(
+            at_op.desc, "Operation to load the repo at",
+            "expected only the summary line, got: {:?}",
+            at_op.desc
+        );
+        // sanity: the second .TP block still parses (we didn't accidentally
+        // swallow the next entry).
+        assert!(r.entries.iter().any(|e| matches!(
+            &e.switch,
+            OwnedSwitch::Both('h', l) if l == "help"
+        )));
+    }
 
     #[test]
     fn tp_strategy_extracts_flags() {

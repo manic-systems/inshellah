@@ -13,12 +13,10 @@
 //!   - escaping special characters for nushell string literals
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use crate::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
-};
+use crate::parsers::manpage::{ManpageEntry, ManpageResult, OwnedParam, OwnedSwitch};
 use crate::types::Positional;
 
 /// nushell built-in commands and keywords — we must never generate `extern`
@@ -246,70 +244,6 @@ pub fn escape_nu(s: &str) -> Cow<'_, str> {
     }
 }
 
-fn entry_key(e: &ManpageEntry) -> String {
-    match &e.switch {
-        OwnedSwitch::Short(c) => format!("-{c}"),
-        OwnedSwitch::Long(l) | OwnedSwitch::Both(_, l) => format!("--{l}"),
-    }
-}
-
-fn entry_score(e: &ManpageEntry) -> i32 {
-    let switch_bonus = if matches!(e.switch, OwnedSwitch::Both(_, _)) {
-        10
-    } else {
-        0
-    };
-    let param_bonus = if e.param.is_some() { 5 } else { 0 };
-    let desc_bonus = (e.desc.len() / 10).min(5) as i32;
-    switch_bonus + param_bonus + desc_bonus
-}
-
-/// deduplicate flag entries that refer to the same flag.
-///
-/// when the same flag appears multiple times (e.g. from overlapping manpage
-/// sections or repeated help text), we keep the "best" version using a score:
-///   - both short+long form present: +10 (most informative)
-///   - has a parameter: +5
-///   - description length bonus: up to +5
-///
-/// after deduplication by long name, we also remove standalone short flags
-/// whose letter is already covered by a Both(short, long) entry. this prevents
-/// emitting both "-v" and "--verbose(-v)" which nushell would reject as a
-/// duplicate. the filtering preserves original ordering from the help text.
-pub fn dedup_entries(entries: &[ManpageEntry]) -> Vec<ManpageEntry> {
-    let mut best: HashMap<String, &ManpageEntry> = HashMap::new();
-    for e in entries {
-        let key = entry_key(e);
-        match best.get(&key) {
-            Some(prev) if entry_score(prev) >= entry_score(e) => {}
-            _ => {
-                best.insert(key, e);
-            }
-        }
-    }
-    let mut covered: HashSet<char> = HashSet::new();
-    for e in best.values() {
-        if let OwnedSwitch::Both(c, _) = &e.switch {
-            covered.insert(*c);
-        }
-    }
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out: Vec<ManpageEntry> = Vec::new();
-    for e in entries {
-        let key = entry_key(e);
-        if seen.contains(&key) {
-            continue;
-        }
-        if let OwnedSwitch::Short(c) = &e.switch
-            && covered.contains(c)
-        {
-            continue;
-        }
-        seen.insert(key.clone());
-        out.push((*best.get(&key).unwrap()).clone());
-    }
-    out
-}
 
 /// format a single flag entry as a nushell `extern` parameter line.
 /// output examples:
@@ -414,7 +348,9 @@ pub fn module_name_of(cmd_name: &str) -> String {
 ///   export extern "git stash" [  # stash changes
 ///   ]
 pub fn generate_extern(cmd_name: &str, result: &ManpageResult) -> String {
-    let entries = dedup_entries(&result.entries);
+    // entries arrive deduped from the parser pipeline (`parse_manpage_lines`
+    // and `From<&HelpResult>` both run `manpage::dedup_entries`), so we can
+    // emit them directly here.
     let escaped_name = escape_nu(cmd_name);
     let positionals = fixup_positionals(result.positionals.clone());
 
@@ -424,7 +360,7 @@ pub fn generate_extern(cmd_name: &str, result: &ManpageResult) -> String {
         out.push_str(&format_positional(name, p));
         out.push('\n');
     }
-    for entry in &entries {
+    for entry in &result.entries {
         out.push_str(&format_flag(entry));
         out.push('\n');
     }
@@ -452,24 +388,3 @@ pub fn generate_module(cmd_name: &str, result: &ManpageResult) -> String {
     )
 }
 
-/// convenience wrapper: generate an `extern` from just a list of entries.
-pub fn generate_extern_from_entries(cmd_name: &str, entries: Vec<ManpageEntry>) -> String {
-    generate_extern(
-        cmd_name,
-        &ManpageResult {
-            entries,
-            subcommands: Vec::new(),
-            positionals: Vec::new(),
-            description: String::new(),
-        },
-    )
-}
-
-/// stub subcommand entry used when extracting subcommands from a parsed
-/// help result for nushell output.
-pub fn manpage_subcommand_from(name: &str, desc: &str) -> ManpageSubcommand {
-    ManpageSubcommand {
-        name: name.to_string(),
-        desc: desc.to_string(),
-    }
-}
