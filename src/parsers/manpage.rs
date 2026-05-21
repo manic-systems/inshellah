@@ -122,7 +122,7 @@ impl From<&Subcommand<'_>> for ManpageSubcommand {
 impl From<&HelpResult<'_>> for ManpageResult {
     fn from(r: &HelpResult<'_>) -> Self {
         ManpageResult {
-            entries: r.entries.iter().map(Into::into).collect(),
+            entries: merge_short_long_pairs(r.entries.iter().map(Into::into).collect()),
             subcommands: r.subcommands.iter().map(Into::into).collect(),
             // positional names are stored lowercased so output is
             // stable across the various places we extract them from
@@ -137,10 +137,98 @@ impl From<&HelpResult<'_>> for ManpageResult {
     }
 }
 
+/// merge non-adjacent Short/Long entries that share an identical, non-empty
+/// description into a single `Both` entry. some manpage styles emit `-h` and
+/// `--help` as independent .TP / .IP blocks rather than as the comma-joined
+/// `-h, --help` form that `combine_short_long_alternates` already handles.
+/// without this pass, two separate completions reach the runtime — and the
+/// completer can't offer the "(aka --help) show help" / "(aka -h) show help"
+/// cross-references that `Both` triggers.
+///
+/// pairing rule (deliberately conservative): a Short and a Long pair up only
+/// when their `desc` fields are byte-equal and non-empty. matching on
+/// description avoids false positives like merging `-n` (number) with
+/// `--no-color`, where the short letter happens to match the long's first
+/// letter but the flags are unrelated. each Short is consumed at most once,
+/// each Long takes at most one Short — repeated descriptions don't cascade.
+pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::collections::hash_map::Entry;
+
+    // index `Both` pairs already present so we never synthesize a duplicate.
+    // some manpages re-state a flag in multiple sections (an OPTIONS body
+    // line `-h, --help` plus a SYNOPSIS-only stub) and the entry list ends
+    // up with all three forms — Both, standalone Short, standalone Long —
+    // for the same flag. without this check, pairing the standalone pair
+    // would emit a second Both with the same (c, l).
+    let mut existing_both: HashSet<(char, &str)> = HashSet::new();
+    for e in entries.iter() {
+        if let OwnedSwitch::Both(c, l) = &e.switch {
+            existing_both.insert((*c, l.as_str()));
+        }
+    }
+
+    let mut short_for_desc: HashMap<&str, (usize, char, Option<OwnedParam>)> = HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        if let OwnedSwitch::Short(c) = &e.switch
+            && !e.desc.is_empty()
+            && let Entry::Vacant(slot) = short_for_desc.entry(e.desc.as_str())
+        {
+            slot.insert((i, *c, e.param.clone()));
+        }
+    }
+    if short_for_desc.is_empty() {
+        return entries;
+    }
+
+    let mut to_drop: HashSet<usize> = HashSet::new();
+    let mut out: Vec<ManpageEntry> = Vec::with_capacity(entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        if let OwnedSwitch::Long(l) = &e.switch
+            && !e.desc.is_empty()
+            && let Some((s_idx, c, s_param)) = short_for_desc.get(e.desc.as_str())
+            && *s_idx != i
+            && !to_drop.contains(s_idx)
+        {
+            if existing_both.contains(&(*c, l.as_str())) {
+                // a Both(c, l) with the same chars already exists, so the
+                // standalone Short+Long pair is redundant — drop both rather
+                // than emit a duplicate Both.
+                to_drop.insert(*s_idx);
+                to_drop.insert(i);
+                out.push(e.clone());
+            } else {
+                to_drop.insert(*s_idx);
+                out.push(ManpageEntry {
+                    switch: OwnedSwitch::Both(*c, l.clone()),
+                    param: e.param.clone().or_else(|| s_param.clone()),
+                    desc: e.desc.clone(),
+                });
+            }
+        } else {
+            out.push(e.clone());
+        }
+    }
+    if to_drop.is_empty() {
+        return out;
+    }
+    out.into_iter()
+        .enumerate()
+        .filter_map(|(i, e)| (!to_drop.contains(&i)).then_some(e))
+        .collect()
+}
+
 /// parse a manpage from its classified lines.
 /// auto-detects mdoc vs groff format. for groff, runs the multi-strategy
 /// extraction pipeline.
 pub fn parse_manpage_lines(lines: &[GroffLine]) -> ManpageResult {
+    let mut result = parse_manpage_lines_raw(lines);
+    result.entries = merge_short_long_pairs(result.entries);
+    result
+}
+
+fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
     if mdoc::is_mdoc(lines) {
         mdoc::parse_mdoc_lines(lines)
     } else {
@@ -243,7 +331,7 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
     let subs: Vec<(String, ManpageResult)> = sub_sections
         .into_iter()
         .map(|(name, desc, lines)| {
-            let entries = strategies::extract_entries(&lines);
+            let entries = merge_short_long_pairs(strategies::extract_entries(&lines));
             let sub_result = ManpageResult {
                 entries,
                 subcommands: Vec::new(),
@@ -331,5 +419,136 @@ show this help and exit
     fn groff_escapes_stripped() {
         let stripped = groff::strip_groff_escapes("\\fB\\-v\\fR \\fIfile\\fR");
         assert_eq!(stripped.trim(), "-v file");
+    }
+
+    fn entry(switch: OwnedSwitch, desc: &str) -> ManpageEntry {
+        ManpageEntry {
+            switch,
+            param: None,
+            desc: desc.to_string(),
+        }
+    }
+
+    #[test]
+    fn merges_non_adjacent_short_long_with_identical_desc() {
+        let entries = vec![
+            entry(OwnedSwitch::Short('h'), "show help"),
+            entry(OwnedSwitch::Long("verbose".to_string()), "be verbose"),
+            entry(OwnedSwitch::Long("help".to_string()), "show help"),
+        ];
+        let merged = merge_short_long_pairs(entries);
+        assert_eq!(merged.len(), 2, "expected the short to fold into the long");
+        assert!(matches!(
+            merged[0].switch,
+            OwnedSwitch::Long(ref l) if l == "verbose"
+        ));
+        assert!(matches!(
+            merged[1].switch,
+            OwnedSwitch::Both('h', ref l) if l == "help"
+        ));
+    }
+
+    #[test]
+    fn merge_skips_empty_or_mismatched_descriptions() {
+        let entries = vec![
+            entry(OwnedSwitch::Short('q'), ""),
+            entry(OwnedSwitch::Long("quiet".to_string()), ""),
+            entry(OwnedSwitch::Short('n'), "number of results"),
+            entry(OwnedSwitch::Long("no-color".to_string()), "disable colors"),
+        ];
+        let merged = merge_short_long_pairs(entries);
+        assert_eq!(merged.len(), 4, "no pair should merge");
+        assert!(matches!(merged[0].switch, OwnedSwitch::Short('q')));
+        assert!(matches!(merged[1].switch, OwnedSwitch::Long(ref l) if l == "quiet"));
+        assert!(matches!(merged[2].switch, OwnedSwitch::Short('n')));
+        assert!(matches!(merged[3].switch, OwnedSwitch::Long(ref l) if l == "no-color"));
+    }
+
+    #[test]
+    fn merge_pairs_each_short_at_most_once() {
+        // two longs share a description with a single short — the first long
+        // wins, the second stays as-is.
+        let entries = vec![
+            entry(OwnedSwitch::Short('h'), "show help"),
+            entry(OwnedSwitch::Long("help".to_string()), "show help"),
+            entry(OwnedSwitch::Long("usage".to_string()), "show help"),
+        ];
+        let merged = merge_short_long_pairs(entries);
+        assert_eq!(merged.len(), 2);
+        assert!(matches!(
+            merged[0].switch,
+            OwnedSwitch::Both('h', ref l) if l == "help"
+        ));
+        assert!(matches!(
+            merged[1].switch,
+            OwnedSwitch::Long(ref l) if l == "usage"
+        ));
+    }
+
+    #[test]
+    fn merge_drops_redundant_pair_when_both_already_present() {
+        let entries = vec![
+            ManpageEntry {
+                switch: OwnedSwitch::Both('h', "help".to_string()),
+                param: None,
+                desc: "show help".to_string(),
+            },
+            entry(OwnedSwitch::Short('h'), "show help"),
+            entry(OwnedSwitch::Long("help".to_string()), "show help"),
+        ];
+        let merged = merge_short_long_pairs(entries);
+        assert_eq!(
+            merged.len(),
+            1,
+            "standalone short+long should drop when a Both with matching (c, l) already exists"
+        );
+        assert!(matches!(
+            merged[0].switch,
+            OwnedSwitch::Both('h', ref l) if l == "help"
+        ));
+    }
+
+    #[test]
+    fn merge_still_pairs_when_existing_both_has_different_long() {
+        // a Both('v', "verbose") is in scope, but the standalone pair is
+        // ('v', "version") — different long, so the pair should merge into
+        // Both('v', "version") rather than being dropped as redundant.
+        let entries = vec![
+            ManpageEntry {
+                switch: OwnedSwitch::Both('v', "verbose".to_string()),
+                param: None,
+                desc: "be verbose".to_string(),
+            },
+            entry(OwnedSwitch::Short('v'), "print version"),
+            entry(OwnedSwitch::Long("version".to_string()), "print version"),
+        ];
+        let merged = merge_short_long_pairs(entries);
+        assert_eq!(merged.len(), 2);
+        assert!(matches!(
+            merged[0].switch,
+            OwnedSwitch::Both('v', ref l) if l == "verbose"
+        ));
+        assert!(matches!(
+            merged[1].switch,
+            OwnedSwitch::Both('v', ref l) if l == "version"
+        ));
+    }
+
+    #[test]
+    fn merge_carries_short_param_when_long_has_none() {
+        let entries = vec![
+            ManpageEntry {
+                switch: OwnedSwitch::Short('o'),
+                param: Some(OwnedParam::Mandatory("FILE".to_string())),
+                desc: "write output".to_string(),
+            },
+            entry(OwnedSwitch::Long("output".to_string()), "write output"),
+        ];
+        let merged = merge_short_long_pairs(entries);
+        assert_eq!(merged.len(), 1);
+        match &merged[0].param {
+            Some(OwnedParam::Mandatory(p)) => assert_eq!(p, "FILE"),
+            other => panic!("expected param carried over, got {other:?}"),
+        }
     }
 }
