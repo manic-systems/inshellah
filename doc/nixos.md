@@ -73,6 +73,14 @@ programs.inshellah = {
   # default of 200ms)
   timeoutMs = null;
 
+  # timeout in ms for live dynamic completions at tab-completion time
+  # set to 0 to disable the runtime timeout
+  dynamicTimeoutMs = 5000;
+
+  # result cap requested from live providers that support native limits
+  # set to 0 to omit native result-limit flags
+  dynamicLimit = 200;
+
   # worker-thread count for the parallel scrape
   workers = null;
 };
@@ -109,6 +117,14 @@ $env.config.completions.external = { ... }
 the snippet provides both static lookups against the system index and
 runtime fallbacks for cases the static index can't cover:
 
+runtime fallbacks have a default 5s timeout, controlled by
+`programs.inshellah.dynamicTimeoutMs` or `INSHELLAH_DYNAMIC_TIMEOUT_MS`
+when sourcing the snippet manually. providers with native result caps use
+`programs.inshellah.dynamicLimit` or `INSHELLAH_DYNAMIC_LIMIT`, defaulting
+to 200. set either value to 0 to disable that guard. on timeout the
+completer returns `null` so nushell can fall back to its normal completion
+behavior.
+
 | command | dynamic source |
 |---|---|
 | `nix` | flake refs via `NIX_GET_COMPLETIONS`, with optional `meta.description` |
@@ -120,6 +136,7 @@ runtime fallbacks for cases the static index can't cover:
 | `docker` / `podman` | containers + image refs by subcommand |
 | `kubectl` | resource names from the live cluster |
 | `git` | refs + worktree paths |
+| `jj` | revisions, operations, bookmarks, remotes, files, and workspaces |
 | `npm` / `pnpm` / `yarn` | scripts from package.json |
 | `make` / `just` | targets / recipes |
 | `cargo` | workspace targets behind `--bin` / `--example` / etc. |

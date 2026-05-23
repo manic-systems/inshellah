@@ -110,6 +110,28 @@ in
       '';
     };
 
+    dynamicTimeoutMs = lib.mkOption {
+      type = lib.types.int;
+      default = 5000;
+      example = 2000;
+      description = ''
+        timeout in milliseconds for live dynamic completions in the nushell
+        shim. this bounds runtime calls such as nix, jj, kubectl, and systemctl.
+        set to 0 to disable the runtime timeout.
+      '';
+    };
+
+    dynamicLimit = lib.mkOption {
+      type = lib.types.int;
+      default = 200;
+      example = 100;
+      description = ''
+        maximum number of results requested from live dynamic completion
+        providers when they expose a native result limit. set to 0 to omit
+        native result-limit flags.
+      '';
+    };
+
     workers = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
       default = null;
@@ -131,6 +153,9 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    environment.variables.INSHELLAH_DYNAMIC_TIMEOUT_MS = toString cfg.dynamicTimeoutMs;
+    environment.variables.INSHELLAH_DYNAMIC_LIMIT = toString cfg.dynamicLimit;
+
     environment.systemPackages =
       let
         systemDir = "/run/current-system/sw${cfg.completionsPath}";

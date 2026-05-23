@@ -68,6 +68,9 @@
           fakeNix = pkgs.writeShellScriptBin "nix" ''
             if [ "''${1:-}" = eval ]; then
               printf 'raw package description\n'
+            elif [ "''${1:-}" = slow ]; then
+              sleep 1
+              printf 'header\nslow-package\n'
             else
               printf 'header\nbuild\nflake#pkg\n'
             fi
@@ -101,6 +104,9 @@
                 printf 'origin\nupstream\n'
                 ;;
               for-each-ref)
+                if [ -n "''${INSHELLAH_GIT_ARGS_FILE:-}" ]; then
+                  printf '%s\n' "$*" > "$INSHELLAH_GIT_ARGS_FILE"
+                fi
                 case "$*" in
                   *"refs/heads refs/remotes refs/tags"*)
                     printf 'main\tcommit\tMain branch\norigin/main\tcommit\tRemote main\nv1.0\tcommit\tRelease 1\n'
@@ -210,9 +216,30 @@
             echo "running nushell shim checks"
             export PATH="${fakeCompletionBackends}/bin:$PATH"
             export KUBECTL_ARGS_FILE="$TMPDIR/kubectl.args"
+            export INSHELLAH_GIT_ARGS_FILE="$TMPDIR/git.args"
             export INSHELLAH_STATIC_FILE="$TMPDIR/inshellah-static.json"
+            export INSHELLAH_DYNAMIC_TIMEOUT_MS=50
             : > "$INSHELLAH_STATIC_FILE"
             nu --no-config-file -c 'source ${./nix/inshellah-completer.nu}; source ${./tests/nushell-completer.nu}'
+            INSHELLAH_DYNAMIC_TIMEOUT_MS=0 nu --no-config-file -c '
+              source ${./nix/inshellah-completer.nu}
+              "" | save --force $env.INSHELLAH_STATIC_FILE
+              let completer = $env.config.completions.external.completer
+              let slow = do $completer [nix slow ""]
+              if (($slow | get 0.value) != "slow-package") {
+                error make {msg: "dynamic timeout 0 should disable timeout"}
+              }
+            '
+            INSHELLAH_DYNAMIC_LIMIT=0 nu --no-config-file -c '
+              source ${./nix/inshellah-completer.nu}
+              "[]" | save --force $env.INSHELLAH_STATIC_FILE
+              "" | save --force $env.INSHELLAH_GIT_ARGS_FILE
+              let completer = $env.config.completions.external.completer
+              do $completer [git fetch origin ""]
+              if ((open $env.INSHELLAH_GIT_ARGS_FILE) | str contains "--count") {
+                error make {msg: "dynamic limit 0 should omit provider limit flags"}
+              }
+            '
             cat > "$TMPDIR/config-load.nu" <<'EOF'
             source ${./nix/inshellah-completer.nu}
 

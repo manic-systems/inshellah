@@ -13,6 +13,47 @@ let inshellah_nonempty = { |items|
     if ($result | is-empty) { null } else { $result }
 }
 
+let inshellah_default_dynamic_timeout_ms = 5000
+
+let inshellah_dynamic_timeout_ms = do {
+    let raw = (try {
+        $env.INSHELLAH_DYNAMIC_TIMEOUT_MS? | default $inshellah_default_dynamic_timeout_ms | into int
+    } catch { $inshellah_default_dynamic_timeout_ms })
+    if $raw >= 0 { $raw } else { $inshellah_default_dynamic_timeout_ms }
+}
+
+let inshellah_dynamic_timeout = ($inshellah_dynamic_timeout_ms * 1ms)
+
+let inshellah_default_dynamic_limit = 200
+
+let inshellah_dynamic_limit = do {
+    let raw = (try {
+        $env.INSHELLAH_DYNAMIC_LIMIT? | default $inshellah_default_dynamic_limit | into int
+    } catch { $inshellah_default_dynamic_limit })
+    if $raw >= 0 { $raw } else { $inshellah_default_dynamic_limit }
+}
+
+let inshellah_limit_args = { |flag|
+    if $inshellah_dynamic_limit == 0 { [] } else { [$flag $inshellah_dynamic_limit] }
+}
+
+let inshellah_with_timeout = { |body|
+    if $inshellah_dynamic_timeout_ms == 0 {
+        try { do $body } catch { null }
+    } else {
+        let tag = random int 1..2147483647
+        let job_id = job spawn {
+            do $body | job send --tag $tag 0
+        }
+        try {
+            job recv --tag $tag --timeout $inshellah_dynamic_timeout
+        } catch {
+            try { job kill $job_id } catch { null }
+            null
+        }
+    }
+}
+
 let inshellah_fuzzy_score = { |needle, haystack|
     let needle = $needle | default "" | into string
     let haystack = $haystack | default "" | into string
@@ -189,7 +230,7 @@ let inshellah_kubectl_names = { |kind, spans|
 
 let inshellah_git_refs = { ||
     try {
-        ^git for-each-ref --format='%(refname:short)%09%(objecttype)%09%(contents:subject)' refs/heads refs/remotes refs/tags
+        ^git for-each-ref ...(do $inshellah_limit_args "--count") --format='%(refname:short)%09%(objecttype)%09%(contents:subject)' refs/heads refs/remotes refs/tags
             | lines
             | each { |l|
                 let p = $l | split row "\t"
@@ -200,7 +241,7 @@ let inshellah_git_refs = { ||
 
 let inshellah_git_branches = { ||
     try {
-        ^git for-each-ref --format='%(refname:short)%09%(contents:subject)' refs/heads
+        ^git for-each-ref ...(do $inshellah_limit_args "--count") --format='%(refname:short)%09%(contents:subject)' refs/heads
             | lines
             | each { |l|
                 let p = $l | split row "\t"
@@ -211,7 +252,7 @@ let inshellah_git_branches = { ||
 
 let inshellah_git_tags = { ||
     try {
-        ^git for-each-ref --format='%(refname:short)%09%(contents:subject)' refs/tags
+        ^git for-each-ref ...(do $inshellah_limit_args "--count") --format='%(refname:short)%09%(contents:subject)' refs/tags
             | lines
             | each { |l|
                 let p = $l | split row "\t"
@@ -232,7 +273,7 @@ let inshellah_git_remotes = { ||
 
 let inshellah_git_stashes = { ||
     try {
-        ^git stash list
+        ^git stash list ...(do $inshellah_limit_args "-n")
             | lines
             | each { |l|
                 let m = $l | parse -r '^(?P<stash>stash@\{[0-9]+\}):\s*(?P<desc>.*)$'
@@ -289,7 +330,7 @@ let inshellah_git_worktrees = { ||
 
 let inshellah_jj_revs = { ||
     try {
-        ^jj log --ignore-working-copy --no-graph -r 'all()' -T 'change_id.shortest() ++ "\t" ++ description.first_line() ++ "\n"' err> /dev/null
+        ^jj log --ignore-working-copy --no-graph ...(do $inshellah_limit_args "-n") -r 'all()' -T 'change_id.shortest() ++ "\t" ++ description.first_line() ++ "\n"' err> /dev/null
             | lines
             | each { |l|
                 let p = $l | split row "\t"
@@ -331,7 +372,7 @@ let inshellah_jj_remotes = { ||
 
 let inshellah_jj_ops = { ||
     try {
-        ^jj op log --ignore-working-copy --no-graph -T 'id.short() ++ "\t" ++ description.first_line() ++ "\n"' err> /dev/null
+        ^jj op log --ignore-working-copy --no-graph ...(do $inshellah_limit_args "-n") -T 'id.short() ++ "\t" ++ description.first_line() ++ "\n"' err> /dev/null
             | lines
             | each { |l|
                 let p = $l | split row "\t"
@@ -368,6 +409,7 @@ let inshellah_complete = { |spans|
     let sub = if $span_len >= 2 { $spans | get 1 } else { "" }
 
     let additional = if ($completions == null and $span_len > 0) {
+        do $inshellah_with_timeout {
         match $spans.0 {
             "nix" => {
                 if $span_len < 2 {
@@ -425,7 +467,7 @@ let inshellah_complete = { |spans|
                 if (($sub in $unit_verbs) and $span_len >= 3) {
                     let units = (do $inshellah_unit_candidates [] $last_span | default [])
                     let pids = (try {
-                        ^coredumpctl list --no-pager --no-legend
+                        ^coredumpctl list ...(do $inshellah_limit_args "-n") --no-pager --no-legend
                             | lines
                             | each { |l|
                                 let p = $l | split row -r '\s+'
@@ -502,7 +544,7 @@ let inshellah_complete = { |spans|
                 let need_image = ["run" "rmi" "tag" "push" "pull" "history" "save" "create"]
                 if ($sub in $need_container) {
                     try {
-                        ^($spans.0) ps -a --format '{{.Names}}\t{{.Image}}'
+                        ^($spans.0) ps ...(do $inshellah_limit_args "--last") --format '{{.Names}}\t{{.Image}}'
                             | lines | each { |l|
                                 let p = $l | split row "\t"
                                 if ($p | length) >= 2 { {value: $p.0, description: $p.1} }
@@ -800,6 +842,7 @@ let inshellah_complete = { |spans|
                 } catch { null }
             }
             _ => { null }
+        }
         }
     } else { null }
 

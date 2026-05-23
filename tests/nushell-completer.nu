@@ -42,6 +42,8 @@ let nix_commands = do $completer [nix ""]
 assert-eq ($nix_commands | get 0.value) "build" "nix command completion uses NIX_GET_COMPLETIONS"
 let nix_pkg = do $completer [nix "flake#pkg"]
 assert-eq ($nix_pkg | get 0.description) "raw package description" "nix descriptions are raw strings"
+let nix_slow = do $completer [nix slow ""]
+assert-eq $nix_slow null "slow dynamic completions time out"
 
 let systemctl_empty = do $completer [systemctl daemon-reload ""]
 assert-eq $systemctl_empty null "systemctl does not offer units for non-unit verbs"
