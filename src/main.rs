@@ -11,8 +11,9 @@
 //!   completions         emit nushell completion definitions for inshellah itself
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -815,6 +816,26 @@ mod main_tests {
             &binary_names
         ));
     }
+
+    #[test]
+    fn fuzzy_score_keeps_completion_ranking_shape() {
+        assert_eq!(fuzzy_score("", "build"), 1);
+        assert_eq!(fuzzy_score("build", "build"), 1000);
+        assert_eq!(fuzzy_score("BUILD", "build"), 1000);
+        assert_eq!(fuzzy_score("bl", "build"), 60);
+        assert_eq!(fuzzy_score("bl", "bundle"), 60);
+        assert_eq!(fuzzy_score("bl", "branch-list"), 100);
+        assert_eq!(fuzzy_score("bl", "blacklist"), 922);
+        assert_eq!(fuzzy_score("bl", "table"), 40);
+    }
+
+    #[test]
+    fn completion_json_escapes_without_changing_shape() {
+        assert_eq!(
+            completion_json("a\"b", "line\nnext"),
+            r#"{"value":"a\"b","description":"line\nnext"}"#
+        );
+    }
 }
 
 /// shared state passed to every pool worker. nothing inside mutates
@@ -1209,8 +1230,8 @@ fn command_name_for_path(path: &Path) -> Option<String> {
 /// - subsequence match: per-character score with bonuses for word boundaries
 ///   and consecutive matches
 fn fuzzy_score(needle: &str, haystack: &str) -> i32 {
-    let needle_len = needle.chars().count();
-    let haystack_len = haystack.chars().count();
+    let needle_len = needle.len();
+    let haystack_len = haystack.len();
     if needle_len == 0 {
         return 1;
     }
@@ -1221,47 +1242,49 @@ fn fuzzy_score(needle: &str, haystack: &str) -> i32 {
         return 1000;
     }
 
-    let needle_lc = needle.to_ascii_lowercase();
-    let haystack_lc = haystack.to_ascii_lowercase();
-    if haystack_lc.starts_with(&needle_lc) {
+    let needle = needle.as_bytes();
+    let haystack = haystack.as_bytes();
+    if starts_with_ignore_ascii_case(haystack, needle) {
         return 900 + (needle_len as i32 * 100 / haystack_len as i32);
     }
-
-    let needle_chars: Vec<char> = needle_lc.chars().collect();
-    let haystack_chars: Vec<char> = haystack.chars().collect();
-    let haystack_lc_chars: Vec<char> = haystack_lc.chars().collect();
 
     let mut needle_idx = 0usize;
     let mut score = 0i32;
     let mut prev_match: Option<usize> = None;
 
-    for (hay_idx, c) in haystack_lc_chars.iter().enumerate() {
+    for (hay_idx, &c) in haystack.iter().enumerate() {
         if needle_idx >= needle_len {
             break;
         }
-        if *c != needle_chars[needle_idx] {
+        if c.eq_ignore_ascii_case(&needle[needle_idx]) {
+            let boundary = hay_idx == 0
+                || haystack[hay_idx - 1] == b'-'
+                || haystack[hay_idx - 1] == b'_'
+                || (haystack[hay_idx - 1].is_ascii_lowercase()
+                    && haystack[hay_idx].is_ascii_uppercase());
+            let consecutive = prev_match == Some(hay_idx.saturating_sub(1));
+            score += if boundary { 50 } else { 10 };
+            if consecutive {
+                score += 20;
+            }
+            needle_idx += 1;
+            prev_match = Some(hay_idx);
             continue;
         }
-
-        let boundary = hay_idx == 0
-            || haystack_chars[hay_idx - 1] == '-'
-            || haystack_chars[hay_idx - 1] == '_'
-            || (haystack_chars[hay_idx - 1].is_ascii_lowercase()
-                && haystack_chars[hay_idx].is_ascii_uppercase());
-        let consecutive = prev_match == Some(hay_idx.saturating_sub(1));
-        score += if boundary { 50 } else { 10 };
-        if consecutive {
-            score += 20;
-        }
-        needle_idx += 1;
-        prev_match = Some(hay_idx);
     }
 
     if needle_idx == needle_len { score } else { 0 }
 }
 
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len()
+        && haystack
+            .iter()
+            .zip(needle)
+            .all(|(&hay, &needle)| hay.eq_ignore_ascii_case(&needle))
+}
+
+fn push_json_escaped(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -1269,26 +1292,58 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
-    out
 }
 
 fn completion_json(value: &str, desc: &str) -> String {
-    format!(
-        r#"{{"value":"{}","description":"{}"}}"#,
-        json_escape(value),
-        json_escape(desc)
-    )
+    let mut out = String::with_capacity(value.len() + desc.len() + 30);
+    out.push_str(r#"{"value":""#);
+    push_json_escaped(&mut out, value);
+    out.push_str(r#"","description":""#);
+    push_json_escaped(&mut out, desc);
+    out.push_str(r#""}"#);
+    out
+}
+
+fn entry_completion_desc(e: &ManpageEntry) -> String {
+    match &e.param {
+        Some(OwnedParam::Mandatory(p)) => {
+            if e.desc.is_empty() {
+                format!("<{p}>")
+            } else {
+                format!("{} <{p}>", e.desc)
+            }
+        }
+        Some(OwnedParam::Optional(p)) => {
+            if e.desc.is_empty() {
+                format!("[{p}]")
+            } else {
+                format!("{} [{p}]", e.desc)
+            }
+        }
+        None => e.desc.clone(),
+    }
 }
 
 fn print_completion_candidates(candidates: &[String]) {
     if candidates.is_empty() {
         println!("null");
     } else {
-        println!("[{}]", candidates.join(","));
+        let mut out = io::stdout().lock();
+        out.write_all(b"[").expect("write completion output");
+        for (idx, candidate) in candidates.iter().enumerate() {
+            if idx > 0 {
+                out.write_all(b",").expect("write completion output");
+            }
+            out.write_all(candidate.as_bytes())
+                .expect("write completion output");
+        }
+        out.write_all(b"]\n").expect("write completion output");
     }
 }
 
@@ -1299,52 +1354,52 @@ struct AdbDevice {
     transport_id: Option<String>,
 }
 
-enum AdbDeviceCompletion {
+enum AdbDeviceCompletion<'a> {
     Serial {
-        prefix: String,
-        replacement_prefix: String,
+        prefix: &'a str,
+        replacement_prefix: &'static str,
     },
     TransportId {
-        prefix: String,
-        replacement_prefix: String,
+        prefix: &'a str,
+        replacement_prefix: &'static str,
     },
 }
 
-fn adb_device_completion(rest: &[String]) -> Option<AdbDeviceCompletion> {
+fn adb_device_completion(rest: &[String]) -> Option<AdbDeviceCompletion<'_>> {
     if !adb_command_tokens(rest).is_empty() {
         return None;
     }
     let current = rest.last().map(String::as_str).unwrap_or("");
     if let Some(prefix) = current.strip_prefix("--serial=") {
         return Some(AdbDeviceCompletion::Serial {
-            prefix: prefix.to_string(),
-            replacement_prefix: "--serial=".to_string(),
+            prefix,
+            replacement_prefix: "--serial=",
         });
     }
     if let Some(prefix) = current.strip_prefix("--one-device=") {
         return Some(AdbDeviceCompletion::Serial {
-            prefix: prefix.to_string(),
-            replacement_prefix: "--one-device=".to_string(),
+            prefix,
+            replacement_prefix: "--one-device=",
         });
     }
     if let Some(prefix) = current.strip_prefix("--transport-id=") {
         return Some(AdbDeviceCompletion::TransportId {
-            prefix: prefix.to_string(),
-            replacement_prefix: "--transport-id=".to_string(),
+            prefix,
+            replacement_prefix: "--transport-id=",
         });
     }
     if rest.len() >= 2 {
         let prev = rest[rest.len() - 2].as_str();
         if prev == "-s" || prev == "--serial" || prev == "--one-device" {
             return Some(AdbDeviceCompletion::Serial {
-                prefix: current.to_string(),
-                replacement_prefix: String::new(),
+                prefix: current,
+                replacement_prefix: "",
             });
         }
         if prev == "-t" || prev == "--transport-id" {
             return Some(AdbDeviceCompletion::TransportId {
-                prefix: current.to_string(),
-                replacement_prefix: String::new(),
+                prefix: current,
+                replacement_prefix: "",
             });
         }
     }
@@ -1420,7 +1475,7 @@ fn is_adb_device_state(state: &str) -> bool {
 
 fn adb_device_candidates(
     path: &Path,
-    completion: AdbDeviceCompletion,
+    completion: AdbDeviceCompletion<'_>,
     timeout_ms: u64,
 ) -> Vec<String> {
     let args = vec![
@@ -1476,11 +1531,9 @@ fn prefix_score(prefix: &str, value: &str) -> i32 {
     if prefix.is_empty() {
         return 1;
     }
-    let prefix = prefix.to_ascii_lowercase();
-    let value = value.to_ascii_lowercase();
-    if prefix == value {
+    if prefix.len() == value.len() && prefix.eq_ignore_ascii_case(value) {
         1000
-    } else if value.starts_with(&prefix) {
+    } else if starts_with_ignore_ascii_case(value.as_bytes(), prefix.as_bytes()) {
         900
     } else {
         0
@@ -1579,22 +1632,14 @@ fn package_prefix_for_arg_tail<'a>(args: &[&'a str], value_flags: &[&str]) -> Op
     (positional_count == 0).then_some(current)
 }
 
-fn parse_adb_packages(output: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in output.lines() {
-        let Some(package) = line.trim().strip_prefix("package:") else {
-            continue;
-        };
-        let package = package
-            .rsplit_once('=')
-            .map(|(_, rhs)| rhs)
-            .unwrap_or(package);
-        let package = package.trim();
-        if !package.is_empty() {
-            out.push(package.to_string());
-        }
-    }
-    out
+fn parse_adb_package_line(line: &str) -> Option<&str> {
+    let package = line.trim().strip_prefix("package:")?;
+    let package = package
+        .rsplit_once('=')
+        .map(|(_, rhs)| rhs)
+        .unwrap_or(package)
+        .trim();
+    (!package.is_empty()).then_some(package)
 }
 
 fn adb_package_candidates(
@@ -1614,10 +1659,10 @@ fn adb_package_candidates(
         return Vec::new();
     };
     let mut scored = Vec::new();
-    for package in parse_adb_packages(&output) {
-        let score = prefix_score(prefix, &package);
+    for package in output.lines().filter_map(parse_adb_package_line) {
+        let score = prefix_score(prefix, package);
         if score > 0 {
-            scored.push((score, completion_json(&package, "package")));
+            scored.push((score, completion_json(package, "package")));
         }
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0));
@@ -1907,10 +1952,31 @@ fn cmd_complete(
     }
 
     let typing_flag = last_token.starts_with('-') && !last_token.is_empty();
+    let fallback_subcommands = match &found {
+        Some((matched_name, r, _)) if r.subcommands.is_empty() => {
+            subcommands_of(&dirs, matched_name)
+        }
+        _ => Vec::new(),
+    };
+    let has_subs = match &found {
+        Some((_, r, _)) => !r.subcommands.is_empty() || !fallback_subcommands.is_empty(),
+        None => false,
+    };
     let candidates: Vec<String> = match &found {
         None => Vec::new(),
-        Some((matched_name, r, depth)) => {
-            let mut scored: Vec<(i32, String)> = Vec::new();
+        Some((_, r, depth)) => {
+            let subs: &[ManpageSubcommand] = if !r.subcommands.is_empty() {
+                &r.subcommands
+            } else {
+                &fallback_subcommands
+            };
+            let mut scored: Vec<(i32, String)> = Vec::with_capacity(
+                (if *depth >= resolve_depth {
+                    subs.len()
+                } else {
+                    0
+                }) + if typing_flag { r.entries.len() } else { 0 },
+            );
             // subcommand candidates (skip if match is too shallow). when
             // `systemctl status` isn't in the cache, `find_result` falls
             // back to `systemctl` at depth 1; we must NOT then offer
@@ -1924,12 +1990,7 @@ fn cmd_complete(
             // drop it. the user has already written the full word; echoing
             // it back masks any downstream dynamic completer.
             if *depth >= resolve_depth {
-                let subs: Vec<ManpageSubcommand> = if !r.subcommands.is_empty() {
-                    r.subcommands.clone()
-                } else {
-                    subcommands_of(&dirs, matched_name)
-                };
-                for sc in &subs {
+                for sc in subs {
                     if !last_token.is_empty() && last_token == sc.name {
                         continue;
                     }
@@ -1942,58 +2003,45 @@ fn cmd_complete(
             // flag candidates
             if typing_flag {
                 for e in &r.entries {
-                    let base_desc = match &e.param {
-                        Some(OwnedParam::Mandatory(p)) => {
-                            if e.desc.is_empty() {
-                                format!("<{p}>")
-                            } else {
-                                format!("{} <{p}>", e.desc)
-                            }
+                    let (flag, aka, score) = match &e.switch {
+                        OwnedSwitch::Long(l) => {
+                            let flag = format!("--{l}");
+                            let score = fuzzy_score(&last_token, &flag);
+                            (flag, None, score)
                         }
-                        Some(OwnedParam::Optional(p)) => {
-                            if e.desc.is_empty() {
-                                format!("[{p}]")
-                            } else {
-                                format!("{} [{p}]", e.desc)
-                            }
+                        OwnedSwitch::Short(c) => {
+                            let flag = format!("-{c}");
+                            let score = fuzzy_score(&last_token, &flag);
+                            (flag, None, score)
                         }
-                        None => e.desc.clone(),
-                    };
-                    let (flag, desc) = match &e.switch {
-                        OwnedSwitch::Long(l) => (format!("--{l}"), base_desc),
-                        OwnedSwitch::Short(c) => (format!("-{c}"), base_desc),
                         OwnedSwitch::Both(c, l) => {
                             let long_flag = format!("--{l}");
                             let short_flag = format!("-{c}");
                             let ls = fuzzy_score(&last_token, &long_flag);
                             let ss = fuzzy_score(&last_token, &short_flag);
                             if ss > ls {
-                                (short_flag, format!("(aka {long_flag}) {base_desc}"))
+                                (short_flag, Some(long_flag), ss)
                             } else {
-                                (long_flag.clone(), format!("(aka {short_flag}) {base_desc}"))
+                                (long_flag, Some(short_flag), ls)
                             }
                         }
                     };
                     if !last_token.is_empty() && last_token == flag {
                         continue;
                     }
-                    let s = fuzzy_score(&last_token, &flag);
-                    if s > 0 {
-                        scored.push((s, completion_json(&flag, &desc)));
+                    if score > 0 {
+                        let base_desc = entry_completion_desc(e);
+                        let desc = match aka {
+                            Some(aka) => format!("(aka {aka}) {base_desc}"),
+                            None => base_desc,
+                        };
+                        scored.push((score, completion_json(&flag, &desc)));
                     }
                 }
             }
             scored.sort_by(|a, b| b.0.cmp(&a.0));
             scored.into_iter().map(|(_, json)| json).collect()
         }
-    };
-
-    // protocol: null = hand off to nushell's file completer; [...] = our candidates
-    let has_subs = match &found {
-        Some((matched_name, r, _)) => {
-            !r.subcommands.is_empty() || !subcommands_of(&dirs, matched_name).is_empty()
-        }
-        None => false,
     };
     // hand off at non-flag leaf positions so file and dynamic completers can
     // answer argument prefixes. when the token starts with "-", keep flags.

@@ -589,14 +589,15 @@ pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand>
             continue;
         };
         for entry in entries.flatten() {
-            let Some(filename) = entry.file_name().to_str().map(|s| s.to_string()) else {
+            let filename = entry.file_name();
+            let Some(filename) = filename.to_str() else {
                 continue;
             };
             if !filename.starts_with(&prefix) {
                 continue;
             }
             let is_json = filename.ends_with(".json");
-            let Some(base) = chop_extension(&filename) else {
+            let Some(base) = chop_extension(filename) else {
                 continue;
             };
             let rest = &base[prefix.len()..];
