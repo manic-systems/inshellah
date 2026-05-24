@@ -20,6 +20,7 @@ fn inshellah_completions_include_all_subcommands() {
         "complete",
         "query",
         "dump",
+        "purge",
         "completions",
     ] {
         let extern_name = format!("export extern \"inshellah {subcommand}\"");

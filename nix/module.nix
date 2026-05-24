@@ -241,7 +241,7 @@ in
         dirPaths = lib.concatStringsSep ":" ([ systemDir ] ++ cfg.extraDirs);
         wrapped = pkgs.writeShellScriptBin "inshellah" ''
           case "''${1:-}" in
-            complete|query|dump)
+            complete|query|dump|purge)
               exec ${cfg.package}/bin/inshellah "$@" --dir "''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}"
               ;;
             *)

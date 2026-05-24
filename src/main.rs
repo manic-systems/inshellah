@@ -31,7 +31,7 @@ use inshellah::parsers::nushell::{generate_extern, generate_module, is_nushell_b
 use inshellah::pool::{ScrapePool, Submitter};
 use inshellah::store::{
     all_commands, default_store_path, ensure_dir, file_type_of, filename_of_command, lookup,
-    lookup_raw, parse_nu_completions, subcommands_of, write_native, write_result,
+    lookup_raw, parse_nu_completions, purge_dir, subcommands_of, write_native, write_result,
 };
 
 const COMMAND_SECTIONS: &[u8] = &[1, 8];
@@ -61,6 +61,10 @@ Usage:
       Print stored completion data for CMD.
   inshellah dump [--dir PATH[:PATH...]]
       List indexed commands.
+  inshellah purge [--dir PATH[:PATH...]]
+      Delete the on-the-fly user cache (.json/.nu files). Only the first
+      --dir (the writable user cache) is cleared; system dirs are untouched.
+      Default dir: $XDG_CACHE_HOME/inshellah
   inshellah manpage FILE            Parse a manpage and emit nushell extern
   inshellah manpage-dir DIR         Batch-process manpages under DIR
   inshellah completions             Generate nushell completions for inshellah
@@ -1291,6 +1295,18 @@ fn cmd_dump(dirs: &[PathBuf]) {
     }
 }
 
+/// purge the on-the-fly user cache. only the writable user dir is cleared;
+/// read-only system overlays are never touched.
+fn cmd_purge(user_dir: &Path) {
+    match purge_dir(user_dir) {
+        Ok(n) => println!("purged {n} cached entries from {}", user_dir.display()),
+        Err(e) => {
+            eprintln!("purge failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// look up a command's path in $PATH.
 fn find_in_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var("PATH").ok()?;
@@ -2185,6 +2201,7 @@ fn cmd_completions() {
         "complete",
         "query",
         "dump",
+        "purge",
         "completions",
     ];
     let mut subcommands = Vec::new();
@@ -2441,6 +2458,13 @@ fn main() {
         "dump" => {
             let (_, dirs, _timeout_ms) = parse_dir_args(&args[2..]);
             cmd_dump(&dirs);
+        }
+        "purge" => {
+            let (_, dirs, _timeout_ms) = parse_dir_args(&args[2..]);
+            // only the first (writable user) dir is purged; the rest are
+            // read-only system overlays we must never delete from.
+            let user_dir = dirs.first().cloned().unwrap_or_else(default_store_path);
+            cmd_purge(&user_dir);
         }
         "completions" => cmd_completions(),
         "--help" | "-h" | "help" => usage(),

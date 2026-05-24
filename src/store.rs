@@ -579,6 +579,33 @@ pub fn all_commands(dirs: &[PathBuf]) -> Vec<String> {
     out.into_iter().collect()
 }
 
+/// remove every inshellah cache file (`.json` / `.nu`) from a single store
+/// directory. only those extensions are touched, so even a misaimed dir
+/// won't wipe unrelated files, and the directory itself is left in place.
+/// a missing directory is treated as already empty. returns how many files
+/// were removed.
+pub fn purge_dir(dir: &Path) -> io::Result<usize> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_cache_file = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(chop_extension)
+            .is_some();
+        if is_cache_file && path.is_file() {
+            fs::remove_file(&path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// discover subcommands of a command by scanning filenames in the store
 /// (e.g. for "git", finds "git_add.json", "git_log.json").
 pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand> {

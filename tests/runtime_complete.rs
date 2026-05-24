@@ -666,6 +666,47 @@ fn flag_demo_cache(name: &str, flags: &[&str]) -> std::path::PathBuf {
 }
 
 #[test]
+fn purge_clears_user_cache_but_not_system_dirs() {
+    let root = unique_temp_dir("inshellah-purge");
+    let user_dir = root.join("cache");
+    let system_dir = root.join("system");
+    fs::create_dir_all(&user_dir).expect("user dir");
+    fs::create_dir_all(&system_dir).expect("system dir");
+
+    let result = ManpageResult {
+        entries: Vec::new(),
+        subcommands: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&user_dir, "usercmd", "help", &result).expect("user cache");
+    write_result(&system_dir, "syscmd", "manpage", &result).expect("system cache");
+    // a non-cache file in the user dir must survive the purge.
+    fs::write(user_dir.join("keep.txt"), "keep me").expect("sentinel");
+
+    let dir_arg = format!("{}:{}", user_dir.display(), system_dir.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .args(["purge", "--dir", &dir_arg])
+        .output()
+        .expect("run inshellah purge");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // user cache entry gone, non-cache file kept, system dir untouched.
+    assert!(!user_dir.join("usercmd.json").exists(), "user entry not purged");
+    assert!(user_dir.join("keep.txt").exists(), "non-cache file removed");
+    assert!(
+        system_dir.join("syscmd.json").exists(),
+        "system dir must not be purged"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn complete_flag_on_empty_env_surfaces_flags_after_space() {
     let cache_dir = flag_demo_cache("inshellah-flag-on-empty", &["verbose"]);
 
