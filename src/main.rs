@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use inshellah::config::{Config, DEFAULT_TIMEOUT_MS};
 use inshellah::parsers::help::help_parser;
 use inshellah::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
@@ -35,26 +36,20 @@ use inshellah::store::{
 
 const COMMAND_SECTIONS: &[u8] = &[1, 8];
 
-/// per-subprocess timeout default when --timeout-ms isn't passed.
-/// empirically tuned so that a slow-to-print binary doesn't block the
-/// pool, while fast-responding ones (the vast majority) print their
-/// --help well inside the window. with `n` parallel workers a 200ms
-/// ceiling means the worst-case waste from an unresponsive binary is
-/// `200ms / n_workers` of wall time.
-const DEFAULT_TIMEOUT_MS: u64 = 200;
-
 fn usage() {
     eprintln!(
         "inshellah - nushell completions engine
 
 Usage:
   inshellah index PREFIX... [--dir PATH] [--ignore FILE] [--help-only FILE]
-                            [--timeout-ms N] [--workers N]
+                            [--prefix PATH[:PATH...]] [--timeout-ms N] [--workers N]
       Index completions into a directory of JSON/nu files.
       PREFIX is a directory containing bin/ and share/man/.
       Default dir: $XDG_CACHE_HOME/inshellah
       --ignore FILE     skip listed commands entirely
       --help-only FILE  skip manpages for listed commands, use --help instead
+      --prefix PATHS    extra scrape prefixes, colon-separated (in addition
+                        to the positional PREFIX args)
       --timeout-ms N    per-subprocess timeout in milliseconds (default 200)
       --workers N       parallel scrape workers (default: cpu count)
   inshellah complete CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
@@ -69,6 +64,12 @@ Usage:
   inshellah manpage FILE            Parse a manpage and emit nushell extern
   inshellah manpage-dir DIR         Batch-process manpages under DIR
   inshellah completions             Generate nushell completions for inshellah
+
+Configuration (environment, read by `complete`):
+  INSHELLAH_FLAG_TRIGGERS   chars that surface flags (default \"-\"; e.g. \"-+\")
+  INSHELLAH_FLAG_ON_EMPTY   1 to also surface flags on an empty token
+  INSHELLAH_MAX_COMPLETIONS cap on candidates returned (0 = no cap)
+  INSHELLAH_TIMEOUT_MS      default --help resolve timeout (--timeout-ms wins)
 "
     );
 }
@@ -262,12 +263,41 @@ fn skip_name(name: &str) -> bool {
         || name.contains('/')
 }
 
-// --- ELF scanning ---
+// --- executable image scanning ---
 
-/// scan an ELF binary (or any file) for string needles. returns the set of
-/// needles that appeared. on read failure all needles are reported found
-/// (conservative — we'd rather try --help than skip).
-fn elf_scan(path: &Path, needles: &[&str]) -> HashSet<String> {
+/// is `magic` the leading 4 bytes of an executable image we know how to
+/// string-scan on *this* platform? the scan itself is byte-oriented and
+/// format-agnostic; this gate just keeps us from slurping data files that
+/// happen to carry the executable bit.
+///
+/// recognition is strictly per-platform: a macOS build honours only Mach-O
+/// (thin 32/64-bit either endianness, plus fat/universal), every other
+/// (ELF) target honours only ELF. keeping them mutually exclusive means a
+/// Linux build never treats `CA FE BA BE` as an image — that's FAT_MAGIC to
+/// Mach-O but also a Java class file, which a Linux box can plausibly carry.
+fn is_scannable_magic(magic: &[u8; 4]) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(
+            magic,
+            [0xce, 0xfa, 0xed, 0xfe]   // MH_MAGIC    (thin 32-bit, little-endian)
+                | [0xcf, 0xfa, 0xed, 0xfe] // MH_MAGIC_64 (thin 64-bit, little-endian)
+                | [0xfe, 0xed, 0xfa, 0xce] // MH_MAGIC    (thin 32-bit, big-endian)
+                | [0xfe, 0xed, 0xfa, 0xcf] // MH_MAGIC_64 (thin 64-bit, big-endian)
+                | [0xca, 0xfe, 0xba, 0xbe] // FAT_MAGIC   (universal)
+                | [0xca, 0xfe, 0xba, 0xbf] // FAT_MAGIC_64
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        magic == b"\x7fELF"
+    }
+}
+
+/// scan an executable image (ELF on Linux, Mach-O on macOS) for string needles.
+/// returns the set of needles that appeared. on read failure all needles are
+/// reported found (conservative — we'd rather try --help than skip).
+fn image_scan(path: &Path, needles: &[&str]) -> HashSet<String> {
     let mut found: HashSet<String> = HashSet::new();
     let real = match fs::canonicalize(path) {
         Ok(p) => p,
@@ -288,8 +318,8 @@ fn elf_scan(path: &Path, needles: &[&str]) -> HashSet<String> {
     if f.read_exact(&mut magic).is_err() {
         return found;
     }
-    if magic != [0x7f, b'E', b'L', b'F'] {
-        // not ELF — return empty so caller decides
+    if !is_scannable_magic(&magic) {
+        // not a recognised executable image — return empty so caller decides
         return found;
     }
     let max_needle = needles.iter().map(|s| s.len()).max().unwrap_or(0);
@@ -410,9 +440,9 @@ enum Classify {
     Skip,
 }
 
-/// classify an ELF binary by scanning for help/completion needles.
-fn classify_elf(path: &Path) -> Classify {
-    let found = elf_scan(path, &["-h", "--help", "complet"]);
+/// classify an executable image by scanning for help/completion needles.
+fn classify_image(path: &Path) -> Classify {
+    let found = image_scan(path, &["-h", "--help", "complet"]);
     if found.contains("complet") {
         Classify::HasNativeCompletions
     } else if found.contains("-h") || found.contains("--help") {
@@ -422,18 +452,19 @@ fn classify_elf(path: &Path) -> Classify {
     }
 }
 
-/// classify a binary by its actual nature: script, ELF, or nix wrapper.
+/// classify a binary by its actual nature: script, native image, or nix
+/// wrapper. native images are ELF on Linux and Mach-O on macOS.
 fn classify_binary(_bindir: &Path, full: &Path) -> Classify {
     if is_script(full) {
         return Classify::TryHelp;
     }
     if let Some(target) = nix_wrapper_target(full) {
-        return classify_elf(&target);
+        return classify_image(&target);
     }
     if let Some(target) = nix_script_wrapper_target(full) {
-        return classify_elf(&target);
+        return classify_image(&target);
     }
-    classify_elf(full)
+    classify_image(full)
 }
 
 // --- help text extraction ---
@@ -835,6 +866,71 @@ mod main_tests {
             completion_json("a\"b", "line\nnext"),
             r#"{"value":"a\"b","description":"line\nnext"}"#
         );
+    }
+
+    #[test]
+    fn completion_dir_mandir_resolves_to_prefix_share_man() {
+        // <prefix>/share/inshellah -> <prefix>/share/man, no doubled "share".
+        assert_eq!(
+            mandir_for_completion_dir(Path::new("/run/current-system/sw/share/inshellah")),
+            Some(PathBuf::from("/run/current-system/sw/share/man"))
+        );
+        assert_eq!(
+            mandir_for_completion_dir(Path::new("/etc/profiles/per-user/alice/share/inshellah")),
+            Some(PathBuf::from("/etc/profiles/per-user/alice/share/man"))
+        );
+    }
+
+    #[test]
+    fn index_prefix_flag_appends_colon_separated_prefixes() {
+        let args = [
+            "/sys".to_string(),
+            "--prefix".to_string(),
+            "/a:/b/c".to_string(),
+            "--prefix".to_string(),
+            "/d".to_string(),
+        ];
+        let parsed = parse_index_args(&args);
+        // positional first, then each --prefix segment, in order.
+        assert_eq!(
+            parsed.prefixes,
+            vec![
+                PathBuf::from("/sys"),
+                PathBuf::from("/a"),
+                PathBuf::from("/b/c"),
+                PathBuf::from("/d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn non_executable_magic_is_never_scannable() {
+        // a PNG header, a shebang, plain text — none are images on any platform.
+        assert!(!is_scannable_magic(&[0x89, b'P', b'N', b'G']));
+        assert!(!is_scannable_magic(b"#!/b"));
+        assert!(!is_scannable_magic(b"text"));
+    }
+
+    // recognition is strictly per-platform: each build honours only its
+    // native container and rejects the other.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_scans_mach_o_only() {
+        // thin 64-bit little-endian — the common arm64/x86_64 layout.
+        assert!(is_scannable_magic(&[0xcf, 0xfa, 0xed, 0xfe]));
+        // fat/universal.
+        assert!(is_scannable_magic(&[0xca, 0xfe, 0xba, 0xbe]));
+        // ELF is not a native macOS image.
+        assert!(!is_scannable_magic(b"\x7fELF"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn elf_targets_scan_elf_only() {
+        assert!(is_scannable_magic(b"\x7fELF"));
+        // Mach-O magics are rejected; FAT_MAGIC also collides with java class.
+        assert!(!is_scannable_magic(&[0xca, 0xfe, 0xba, 0xbe]));
+        assert!(!is_scannable_magic(&[0xcf, 0xfa, 0xed, 0xfe]));
     }
 }
 
@@ -1806,6 +1902,7 @@ fn cmd_complete(
     system_dirs: &[PathBuf],
     mandirs: &[PathBuf],
     timeout_ms: u64,
+    cfg: &Config,
 ) {
     let mut dirs: Vec<PathBuf> = system_dirs.to_vec();
     dirs.push(user_dir.to_path_buf());
@@ -1951,7 +2048,10 @@ fn cmd_complete(
         }
     }
 
-    let typing_flag = last_token.starts_with('-') && !last_token.is_empty();
+    // flag completions are gated on a configurable trigger: by default a
+    // leading "-", but the user may add other characters or opt into
+    // surfacing flags on an empty token (right after a space).
+    let typing_flag = cfg.triggers_flags(&last_token);
     let fallback_subcommands = match &found {
         Some((matched_name, r, _)) if r.subcommands.is_empty() => {
             subcommands_of(&dirs, matched_name)
@@ -2000,25 +2100,38 @@ fn cmd_complete(
                     }
                 }
             }
-            // flag candidates
+            // flag candidates. the needle — and whether it scores against
+            // the bare flag name or the dashed form — depends on which
+            // trigger the user typed (see Config::flag_needle). the default
+            // "-" trigger keeps the dashed form, so ranking is unchanged.
             if typing_flag {
+                let fneedle = cfg.flag_needle(&last_token);
+                let score_against = |dashed: &str, bare_name: &str| -> i32 {
+                    if fneedle.bare {
+                        fuzzy_score(fneedle.needle, bare_name)
+                    } else {
+                        fuzzy_score(fneedle.needle, dashed)
+                    }
+                };
                 for e in &r.entries {
                     let (flag, aka, score) = match &e.switch {
                         OwnedSwitch::Long(l) => {
                             let flag = format!("--{l}");
-                            let score = fuzzy_score(&last_token, &flag);
+                            let score = score_against(&flag, l);
                             (flag, None, score)
                         }
                         OwnedSwitch::Short(c) => {
                             let flag = format!("-{c}");
-                            let score = fuzzy_score(&last_token, &flag);
+                            let short_bare = c.to_string();
+                            let score = score_against(&flag, &short_bare);
                             (flag, None, score)
                         }
                         OwnedSwitch::Both(c, l) => {
                             let long_flag = format!("--{l}");
                             let short_flag = format!("-{c}");
-                            let ls = fuzzy_score(&last_token, &long_flag);
-                            let ss = fuzzy_score(&last_token, &short_flag);
+                            let short_bare = c.to_string();
+                            let ls = score_against(&long_flag, l);
+                            let ss = score_against(&short_flag, &short_bare);
                             if ss > ls {
                                 (short_flag, Some(long_flag), ss)
                             } else {
@@ -2040,6 +2153,9 @@ fn cmd_complete(
                 }
             }
             scored.sort_by(|a, b| b.0.cmp(&a.0));
+            if cfg.max_completions > 0 {
+                scored.truncate(cfg.max_completions);
+            }
             scored.into_iter().map(|(_, json)| json).collect()
         }
     };
@@ -2128,6 +2244,17 @@ fn parse_index_args(args: &[String]) -> IndexArgs {
                     out.help_only = Some(PathBuf::from(&args[i]));
                 }
             }
+            // additional scrape prefixes beyond the positional ones, as a
+            // colon-separated list. lets callers (notably the nix module's
+            // extraScrapePackages) roll up extra packages without relying on
+            // positional ordering.
+            "--prefix" => {
+                i += 1;
+                if i < args.len() {
+                    out.prefixes
+                        .extend(args[i].split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+                }
+            }
             "--timeout-ms" => {
                 i += 1;
                 if i < args.len()
@@ -2164,13 +2291,24 @@ fn man_dir_of_prefix(prefix: &Path) -> PathBuf {
     prefix.join("share/man")
 }
 
+/// derive the manpage dir colocated with a read-only system completion dir.
+/// the completer is pointed at `<prefix>/share/inshellah`, so the install
+/// prefix is two levels up and its manpages live at `<prefix>/share/man` —
+/// the same bin↔share/man colocation `index` and the binary-prefix walk
+/// assume. portable across Linux and macOS prefixes (nix profile, Homebrew,
+/// /usr, CommandLineTools).
+fn mandir_for_completion_dir(dir: &Path) -> Option<PathBuf> {
+    dir.parent().and_then(Path::parent).map(man_dir_of_prefix)
+}
+
 /// parse --dir PATH[:PATH...], optional --timeout-ms N, plus any
 /// positional args. when --dir isn't supplied, returns the default cache
-/// dir as the single entry.
-fn parse_dir_args(args: &[String]) -> (Vec<String>, Vec<PathBuf>, u64) {
+/// dir as the single entry. the timeout is `None` when `--timeout-ms`
+/// isn't passed, so the caller can fall back to the configured default.
+fn parse_dir_args(args: &[String]) -> (Vec<String>, Vec<PathBuf>, Option<u64>) {
     let mut positional = Vec::new();
     let mut dirs: Option<Vec<PathBuf>> = None;
-    let mut timeout_ms = DEFAULT_TIMEOUT_MS;
+    let mut timeout_ms: Option<u64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -2185,7 +2323,7 @@ fn parse_dir_args(args: &[String]) -> (Vec<String>, Vec<PathBuf>, u64) {
                 if i < args.len()
                     && let Ok(n) = args[i].parse::<u64>()
                 {
-                    timeout_ms = n;
+                    timeout_ms = Some(n);
                 }
             }
             _ => {
@@ -2262,19 +2400,31 @@ fn main() {
             }
         }
         "complete" => {
-            let (positional, dirs, timeout_ms) = parse_dir_args(&args[2..]);
+            let cfg = Config::from_env();
+            let (positional, dirs, timeout_override) = parse_dir_args(&args[2..]);
+            // explicit --timeout-ms wins; otherwise fall back to the
+            // configured default (INSHELLAH_TIMEOUT_MS or the compiled one).
+            let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
             // first dir is the writable user cache; rest are read-only system dirs
             let (user_dir, system_dirs): (PathBuf, Vec<PathBuf>) = match dirs.split_first() {
                 Some((first, rest)) => (first.clone(), rest.to_vec()),
                 None => (default_store_path(), Vec::new()),
             };
-            // mandirs default to share/man siblings of each system dir
+            // mandirs default to the share/man colocated with each system
+            // completion dir's install prefix (<prefix>/share/inshellah).
             let mandirs: Vec<PathBuf> = system_dirs
                 .iter()
-                .filter_map(|d| d.parent().map(|p| p.join("share/man")))
+                .filter_map(|d| mandir_for_completion_dir(d))
                 .filter(|p| p.is_dir())
                 .collect();
-            cmd_complete(&positional, &user_dir, &system_dirs, &mandirs, timeout_ms);
+            cmd_complete(
+                &positional,
+                &user_dir,
+                &system_dirs,
+                &mandirs,
+                timeout_ms,
+                &cfg,
+            );
         }
         "query" => {
             let (positional, dirs, _timeout_ms) = parse_dir_args(&args[2..]);

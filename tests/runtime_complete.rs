@@ -641,3 +641,126 @@ exit 2
 
     let _ = fs::remove_dir_all(root);
 }
+
+/// write a single-command cache directory exposing the given long flags,
+/// returning the cache dir. callers drive `inshellah complete demo ...`.
+fn flag_demo_cache(name: &str, flags: &[&str]) -> std::path::PathBuf {
+    let root = unique_temp_dir(name);
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+    let result = ManpageResult {
+        entries: flags
+            .iter()
+            .map(|f| ManpageEntry {
+                switch: OwnedSwitch::Long((*f).to_string()),
+                param: None,
+                desc: format!("{f} flag"),
+            })
+            .collect(),
+        subcommands: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "demo", "help", &result).expect("cache");
+    cache_dir
+}
+
+#[test]
+fn complete_flag_on_empty_env_surfaces_flags_after_space() {
+    let cache_dir = flag_demo_cache("inshellah-flag-on-empty", &["verbose"]);
+
+    // baseline: empty token without the env knob yields no flags.
+    let baseline = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["demo", ""])
+        .output()
+        .expect("run inshellah complete");
+    assert_eq!(
+        String::from_utf8_lossy(&baseline.stdout).trim(),
+        "null",
+        "empty token should not surface flags by default"
+    );
+
+    // with INSHELLAH_FLAG_ON_EMPTY, the empty token surfaces flags.
+    let opted_in = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .env("INSHELLAH_FLAG_ON_EMPTY", "1")
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["demo", ""])
+        .output()
+        .expect("run inshellah complete");
+    let stdout = String::from_utf8_lossy(&opted_in.stdout);
+    assert!(
+        stdout.contains(r#""value":"--verbose""#),
+        "stdout = {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(cache_dir.parent().unwrap());
+}
+
+#[test]
+fn complete_custom_trigger_char_surfaces_flags() {
+    let cache_dir = flag_demo_cache("inshellah-custom-trigger", &["verbose"]);
+
+    // "+" is not a trigger by default — treated as an argument prefix.
+    let baseline = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["demo", "+v"])
+        .output()
+        .expect("run inshellah complete");
+    assert_eq!(
+        String::from_utf8_lossy(&baseline.stdout).trim(),
+        "null",
+        "'+' should not trigger flags by default"
+    );
+
+    // configured as a trigger, "+v" fuzzy-matches the bare flag name.
+    let opted_in = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .env("INSHELLAH_FLAG_TRIGGERS", "-+")
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["demo", "+v"])
+        .output()
+        .expect("run inshellah complete");
+    let stdout = String::from_utf8_lossy(&opted_in.stdout);
+    assert!(
+        stdout.contains(r#""value":"--verbose""#),
+        "stdout = {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(cache_dir.parent().unwrap());
+}
+
+#[test]
+fn complete_max_completions_caps_results() {
+    let cache_dir = flag_demo_cache(
+        "inshellah-max-completions",
+        &["verbose", "version", "verify", "verbatim"],
+    );
+
+    let capped = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .env("INSHELLAH_MAX_COMPLETIONS", "2")
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["demo", "--ver"])
+        .output()
+        .expect("run inshellah complete");
+    let stdout = String::from_utf8_lossy(&capped.stdout);
+    let count = stdout.matches(r#""value":"#).count();
+    assert_eq!(count, 2, "expected 2 capped candidates, stdout = {stdout}");
+
+    // without the cap, all four matching flags come back.
+    let uncapped = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["demo", "--ver"])
+        .output()
+        .expect("run inshellah complete");
+    let stdout = String::from_utf8_lossy(&uncapped.stdout);
+    let count = stdout.matches(r#""value":"#).count();
+    assert_eq!(count, 4, "expected 4 candidates, stdout = {stdout}");
+
+    let _ = fs::remove_dir_all(cache_dir.parent().unwrap());
+}

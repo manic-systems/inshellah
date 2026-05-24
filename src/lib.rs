@@ -1,3 +1,4 @@
+pub mod config;
 pub mod parsers;
 pub mod pool;
 pub mod store;

@@ -268,7 +268,19 @@
         }
       );
 
+      # the module body in ./nix/module.nix only touches options common to
+      # both NixOS and nix-darwin (environment.{variables,systemPackages,
+      # pathsToLink,extraSetup} + a programs.inshellah namespace), so the two
+      # platform outputs share it verbatim and differ only in which package
+      # the host system resolves to.
       nixosModules.default =
+        { pkgs, ... }:
+        {
+          imports = [ ./nix/module.nix ];
+          programs.inshellah.package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        };
+
+      darwinModules.default =
         { pkgs, ... }:
         {
           imports = [ ./nix/module.nix ];

@@ -54,6 +54,35 @@ $env.config.completions.external = {
 
 paths after the first in `--dir` are read-only system dirs.
 
+## configuration
+
+the `complete` path reads a few behavioural knobs from the environment.
+each has a compiled-in default that reproduces the original behaviour, so
+an unconfigured install is unchanged. on nixos these are set for you by
+the module options (see [nixos.md](nixos.md)); elsewhere, export them in
+your shell before nushell starts.
+
+| variable | default | effect |
+|---|---|---|
+| `INSHELLAH_FLAG_TRIGGERS` | `-` | characters that surface flag completions when a partial token begins with one of them. set to `-+` to also trigger on `+`; whitespace is ignored. an empty value disables prefix-triggered flags (leaving only `INSHELLAH_FLAG_ON_EMPTY`). |
+| `INSHELLAH_FLAG_ON_EMPTY` | `0` | when truthy (`1`/`true`/`yes`/`on`), also surface flags on an empty token — i.e. right after a space — alongside subcommands. otherwise an empty token hands off to file/dynamic completion. |
+| `INSHELLAH_MAX_COMPLETIONS` | `0` | cap on the number of candidates returned (and nushell's `max_results` when sourcing the bundled snippet). `0` imposes no inshellah cap; nushell's own default of 200 still applies. |
+| `INSHELLAH_TIMEOUT_MS` | `200` | per-subprocess timeout for the on-the-fly `--help` resolution. an explicit `--timeout-ms` flag overrides it. |
+
+### flag triggering
+
+by default flags are offered only once a token begins with `-`
+(`git commit --<TAB>`). two overrides are available:
+
+- **other trigger characters** — `INSHELLAH_FLAG_TRIGGERS="-+"` makes a
+  leading `+` surface flags too. for non-dash triggers the typed text
+  after the trigger is matched against the bare flag name, so `+ver`
+  completes to `--verbose`. the emitted value keeps the tool's real
+  dashed flag.
+- **flags after a space** — `INSHELLAH_FLAG_ON_EMPTY=1` lists flags
+  immediately after a space, mixed in with subcommands, before any
+  character is typed.
+
 ## cache management
 
 ```sh
@@ -84,3 +113,23 @@ for upfront indexing on non-nixos systems:
 ```sh
 inshellah index /usr /usr/local
 ```
+
+## macOS developer toolchain
+
+`/usr/bin/git`, `/usr/bin/clang`, and friends are `xcrun` shims whose real
+binaries and manpages live under the active developer dir (`xcode-select
+-p` — Command Line Tools or full Xcode), outside the usual prefixes. to
+index those, point `index` at the real prefix explicitly — either the
+developer dir or, preferably, the nix equivalents:
+
+```sh
+# the active developer toolchain
+inshellah index --prefix "$(xcode-select -p)/usr"
+
+# or nix-provided tools, kept reproducible
+inshellah index /run/current-system/sw --prefix /nix/store/…-git:/nix/store/…-clang
+```
+
+`--prefix` takes a colon-separated list of extra prefixes, scraped
+alongside the positional ones. the nix module exposes this as
+`programs.inshellah.extraScrapePackages` (see [nixos.md](nixos.md)).

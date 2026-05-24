@@ -1,10 +1,12 @@
-# nixos integration
+# nixos / nix-darwin integration
 
-inshellah provides a nixos module that indexes nushell completions for
-every installed package at system build time, and a wrapped binary
-that knows where to find the result.
+inshellah provides a module that indexes nushell completions for every
+installed package at system build time, and a wrapped binary that knows
+where to find the result. the same module body backs both NixOS and
+nix-darwin — on Linux it scrapes ELF binaries, on macOS Mach-O ones,
+selected automatically by the inshellah build's target platform.
 
-## enabling
+## enabling (NixOS)
 
 ```nix
 # flake.nix outputs:
@@ -27,6 +29,34 @@ or importing directly:
   programs.inshellah.enable = true;
 }
 ```
+
+## enabling (nix-darwin)
+
+```nix
+# flake.nix outputs:
+{
+  darwinConfigurations.mymac = nix-darwin.lib.darwinSystem {
+    modules = [
+      inshellah.darwinModules.default
+      { programs.inshellah.enable = true; }
+    ];
+  };
+}
+```
+
+the options and behaviour are identical to the NixOS module — it reads
+the same `programs.inshellah.*` settings and writes the same completion
+index and nushell shim under the system profile (`/run/current-system/sw`,
+which nix-darwin also uses).
+
+on macOS, the tools you reach through `/usr/bin` (`git`, `clang`, …) are
+`xcrun` shims whose real binaries and manpages live under the active
+developer dir, outside the nix system profile — so they aren't indexed by
+default. rather than probe the host toolchain impurely, list the nix
+equivalents you want completed in `extraScrapePackages`; the module rolls
+their store paths into the build-time scrape (`inshellah index … --prefix
+…`). this applies on NixOS too, for any package whose completions you want
+indexed without putting it on the system path.
 
 after rebuilding, completions are immediately available through the
 autoloaded nushell shim.
@@ -69,6 +99,11 @@ programs.inshellah = {
   # commands to skip manpage parsing for (uses --help instead)
   helpOnlyCommands = [ "nix" ];
 
+  # extra packages to scrape alongside the system profile; each store path
+  # is passed to `inshellah index --prefix`. handy on macOS for the nix
+  # equivalents of /usr/bin shim tools (git, clang, …)
+  extraScrapePackages = [ pkgs.git pkgs.clang ];
+
   # per-subprocess timeout in ms during indexing (null = built-in
   # default of 200ms)
   timeoutMs = null;
@@ -81,10 +116,38 @@ programs.inshellah = {
   # set to 0 to omit native result-limit flags
   dynamicLimit = 200;
 
+  # characters that trigger flag completions when a partial token begins
+  # with one of them. default "-"; e.g. "-+" also triggers on "+"
+  flagTriggers = "-";
+
+  # also surface flags on an empty token (right after a space), mixed in
+  # with subcommands. default false
+  flagOnEmpty = false;
+
+  # cap on candidates returned and nushell's max_results. 0 = no cap
+  # (nushell's built-in default of 200 still applies)
+  maxCompletions = 0;
+
+  # per-subprocess timeout (ms) for the completer's on-the-fly --help
+  # resolution of uncached commands. null = built-in default of 200ms.
+  # distinct from timeoutMs (indexing) and dynamicTimeoutMs (live shim)
+  completeTimeoutMs = null;
+
   # worker-thread count for the parallel scrape
   workers = null;
 };
 ```
+
+### flag-triggering behaviour
+
+`flagTriggers` and `flagOnEmpty` control when option/flag completions are
+offered. By default flags appear only after a leading `-`. Add characters
+to `flagTriggers` (e.g. `"-+"`) to trigger on them as well — for a
+non-dash trigger the text after it is matched against the bare flag name,
+so `+ver` completes to `--verbose`. Set `flagOnEmpty = true` to list flags
+immediately after a space, alongside subcommands. These map to the
+`INSHELLAH_FLAG_TRIGGERS` / `INSHELLAH_FLAG_ON_EMPTY` environment variables
+(see [runtime-completions.md](runtime-completions.md)).
 
 ## using the completer
 
