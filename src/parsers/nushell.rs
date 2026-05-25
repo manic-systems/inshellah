@@ -284,7 +284,10 @@ pub fn format_positional(name: &str, p: &Positional) -> String {
         .collect();
     let prefix = if p.variadic { "..." } else { "" };
     let suffix = if p.optional && !p.variadic { "?" } else { "" };
-    let typ = nushell_type_of_param(&name.to_ascii_uppercase());
+    let typ = match nushell_type_of_param(&name.to_ascii_uppercase()) {
+        "string" => "glob",
+        other => other,
+    };
     format!("    {prefix}{name_underscored}{suffix}: {typ}")
 }
 

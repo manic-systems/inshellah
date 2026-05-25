@@ -339,8 +339,8 @@ Print a short usage summary and exit.
     );
 
     let nu = generate_extern("getent", &r);
-    assert!(nu.contains("database: string"), "nu = {nu}");
-    assert!(nu.contains("...key: string"), "nu = {nu}");
+    assert!(nu.contains("database: glob"), "nu = {nu}");
+    assert!(nu.contains("...key: glob"), "nu = {nu}");
     assert!(nu.contains("--service(-s): string"), "nu = {nu}");
     assert!(!nu.contains("--servicedatabase"), "nu = {nu}");
     assert!(nu.contains("export extern \"getent passwd\""), "nu = {nu}");
@@ -781,7 +781,7 @@ fn positional_order_survives_cache_and_generation() {
 
     let nu = generate_extern("git clone", &cached);
     let repository = nu
-        .find("repository: string")
+        .find("repository: glob")
         .expect("repository positional");
     let directory = nu.find("directory?: path").expect("directory positional");
     assert!(repository < directory, "nu = {nu}");
