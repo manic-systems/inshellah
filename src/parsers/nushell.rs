@@ -282,9 +282,11 @@ pub fn format_positional(name: &str, p: &Positional) -> String {
         .chars()
         .map(|c| if c == '-' { '_' } else { c })
         .collect();
+    let name_upper = name.to_ascii_uppercase();
     let prefix = if p.variadic { "..." } else { "" };
     let suffix = if p.optional && !p.variadic { "?" } else { "" };
-    let typ = nushell_type_of_param(&name.to_ascii_uppercase());
+    let typ = nushell_type_of_param(&name_upper);
+    let typ = if typ == "string" { "glob" } else { typ };
     format!("    {prefix}{name_underscored}{suffix}: {typ}")
 }
 
