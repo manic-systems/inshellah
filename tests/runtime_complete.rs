@@ -311,8 +311,7 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
         .expect("run inshellah complete");
     let top_stdout = String::from_utf8(top_partial.stdout).expect("stdout");
     assert!(
-        top_stdout.contains(r#""value":"poweroff""#)
-            && top_stdout.contains(r#""value":"preset""#),
+        top_stdout.contains(r#""value":"poweroff""#) && top_stdout.contains(r#""value":"preset""#),
         "partial at the right depth should still match parent subs; stdout = {top_stdout}"
     );
 
@@ -696,7 +695,10 @@ fn purge_clears_user_cache_but_not_system_dirs() {
     );
 
     // user cache entry gone, non-cache file kept, system dir untouched.
-    assert!(!user_dir.join("usercmd.json").exists(), "user entry not purged");
+    assert!(
+        !user_dir.join("usercmd.json").exists(),
+        "user entry not purged"
+    );
     assert!(user_dir.join("keep.txt").exists(), "non-cache file removed");
     assert!(
         system_dir.join("syscmd.json").exists(),

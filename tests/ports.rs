@@ -6,8 +6,8 @@
 
 use inshellah::parsers::help::help_parser;
 use inshellah::parsers::manpage::{
-    ManpageResult, OwnedParam, OwnedSwitch, extract_synopsis_command, parse_manpage_string,
-    strip_groff_escapes,
+    extract_synopsis_command, parse_manpage_string, strip_groff_escapes, ManpageResult, OwnedParam,
+    OwnedSwitch,
 };
 use inshellah::parsers::nushell::{generate_extern, generate_module};
 use inshellah::store::{json_of_result, parse_nu_completions, result_from_json};
@@ -780,9 +780,7 @@ fn positional_order_survives_cache_and_generation() {
     );
 
     let nu = generate_extern("git clone", &cached);
-    let repository = nu
-        .find("repository: glob")
-        .expect("repository positional");
+    let repository = nu.find("repository: glob").expect("repository positional");
     let directory = nu.find("directory?: path").expect("directory positional");
     assert!(repository < directory, "nu = {nu}");
 }

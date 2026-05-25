@@ -1,11 +1,11 @@
 use nom::{
-    AsChar, IResult, Parser,
     branch::alt,
     bytes::complete::{tag, take_till, take_while1},
     character::complete::{char, space0},
     combinator::{not, value, verify},
     multi::many0,
     sequence::{delimited, preceded, terminated},
+    AsChar, IResult, Parser,
 };
 
 use crate::make_parser;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! parse unix manpages (groff/mdoc format) into a structured result.
 //!
 //! manpages are written in roff/groff markup — a decades-old typesetting language

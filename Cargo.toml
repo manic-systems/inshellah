@@ -2,6 +2,8 @@
 name = "inshellah"
 version = "0.1.1"
 edition = "2024"
+license = "EUPL-1.2"
+repository = "https://github.com/manic-systems/inshellah"
 
 [dependencies]
 fast-strip-ansi = "0.13.1"

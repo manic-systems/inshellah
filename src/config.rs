@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! runtime configuration for the `complete` path.
 //!
 //! the completer reads a handful of behavioural knobs from the

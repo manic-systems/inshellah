@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! BFS-queue worker pool for parallel subprocess scraping.
 //!
 //! workers pull jobs from a shared queue and call a user-supplied

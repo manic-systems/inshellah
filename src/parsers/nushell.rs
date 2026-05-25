@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! generate nushell `extern` definitions from parsed help data.
 //!
 //! this module is the code generation backend. it takes a [`ManpageResult`]
@@ -244,7 +245,6 @@ pub fn escape_nu(s: &str) -> Cow<'_, str> {
     }
 }
 
-
 /// format a single flag entry as a nushell `extern` parameter line.
 /// output examples:
 ///   "    --verbose(-v)                       # increase verbosity"
@@ -390,4 +390,3 @@ pub fn generate_module(cmd_name: &str, result: &ManpageResult) -> String {
         generate_extern(cmd_name, result)
     )
 }
-
