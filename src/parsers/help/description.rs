@@ -1,9 +1,9 @@
 use nom::{
-    IResult, Parser,
     character::complete::space0,
     combinator::verify,
     multi::many0,
     sequence::{preceded, terminated},
+    IResult, Parser,
 };
 
 use crate::make_parser;

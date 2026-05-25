@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 pub enum Switch<'a> {
     Short(char),
     Long(&'a str),

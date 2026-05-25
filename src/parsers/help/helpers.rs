@@ -1,6 +1,6 @@
 use nom::{
-    AsChar, IResult, Parser, branch::alt, bytes::complete::take_till,
-    character::complete::line_ending, combinator::eof,
+    branch::alt, bytes::complete::take_till, character::complete::line_ending, combinator::eof,
+    AsChar, IResult, Parser,
 };
 #[allow(unused_imports)]
 use nom::{bytes::complete::take_while, combinator::peek, combinator::verify};

@@ -8,12 +8,12 @@ use nom::combinator::{map, opt};
 use nom::multi::many0;
 use nom::sequence::separated_pair;
 use nom::{
-    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, take_while1},
     character::complete::{char, satisfy},
     combinator::{value, verify},
     sequence::{delimited, preceded},
+    IResult, Parser,
 };
 
 make_parser!(short_switch -> char,
@@ -25,9 +25,9 @@ make_parser!(short_switch -> char,
 // without this guard, the parser happily eats the whole run of dashes
 // after `--` and produces a flag named `------…`.
 make_parser!(long_switch -> &'a str,
-    preceded(tag("--"), verify(take_while1(is_option_char), |s: &str| {
-        s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-    })));
+preceded(tag("--"), verify(take_while1(is_option_char), |s: &str| {
+    s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+})));
 
 make_parser!(negatable_long_switch -> &'a str,
     preceded(tag("--[no-]"), take_while1(is_option_char)));

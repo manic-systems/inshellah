@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! filesystem store for parsed completion data.
 //!
 //! write side: serialize ManpageResult to JSON, derive sanitised
