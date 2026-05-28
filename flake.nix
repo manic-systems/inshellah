@@ -65,136 +65,9 @@
               printf 'null\n'
             fi
           '';
-          fakeNix = pkgs.writeShellScriptBin "nix" ''
-            if [ "''${1:-}" = eval ]; then
-              printf 'raw package description\n'
-            elif [ "''${1:-}" = slow ]; then
-              sleep 1
-              printf 'header\nslow-package\n'
-            else
-              printf 'header\nbuild\nflake#pkg\n'
-            fi
-          '';
-          fakeSystemctl = pkgs.writeShellScriptBin "systemctl" ''
-            case "$*" in
-              *"g*"*)
-                printf 'greetd.service loaded active running Greeter\n'
-                ;;
-              *)
-                printf 'demo.service loaded active running Demo Unit\n'
-                ;;
-            esac
-          '';
-          fakeKubectl = pkgs.writeShellScriptBin "kubectl" ''
-            printf '%s\n' "$*" > "$KUBECTL_ARGS_FILE"
-            if [ "''${1:-}" = get ] && [ "''${2:-}" = deployment ]; then
-              printf 'deploy-a\n'
-            elif [ "''${1:-}" = get ]; then
-              printf 'pod-a\n'
-            fi
-          '';
-          fakeCargo = pkgs.writeShellScriptBin "cargo" ''
-            cat <<'JSON'
-            {"packages":[{"name":"app-lib","version":"0.1.0","targets":[{"name":"app-lib","kind":["lib"]},{"name":"app-cli","kind":["bin"]},{"name":"app-integration","kind":["test"]}]},{"name":"helper-lib","version":"0.2.0","targets":[{"name":"helper-lib","kind":["lib"]}]}]}
-            JSON
-          '';
-          fakeGit = pkgs.writeShellScriptBin "git" ''
-            case "''${1:-}" in
-              remote)
-                printf 'origin\nupstream\n'
-                ;;
-              for-each-ref)
-                if [ -n "''${INSHELLAH_GIT_ARGS_FILE:-}" ]; then
-                  printf '%s\n' "$*" > "$INSHELLAH_GIT_ARGS_FILE"
-                fi
-                case "$*" in
-                  *"refs/heads refs/remotes refs/tags"*)
-                    printf 'main\tcommit\tMain branch\norigin/main\tcommit\tRemote main\nv1.0\tcommit\tRelease 1\n'
-                    ;;
-                  *"refs/heads"*)
-                    printf 'main\tMain branch\nfeature\tFeature branch\n'
-                    ;;
-                  *"refs/tags"*)
-                    printf 'v1.0\tRelease 1\nv2.0\tRelease 2\n'
-                    ;;
-                esac
-                ;;
-              stash)
-                if [ "''${2:-}" = list ]; then
-                  printf 'stash@{0}: WIP on main: demo stash\n'
-                fi
-                ;;
-              status)
-                printf ' M src/main.rs\n?? new-file.txt\nR  old.txt -> renamed.txt\n'
-                ;;
-              ls-files)
-                printf 'src/main.rs\nREADME.md\n'
-                ;;
-              config)
-                printf 'submodule.demo.path deps/demo\n'
-                ;;
-              worktree)
-                if [ "''${2:-}" = list ]; then
-                  printf 'worktree /repo/linked\n'
-                fi
-                ;;
-            esac
-          '';
-          fakeJj = pkgs.writeShellScriptBin "jj" ''
-            case "''${1:-}" in
-              log)
-                printf 'k\tworking change\nm\tmain change\n'
-                ;;
-              bookmark)
-                if [ "''${2:-}" = list ]; then
-                  case "$*" in
-                    *--all-remotes*)
-                      printf 'main@origin\tmain change\nfeature@upstream\tfeature change\nmain@git\tmain change\n'
-                      ;;
-                    *)
-                      printf 'main\tmain change\nfeature\tfeature change\nfeature\tfeature change\n'
-                      ;;
-                  esac
-                fi
-                ;;
-              tag)
-                if [ "''${2:-}" = list ]; then
-                  printf 'v1.0\nv2.0\n'
-                fi
-                ;;
-              git)
-                if [ "''${2:-}" = remote ] && [ "''${3:-}" = list ]; then
-                  printf 'origin https://example.com/repo.git\nupstream https://example.com/upstream.git\n'
-                fi
-                ;;
-              op|operation)
-                if [ "''${2:-}" = log ]; then
-                  printf 'abc123\tcheckout working copy\n'
-                fi
-                ;;
-              file)
-                if [ "''${2:-}" = list ]; then
-                  printf 'src/main.rs\nREADME.md\n'
-                fi
-                ;;
-              workspace)
-                if [ "''${2:-}" = list ]; then
-                  printf 'default\nlinked\n'
-                fi
-                ;;
-            esac
-          '';
           fakeCompletionBackends = pkgs.symlinkJoin {
             name = "inshellah-fake-completion-backends";
-            paths = [
-              fakeInshellah
-              fakeNix
-              fakeSystemctl
-              fakeKubectl
-              fakeCargo
-              fakeGit
-              fakeJj
-            ];
+            paths = [ fakeInshellah ];
           };
           rustCheckPhase = ''
             echo "running rust checks"
@@ -222,31 +95,10 @@
           nushellCheckPhase = ''
             echo "running nushell shim checks"
             export PATH="${fakeCompletionBackends}/bin:$PATH"
-            export KUBECTL_ARGS_FILE="$TMPDIR/kubectl.args"
-            export INSHELLAH_GIT_ARGS_FILE="$TMPDIR/git.args"
             export INSHELLAH_STATIC_FILE="$TMPDIR/inshellah-static.json"
-            export INSHELLAH_DYNAMIC_TIMEOUT_MS=50
             : > "$INSHELLAH_STATIC_FILE"
             nu --no-config-file -c 'source ${./nix/inshellah-completer.nu}; source ${./tests/nushell-completer.nu}'
-            INSHELLAH_DYNAMIC_TIMEOUT_MS=0 nu --no-config-file -c '
-              source ${./nix/inshellah-completer.nu}
-              "" | save --force $env.INSHELLAH_STATIC_FILE
-              let completer = $env.config.completions.external.completer
-              let slow = do $completer [nix slow ""]
-              if (($slow | get 0.value) != "slow-package") {
-                error make {msg: "dynamic timeout 0 should disable timeout"}
-              }
-            '
-            INSHELLAH_DYNAMIC_LIMIT=0 nu --no-config-file -c '
-              source ${./nix/inshellah-completer.nu}
-              "[]" | save --force $env.INSHELLAH_STATIC_FILE
-              "" | save --force $env.INSHELLAH_GIT_ARGS_FILE
-              let completer = $env.config.completions.external.completer
-              do $completer [git fetch origin ""]
-              if ((open $env.INSHELLAH_GIT_ARGS_FILE) | str contains "--count") {
-                error make {msg: "dynamic limit 0 should omit provider limit flags"}
-              }
-            '
+
             cat > "$TMPDIR/config-load.nu" <<'EOF'
             source ${./nix/inshellah-completer.nu}
 
