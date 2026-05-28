@@ -140,8 +140,7 @@ pub fn strip_groff_escapes(source: &str) -> String {
                 }
                 b'(' => {
                     // two-char named character: \(aq, \(lq, \(rq, etc.
-                    if pos + 3 < len {
-                        let name = &source[pos + 2..pos + 4];
+                    if let Some(name) = source.get(pos + 2..pos + 4) {
                         if let Some(c) = named_char_of(name) {
                             buffer.push(c);
                             prev_char = c as u8;
@@ -381,5 +380,22 @@ pub fn classify_line(line: &str) -> GroffLine {
         } else {
             GroffLine::Text(stripped)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_char_named_escape_followed_by_multibyte_does_not_panic() {
+        for input in ["\\(é", "\\(λx", "a \\(€ b", "\\("] {
+            let _ = strip_groff_escapes(input);
+        }
+    }
+
+    #[test]
+    fn two_char_named_escape_still_resolves() {
+        assert_eq!(strip_groff_escapes("\\(aq"), "'");
     }
 }
