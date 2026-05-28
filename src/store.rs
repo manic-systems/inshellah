@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -167,11 +168,30 @@ pub fn json_of_result(source: &str, result: &ManpageResult) -> String {
     )
 }
 
+/// write via same-dir temp file then rename
 pub fn write_file(path: &Path, contents: &str) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => {
+            fs::create_dir_all(p)?;
+            p
+        }
+        _ => Path::new("."),
+    };
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = parent.join(format!(".{stem}.{}.{seq}.tmp", std::process::id()));
+    fs::write(&tmp, contents)?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
     }
-    fs::write(path, contents)
 }
 
 /// write the parsed result for `command` into `dir` as JSON.
@@ -683,4 +703,48 @@ pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "inshellah-store-{tag}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn write_file_creates_parents_and_writes_contents() {
+        let dir = unique_dir("write");
+        let path = dir.join("nested/git_add.json");
+        write_file(&path, "{\"ok\":true}").unwrap();
+        assert_eq!(read_file(&path).as_deref(), Some("{\"ok\":true}"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_file_overwrites_and_leaves_no_temp_files() {
+        let dir = unique_dir("overwrite");
+        let path = dir.join("git.nu");
+        write_file(&path, "old").unwrap();
+        write_file(&path, "new").unwrap();
+        assert_eq!(read_file(&path).as_deref(), Some("new"));
+
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
