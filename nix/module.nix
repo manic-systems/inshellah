@@ -253,10 +253,9 @@ in
       [
         (lib.hiPrio wrapped)
         cfg.package
-      ];
+    ];
     environment.pathsToLink = [
       "/share/nushell/autoload"
-      "/share/nushell/vendor/autoload"
     ];
     environment.extraSetup =
       let
@@ -289,13 +288,13 @@ in
 
         # Install the full nushell completer plus sudo/doas wrapped commands.
         # Nushell otherwise hardcodes sudo/doas to bypass external completers.
-        mkdir -p $out/share/nushell/vendor/autoload
-        cp ${snippetFile} $out/share/nushell/vendor/autoload/inshellah.nu
+        mkdir -p $out/share/nushell/autoload
+        cp ${snippetFile} $out/share/nushell/autoload/inshellah.nu
 
         # Register command names for dynamic backends that are actually present
         # in the linked profile. The externs keep Nu's command list aware of
         # these commands while the external completer still supplies arguments.
-        stubFile=$out/share/nushell/vendor/autoload/inshellah-command-stubs.nu
+        stubFile=$out/share/nushell/autoload/inshellah-command-stubs.nu
         : > "$stubFile"
         for cmd in ${dynamicStubCommandArgs}; do
           if [ -x "$out/bin/$cmd" ]; then

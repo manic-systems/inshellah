@@ -106,10 +106,10 @@ the json completer flow.
 ## native completions and file completion
 
 when a tool ships its own nushell completion generator (clap, cobra, etc.),
-inshellah caches its output verbatim as a `.nu` file under the autoload
-dir. nushell loads the `extern` declarations and uses its built-in
-completer for that command — the external completer (inshellah's `complete`
-subcommand) is only consulted as a fallback.
+inshellah caches its output verbatim as a `.nu` file in the completion
+index, then parses that file from `inshellah complete`. the generated
+candidates still flow through the external completer, so native completions
+do not bypass inshellah's priority rules.
 
 at the `extern` layer, positional/flag types drive what nushell offers:
 
@@ -117,9 +117,10 @@ at the `extern` layer, positional/flag types drive what nushell offers:
 - `: string@my_completer` runs a user-defined closure.
 - bare `: string` / `: int` provides no candidates of its own.
 
-so when a native `.nu` declares `--file: path`, you'll see file completions
-intermixed with whatever else is in scope. that's intrinsic to the type,
-not something inshellah injects.
+source'ing a native `.nu` directly is different: if it declares
+`--file: path`, nushell may offer file completions from the extern type
+itself. the module avoids linking package `vendor/autoload` trees so those
+direct externs do not silently take priority over inshellah.
 
 a few things worth knowing:
 
@@ -136,12 +137,10 @@ a few things worth knowing:
   none of them disables file completion for `: path` parameters — that
   behavior is tied to the type itself.
 
-if a particular native completion bothers you, the workaround is to drop
-that one `.nu` file from the autoload directory. nushell falls back to the
-external completer for unknown commands, and inshellah's `complete`
-subcommand returns candidates directly as JSON — bypassing the `extern`
-type layer entirely, so no `: path` slot triggers nu's built-in file
-completer.
+if a particular package-provided native completion bothers you, make sure
+it is not sourced from your own config or another autoload path. inshellah's
+`complete` subcommand returns candidates directly as JSON, bypassing the
+`extern` type layer.
 
 ## nixos
 
