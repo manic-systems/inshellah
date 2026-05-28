@@ -17,6 +17,7 @@
 //! `lock()`) and a single-syscall fast path in the uncontended case.
 
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -127,7 +128,8 @@ impl<J: Send + 'static> ScrapePool<J> {
                         inner: inner.clone(),
                     };
                     while let Some(job) = inner.next() {
-                        handler(job, &submitter);
+                        // keep panics from stranding in_flight
+                        let _ = catch_unwind(AssertUnwindSafe(|| handler(job, &submitter)));
                         inner.complete();
                     }
                 })
@@ -230,5 +232,31 @@ mod tests {
     fn wait_with_no_jobs_returns_immediately() {
         let pool: ScrapePool<()> = ScrapePool::new(2, |_, _| {});
         pool.wait();
+    }
+
+    #[test]
+    fn panicking_handler_does_not_deadlock_and_workers_survive() {
+        let processed = Arc::new(AtomicUsize::new(0));
+        let pool = ScrapePool::new(2, {
+            let processed = processed.clone();
+            move |n: u32, _: &Submitter<u32>| {
+                if n == 0 {
+                    panic!("boom");
+                }
+                processed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        // keep test output quiet
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        pool.submit(0);
+        for i in 1..50u32 {
+            pool.submit(i);
+        }
+        pool.wait();
+        std::panic::set_hook(prev);
+
+        assert_eq!(processed.load(Ordering::SeqCst), 49);
     }
 }
