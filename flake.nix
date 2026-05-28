@@ -24,7 +24,7 @@
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "inshellah";
-          version = "0.1.1";
+          version = "0.1.2";
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
           meta = {
