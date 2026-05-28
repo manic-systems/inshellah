@@ -31,6 +31,7 @@
 let
   cfg = config.programs.inshellah;
   completerSnippet = ./inshellah-completer.nu;
+  defaultPackage = pkgs.callPackage ./package.nix { };
   dynamicStubCommands = [
     "systemctl"
     "journalctl"
@@ -65,6 +66,8 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
+      default = defaultPackage;
+      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
       description = "package to use for indexing completions";
     };
 
@@ -231,9 +234,9 @@ in
     environment.variables.INSHELLAH_FLAG_TRIGGERS = cfg.flagTriggers;
     environment.variables.INSHELLAH_FLAG_ON_EMPTY = if cfg.flagOnEmpty then "1" else "0";
     environment.variables.INSHELLAH_MAX_COMPLETIONS = toString cfg.maxCompletions;
-    environment.variables.INSHELLAH_TIMEOUT_MS = lib.mkIf (
-      cfg.completeTimeoutMs != null
-    ) (toString cfg.completeTimeoutMs);
+    environment.variables.INSHELLAH_TIMEOUT_MS = lib.mkIf (cfg.completeTimeoutMs != null) (
+      toString cfg.completeTimeoutMs
+    );
 
     environment.systemPackages =
       let
