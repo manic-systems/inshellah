@@ -227,10 +227,12 @@ pub fn nushell_type_of_param(name: &str) -> &'static str {
     }
 }
 
-/// escape a string for use inside nushell double-quoted string literals.
-/// only double quotes and backslashes need escaping in nushell's syntax.
+/// escape for nushell strings and trailing comments
 pub fn escape_nu(s: &str) -> Cow<'_, str> {
-    if !s.contains('"') && !s.contains('\\') {
+    if !s
+        .bytes()
+        .any(|b| matches!(b, b'"' | b'\\' | b'\n' | b'\r' | b'\t'))
+    {
         Cow::Borrowed(s)
     } else {
         let mut buf = String::with_capacity(s.len() + 4);
@@ -238,10 +240,22 @@ pub fn escape_nu(s: &str) -> Cow<'_, str> {
             match c {
                 '"' => buf.push_str("\\\""),
                 '\\' => buf.push_str("\\\\"),
+                '\n' => buf.push_str("\\n"),
+                '\r' => buf.push_str("\\r"),
+                '\t' => buf.push_str("\\t"),
                 c => buf.push(c),
             }
         }
         Cow::Owned(buf)
+    }
+}
+
+/// strip control chars from bare extern tokens
+fn sanitize_token(s: &str) -> Cow<'_, str> {
+    if s.chars().any(char::is_control) {
+        Cow::Owned(s.chars().filter(|c| !c.is_control()).collect())
+    } else {
+        Cow::Borrowed(s)
     }
 }
 
@@ -258,6 +272,7 @@ pub fn format_flag(entry: &ManpageEntry) -> String {
         OwnedSwitch::Long(l) => format!("--{l}"),
         OwnedSwitch::Short(c) => format!("-{c}"),
     };
+    let name = sanitize_token(&name);
     let typed = match &entry.param {
         Some(OwnedParam::Mandatory(p)) | Some(OwnedParam::Optional(p)) => {
             format!(": {}", nushell_type_of_param(p))
@@ -269,7 +284,7 @@ pub fn format_flag(entry: &ManpageEntry) -> String {
         flag
     } else {
         let pad_len = 40usize.saturating_sub(flag.len()).max(1);
-        format!("{flag}{}# {}", " ".repeat(pad_len), entry.desc)
+        format!("{flag}{}# {}", " ".repeat(pad_len), escape_nu(&entry.desc))
     }
 }
 
@@ -278,7 +293,7 @@ pub fn format_flag(entry: &ManpageEntry) -> String {
 /// hyphens in names are converted to underscores since nushell identifiers
 /// cannot contain hyphens.
 pub fn format_positional(name: &str, p: &Positional) -> String {
-    let name_underscored: String = name
+    let name_underscored: String = sanitize_token(name)
         .chars()
         .map(|c| if c == '-' { '_' } else { c })
         .collect();
@@ -388,4 +403,53 @@ pub fn generate_module(cmd_name: &str, result: &ManpageResult) -> String {
         "module {mod_name} {{\n{}}}\n\nuse {mod_name} *\n",
         generate_extern(cmd_name, result)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parsers::manpage::{ManpageResult, ManpageSubcommand};
+
+    #[test]
+    fn escape_nu_escapes_line_breaking_chars() {
+        assert_eq!(escape_nu("a\nb"), "a\\nb");
+        assert_eq!(escape_nu("a\rb"), "a\\rb");
+        assert_eq!(escape_nu("a\tb"), "a\\tb");
+        assert_eq!(escape_nu("say \"hi\""), "say \\\"hi\\\"");
+        assert!(matches!(escape_nu("plain"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn flag_description_newline_does_not_break_out_of_line() {
+        let entry = ManpageEntry {
+            switch: OwnedSwitch::Long("verbose".into()),
+            param: None,
+            desc: "be loud\nrm -rf /".into(),
+        };
+        let line = format_flag(&entry);
+        assert_eq!(
+            line.lines().count(),
+            1,
+            "flag line must stay single-line: {line:?}"
+        );
+        assert!(!line.contains('\n'));
+        assert!(line.contains("rm -rf /"));
+    }
+
+    #[test]
+    fn subcommand_name_and_desc_newline_stays_single_line() {
+        let result = ManpageResult {
+            subcommands: vec![ManpageSubcommand {
+                name: "stash\"]\nrm -rf /".into(),
+                desc: "danger\nous".into(),
+            }],
+            ..Default::default()
+        };
+        let out = generate_extern("git", &result);
+        assert!(
+            !out.contains("\"]\n"),
+            "string literal not closed early: {out:?}"
+        );
+        assert!(out.contains("rm -rf /"));
+    }
 }
