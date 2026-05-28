@@ -13,6 +13,13 @@
 /// when neither `--timeout-ms` nor `INSHELLAH_TIMEOUT_MS` is set.
 pub const DEFAULT_TIMEOUT_MS: u64 = 200;
 
+/// wall-clock budget (ms) for the dynamic completer. 0 disables.
+pub const DEFAULT_DYNAMIC_TIMEOUT_MS: u64 = 5000;
+
+/// cap on rows the dynamic completer asks native list commands for
+/// (e.g. `git for-each-ref --count N`). 0 omits the flag.
+pub const DEFAULT_DYNAMIC_LIMIT: usize = 200;
+
 /// the historical (and default) flag-trigger set: a partial token starting
 /// with `-` asks for flag completions.
 pub const DEFAULT_FLAG_TRIGGERS: &str = "-";
@@ -33,6 +40,11 @@ pub struct Config {
     pub max_completions: usize,
     /// per-subprocess timeout (ms) for the dynamic `--help` resolve path.
     pub timeout_ms: u64,
+    /// wall-clock budget shared across dynamic completer subprocesses.
+    /// distinct from `timeout_ms`, which only governs `--help` resolution.
+    pub dynamic_timeout_ms: u64,
+    /// row cap the dynamic completer applies to native list commands.
+    pub dynamic_limit: usize,
 }
 
 impl Default for Config {
@@ -42,6 +54,8 @@ impl Default for Config {
             flag_on_empty: false,
             max_completions: 0,
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            dynamic_timeout_ms: DEFAULT_DYNAMIC_TIMEOUT_MS,
+            dynamic_limit: DEFAULT_DYNAMIC_LIMIT,
         }
     }
 }
@@ -77,6 +91,20 @@ impl Config {
             && let Ok(n) = raw.trim().parse::<u64>()
         {
             cfg.timeout_ms = n;
+        }
+        // i64 round-trip so "-1" parses (then gets rejected) instead of
+        // wrapping. negatives and garbage both fall back to the default.
+        if let Some(raw) = get("INSHELLAH_DYNAMIC_TIMEOUT_MS")
+            && let Ok(n) = raw.trim().parse::<i64>()
+            && n >= 0
+        {
+            cfg.dynamic_timeout_ms = n as u64;
+        }
+        if let Some(raw) = get("INSHELLAH_DYNAMIC_LIMIT")
+            && let Ok(n) = raw.trim().parse::<i64>()
+            && n >= 0
+        {
+            cfg.dynamic_limit = n as usize;
         }
         cfg
     }
@@ -212,6 +240,32 @@ mod tests {
                 bare: true
             }
         );
+    }
+
+    #[test]
+    fn dynamic_knobs_parse_and_disable() {
+        let cfg = cfg_from(&[
+            ("INSHELLAH_DYNAMIC_TIMEOUT_MS", "1000"),
+            ("INSHELLAH_DYNAMIC_LIMIT", "50"),
+        ]);
+        assert_eq!(cfg.dynamic_timeout_ms, 1000);
+        assert_eq!(cfg.dynamic_limit, 50);
+
+        // explicit zero is the historical "disabled" sentinel for both knobs.
+        let zeroed = cfg_from(&[
+            ("INSHELLAH_DYNAMIC_TIMEOUT_MS", "0"),
+            ("INSHELLAH_DYNAMIC_LIMIT", "0"),
+        ]);
+        assert_eq!(zeroed.dynamic_timeout_ms, 0);
+        assert_eq!(zeroed.dynamic_limit, 0);
+
+        // negatives and garbage leave the compiled defaults intact.
+        let bad = cfg_from(&[
+            ("INSHELLAH_DYNAMIC_TIMEOUT_MS", "-1"),
+            ("INSHELLAH_DYNAMIC_LIMIT", "nope"),
+        ]);
+        assert_eq!(bad.dynamic_timeout_ms, DEFAULT_DYNAMIC_TIMEOUT_MS);
+        assert_eq!(bad.dynamic_limit, DEFAULT_DYNAMIC_LIMIT);
     }
 
     #[test]
