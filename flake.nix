@@ -5,8 +5,12 @@
   outputs =
     { self, nixpkgs }:
     let
+      inherit (nixpkgs) lib;
       forAllSystems =
-        f: nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed (sys: f nixpkgs.legacyPackages.${sys});
+        f:
+        lib.genAttrs (lib.systems.doubles.linux ++ lib.systems.doubles.darwin) (
+          system: f (nixpkgs.legacyPackages.${system} or (import nixpkgs { inherit system; }))
+        );
     in
     {
       devShells = forAllSystems (pkgs: {
@@ -22,16 +26,7 @@
       });
 
       packages = forAllSystems (pkgs: {
-        default = pkgs.rustPlatform.buildRustPackage {
-          pname = "inshellah";
-          version = "0.1.2";
-          src = pkgs.lib.cleanSource ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          meta = {
-            description = "nushell completion indexer";
-            mainProgram = "inshellah";
-          };
-        };
+        default = pkgs.callPackage ./nix/package.nix { };
       });
 
       checks = forAllSystems (
@@ -127,23 +122,7 @@
         }
       );
 
-      # the module body in ./nix/module.nix only touches options common to
-      # both NixOS and nix-darwin (environment.{variables,systemPackages,
-      # pathsToLink,extraSetup} + a programs.inshellah namespace), so the two
-      # platform outputs share it verbatim and differ only in which package
-      # the host system resolves to.
-      nixosModules.default =
-        { pkgs, ... }:
-        {
-          imports = [ ./nix/module.nix ];
-          programs.inshellah.package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-        };
-
-      darwinModules.default =
-        { pkgs, ... }:
-        {
-          imports = [ ./nix/module.nix ];
-          programs.inshellah.package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-        };
+      nixosModules.default = import ./nix/module.nix;
+      darwinModules.default = import ./nix/module.nix;
     };
 }
