@@ -101,6 +101,8 @@ fn safe_env_vars() -> &'static [(std::ffi::OsString, std::ffi::OsString)] {
     })
 }
 
+const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
 /// run a command with a timeout, capturing stdout+stderr merged.
 /// returns None if the process couldn't be started, produced no output,
 /// or was killed due to timeout.
@@ -157,8 +159,9 @@ fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
     let mut stdout_open = true;
     let mut stderr_open = true;
     let mut timed_out = false;
+    let mut capped = false;
 
-    while stdout_open || stderr_open {
+    'capture: while stdout_open || stderr_open {
         let now = Instant::now();
         if now >= deadline {
             timed_out = true;
@@ -208,7 +211,13 @@ fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
                         *open = false;
                         break;
                     }
-                    Ok(read) => buf.extend_from_slice(&chunk[..read]),
+                    Ok(read) => {
+                        buf.extend_from_slice(&chunk[..read]);
+                        if buf.len() >= MAX_CAPTURE_BYTES {
+                            capped = true;
+                            break 'capture;
+                        }
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(_) => {
                         *open = false;
@@ -222,13 +231,16 @@ fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
         }
     }
 
-    if timed_out {
+    if timed_out || capped {
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
         }
     }
     let _ = child.wait();
 
+    if capped {
+        buf.truncate(MAX_CAPTURE_BYTES);
+    }
     if buf.is_empty() {
         None
     } else {
@@ -554,6 +566,14 @@ fn try_native_completion(bin: &Path, timeout_ms: u64) -> Option<String> {
 
 const MAX_RESOLVE_RESULTS: usize = 500;
 const MAX_RECURSE_DEPTH: u32 = 5;
+const RESOLVE_BUDGET_MULTIPLE: u64 = 8;
+
+fn remaining_ms(deadline: Instant) -> u64 {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
 
 fn parse_help_text(text: &str) -> ManpageResult {
     let cleaned: String = fast_strip_ansi::strip_ansi_string(text).into_owned();
@@ -572,12 +592,13 @@ fn help_resolve(
     cmd: &str,
     depth: u32,
     timeout_ms: u64,
+    deadline: Instant,
     acc: &mut Vec<(String, ManpageResult)>,
 ) {
-    if acc.len() >= MAX_RESOLVE_RESULTS {
+    if acc.len() >= MAX_RESOLVE_RESULTS || Instant::now() >= deadline {
         return;
     }
-    let Some(help_text) = try_help(bin, timeout_ms) else {
+    let Some(help_text) = try_help(bin, timeout_ms.min(remaining_ms(deadline))) else {
         return;
     };
     let result = parse_help_text(&help_text);
@@ -600,6 +621,7 @@ fn help_resolve(
             std::slice::from_ref(&sub),
             depth + 1,
             timeout_ms,
+            deadline,
             acc,
         );
     }
@@ -611,13 +633,14 @@ fn recurse_subcommand(
     sub_args: &[String],
     depth: u32,
     timeout_ms: u64,
+    deadline: Instant,
     acc: &mut Vec<(String, ManpageResult)>,
 ) {
-    if acc.len() >= MAX_RESOLVE_RESULTS || depth > MAX_RECURSE_DEPTH {
+    if acc.len() >= MAX_RESOLVE_RESULTS || depth > MAX_RECURSE_DEPTH || Instant::now() >= deadline {
         return;
     }
     let full_cmd = format!("{base_cmd} {}", sub_args.join(" "));
-    let Some(text) = try_help_args(bin_s, sub_args, timeout_ms) else {
+    let Some(text) = try_help_args(bin_s, sub_args, timeout_ms.min(remaining_ms(deadline))) else {
         return;
     };
     let result = parse_help_text(&text);
@@ -646,7 +669,7 @@ fn recurse_subcommand(
         }
         let mut next = sub_args.to_vec();
         next.push(sub);
-        recurse_subcommand(bin_s, base_cmd, &next, depth + 1, timeout_ms, acc);
+        recurse_subcommand(bin_s, base_cmd, &next, depth + 1, timeout_ms, deadline, acc);
     }
 }
 
@@ -936,6 +959,37 @@ mod main_tests {
         // Mach-O magics are rejected; FAT_MAGIC also collides with java class.
         assert!(!is_scannable_magic(&[0xca, 0xfe, 0xba, 0xbe]));
         assert!(!is_scannable_magic(&[0xcf, 0xfa, 0xed, 0xfe]));
+    }
+
+    #[test]
+    fn remaining_ms_saturates_at_zero() {
+        let past = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(remaining_ms(past), 0, "elapsed deadline must yield 0");
+
+        let future = Instant::now() + Duration::from_millis(500);
+        let r = remaining_ms(future);
+        assert!(r > 0 && r <= 500, "remaining {r} out of (0, 500]");
+    }
+
+    #[test]
+    fn run_cmd_caps_captured_output() {
+        let out = run_cmd(
+            &[
+                "head".into(),
+                "-c".into(),
+                "5000000".into(),
+                "/dev/zero".into(),
+            ],
+            2000,
+        );
+        if let Some(s) = out {
+            assert_eq!(
+                s.len(),
+                MAX_CAPTURE_BYTES,
+                "captured output not clamped to cap"
+            );
+        }
     }
 }
 
@@ -1827,6 +1881,8 @@ fn resolve_command_path_and_cache(
     path: &Path,
     timeout_ms: u64,
 ) -> Option<ManpageResult> {
+    let deadline =
+        Instant::now() + Duration::from_millis(timeout_ms.saturating_mul(RESOLVE_BUDGET_MULTIPLE));
     let full_cmd = if sub_args.is_empty() {
         base_cmd.to_string()
     } else {
@@ -1858,10 +1914,10 @@ fn resolve_command_path_and_cache(
     }
     // 3. fallback: scrape --help text.
     let text = if sub_args.is_empty() {
-        try_help(path, timeout_ms)
+        try_help(path, timeout_ms.min(remaining_ms(deadline)))
     } else {
         let bin_s = path.to_string_lossy().to_string();
-        try_help_args(&bin_s, sub_args, timeout_ms)
+        try_help_args(&bin_s, sub_args, timeout_ms.min(remaining_ms(deadline)))
     }?;
     let parsed = parse_help_text(&text);
     if parsed.entries.is_empty() && parsed.subcommands.is_empty() && parsed.positionals.is_empty() {
@@ -1879,7 +1935,7 @@ fn resolve_command_path_and_cache(
     let _ = write_result(user_dir, &full_cmd, "help", &parsed);
     if sub_args.is_empty() {
         let mut sub_acc: Vec<(String, ManpageResult)> = Vec::new();
-        help_resolve(path, base_cmd, 1, timeout_ms, &mut sub_acc);
+        help_resolve(path, base_cmd, 1, timeout_ms, deadline, &mut sub_acc);
         for (cmd, r) in sub_acc.into_iter().skip(1) {
             let _ = write_result(user_dir, &cmd, "help", &r);
         }
@@ -1901,6 +1957,7 @@ fn resolve_command_path_and_cache(
                 &next,
                 sub_args.len() as u32 + 2,
                 timeout_ms,
+                deadline,
                 &mut sub_acc,
             );
         }
