@@ -16,13 +16,13 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
 use inshellah::config::{Config, DEFAULT_TIMEOUT_MS};
+use inshellah::dynamic::dynamic_complete;
 use inshellah::parsers::help::help_parser;
 use inshellah::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
@@ -34,6 +34,7 @@ use inshellah::store::{
     all_commands, default_store_path, ensure_dir, file_type_of, filename_of_command, lookup,
     lookup_raw, parse_nu_completions, purge_dir, subcommands_of, write_native, write_result,
 };
+use inshellah::subprocess::run_cmd;
 
 const COMMAND_SECTIONS: &[u8] = &[1, 8];
 
@@ -77,175 +78,6 @@ Configuration (environment, read by `complete`):
   INSHELLAH_TIMEOUT_MS      default --help resolve timeout (--timeout-ms wins)
 "
     );
-}
-
-// --- subprocess management ---
-
-/// sanitized env: strip display-related variables to prevent gui tools from
-/// popping up windows when run with --help. cached once per process —
-/// `vars_os` walks the whole env every call, which adds up across thousands
-/// of spawns.
-fn safe_env_vars() -> &'static [(std::ffi::OsString, std::ffi::OsString)] {
-    static CACHE: std::sync::OnceLock<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        std::env::vars_os()
-            .filter(|(k, _)| {
-                let s = k.to_string_lossy();
-                !(s == "DISPLAY"
-                    || s == "WAYLAND_DISPLAY"
-                    || s == "DBUS_SESSION_BUS_ADDRESS"
-                    || s == "XAUTHORITY")
-            })
-            .collect()
-    })
-}
-
-const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
-
-/// run a command with a timeout, capturing stdout+stderr merged.
-/// returns None if the process couldn't be started, produced no output,
-/// or was killed due to timeout.
-///
-/// uses `poll(2)` on the pipe fds directly from the calling thread — no
-/// reader threads, no try_wait polling loop. we block in the kernel for
-/// either data (POLLIN), peer-close (POLLHUP), or the timeout deadline,
-/// so the cost per subprocess is roughly one syscall per data chunk
-/// plus the spawn itself.
-///
-/// unix process groups still apply: the child is its own pgid leader, so
-/// on timeout we killpg(pgid, SIGKILL) and the whole tree (wrapper
-/// scripts, forked grandchildren) dies, closing the pipe writers and
-/// letting our reads finish cleanly.
-fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-
-    if args.is_empty() {
-        return None;
-    }
-    let mut cmd = Command::new(&args[0]);
-    cmd.args(&args[1..]);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.env_clear();
-    for (k, v) in safe_env_vars() {
-        cmd.env(k, v);
-    }
-    cmd.current_dir("/tmp");
-    cmd.process_group(0);
-
-    let mut child = cmd.spawn().ok()?;
-    let pgid = child.id() as i32;
-    let mut stdout = child.stdout.take()?;
-    let mut stderr = child.stderr.take()?;
-    let stdout_fd = stdout.as_raw_fd();
-    let stderr_fd = stderr.as_raw_fd();
-
-    // both pipe fds must be non-blocking so poll-then-read can drain
-    // everything available without blocking on the next chunk.
-    unsafe {
-        for fd in [stdout_fd, stderr_fd] {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-    }
-
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut buf: Vec<u8> = Vec::with_capacity(4096);
-    let mut chunk = [0u8; 4096];
-    let mut stdout_open = true;
-    let mut stderr_open = true;
-    let mut timed_out = false;
-    let mut capped = false;
-
-    'capture: while stdout_open || stderr_open {
-        let now = Instant::now();
-        if now >= deadline {
-            timed_out = true;
-            break;
-        }
-        let remaining_ms = (deadline - now).as_millis().min(i32::MAX as u128) as i32;
-
-        let mut fds = [
-            libc::pollfd {
-                fd: if stdout_open { stdout_fd } else { -1 },
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: if stderr_open { stderr_fd } else { -1 },
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, remaining_ms) };
-        if n < 0 {
-            // EINTR — retry. anything else: bail and let the child reap below.
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            break;
-        }
-        if n == 0 {
-            // poll itself returned without events — deadline check at top
-            // of next iter will catch it.
-            continue;
-        }
-
-        // drain whichever fds are ready until EAGAIN or EOF.
-        for (i, pfd) in fds.iter().enumerate() {
-            if pfd.revents == 0 {
-                continue;
-            }
-            let (reader, open): (&mut dyn Read, &mut bool) = if i == 0 {
-                (&mut stdout as &mut dyn Read, &mut stdout_open)
-            } else {
-                (&mut stderr as &mut dyn Read, &mut stderr_open)
-            };
-            loop {
-                match reader.read(&mut chunk) {
-                    Ok(0) => {
-                        *open = false;
-                        break;
-                    }
-                    Ok(read) => {
-                        buf.extend_from_slice(&chunk[..read]);
-                        if buf.len() >= MAX_CAPTURE_BYTES {
-                            capped = true;
-                            break 'capture;
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => {
-                        *open = false;
-                        break;
-                    }
-                }
-            }
-            if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                *open = false;
-            }
-        }
-    }
-
-    if timed_out || capped {
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-    }
-    let _ = child.wait();
-
-    if capped {
-        buf.truncate(MAX_CAPTURE_BYTES);
-    }
-    if buf.is_empty() {
-        None
-    } else {
-        Some(String::from_utf8_lossy(&buf).into_owned())
-    }
 }
 
 // --- file classification ---
@@ -972,25 +804,6 @@ mod main_tests {
         assert!(r > 0 && r <= 500, "remaining {r} out of (0, 500]");
     }
 
-    #[test]
-    fn run_cmd_caps_captured_output() {
-        let out = run_cmd(
-            &[
-                "head".into(),
-                "-c".into(),
-                "5000000".into(),
-                "/dev/zero".into(),
-            ],
-            2000,
-        );
-        if let Some(s) = out {
-            assert_eq!(
-                s.len(),
-                MAX_CAPTURE_BYTES,
-                "captured output not clamped to cap"
-            );
-        }
-    }
 }
 
 /// shared state passed to every pool worker. nothing inside mutates
@@ -2237,7 +2050,13 @@ fn cmd_complete(
     // answer argument prefixes. when the token starts with "-", keep flags.
     let want_files = !typing_flag && !has_subs && (last_token.is_empty() || candidates.is_empty());
     if want_files || candidates.is_empty() {
-        println!("null");
+        // spans are post-elevation, so `sudo nix ...` reaches the dynamic
+        // dispatch as `[nix, ...]` and hits the nix branch.
+        if let Some(dyn_candidates) = dynamic_complete(&spans, cfg) {
+            print_completion_candidates(&dyn_candidates);
+        } else {
+            println!("null");
+        }
     } else {
         print_completion_candidates(&candidates);
     }
