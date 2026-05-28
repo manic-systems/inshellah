@@ -147,7 +147,14 @@
                 ;;
               bookmark)
                 if [ "''${2:-}" = list ]; then
-                  printf 'main\nfeature\norigin/main\n'
+                  case "$*" in
+                    *--all-remotes*)
+                      printf 'main@origin\tmain change\nfeature@upstream\tfeature change\nmain@git\tmain change\n'
+                      ;;
+                    *)
+                      printf 'main\tmain change\nfeature\tfeature change\nfeature\tfeature change\n'
+                      ;;
+                  esac
                 fi
                 ;;
               tag)

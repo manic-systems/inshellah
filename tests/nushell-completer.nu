@@ -18,6 +18,10 @@ def values [items] {
     $items | default [] | get value
 }
 
+def descriptions [items] {
+    $items | default [] | get description
+}
+
 let completer = $env.config.completions.external.completer
 
 def _assert_elevation_wrappers_accept_command_tails [p: path] {
@@ -110,7 +114,16 @@ let jj_top = do $completer [jj ""]
 assert-contains (values $jj_top) "bookmark" "jj top-level completes common commands"
 assert-contains (values $jj_top) "git" "jj top-level includes git command"
 let jj_bookmarks = do $completer [jj bookmark delete ""]
-assert-eq (values $jj_bookmarks) [main feature origin/main] "jj bookmark delete completes bookmarks"
+assert-eq (values $jj_bookmarks) [main feature] "jj bookmark delete completes deduped local bookmarks"
+assert-eq (descriptions $jj_bookmarks) ["main change" "feature change"] "jj bookmark descriptions use commit subjects"
+let jj_track = do $completer [jj bookmark track ""]
+assert-eq (values $jj_track) [main@origin feature@upstream] "jj bookmark track completes remote bookmarks, excluding @git"
+assert-eq (descriptions $jj_track) ["main change" "feature change"] "jj bookmark track descriptions use commit subjects"
+let jj_push_bookmark = do $completer [jj git push --bookmark ""]
+assert-eq (values $jj_push_bookmark) [main@origin main@upstream feature@origin feature@upstream] "jj git push --bookmark completes bookmark remote pairs"
+assert-eq (descriptions $jj_push_bookmark) ["main change" "main change" "feature change" "feature change"] "jj git push --bookmark descriptions use commit subjects"
+let jj_push_bookmark_short = do $completer [jj git push -b ""]
+assert-eq (values $jj_push_bookmark_short) [main@origin main@upstream feature@origin feature@upstream] "jj git push -b completes bookmark remote pairs"
 let jj_tags = do $completer [jj tag delete ""]
 assert-eq (values $jj_tags) [v1.0 v2.0] "jj tag delete completes tags"
 let jj_git_fetch = do $completer [jj git fetch ""]

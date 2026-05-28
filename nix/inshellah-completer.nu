@@ -353,11 +353,27 @@ let inshellah_jj_revs = { ||
 
 let inshellah_jj_bookmarks = { ||
     try {
-        ^jj bookmark list --all-remotes -T 'name ++ "\n"' err> /dev/null
+        ^jj bookmark list -T 'name ++ "\t" ++ if(normal_target, normal_target.description().first_line(), "") ++ "\n"' err> /dev/null
             | lines
             | str trim
             | where { |b| not ($b | is-empty) }
-            | each { |b| {value: $b, description: "bookmark"} }
+            | each { |b|
+                let p = $b | split row "\t"
+                if ($p | length) >= 1 { {value: $p.0, description: ($p | get 1? | default "")} }
+            } | compact | uniq-by value
+    } catch { null }
+}
+
+let inshellah_jj_remote_bookmarks = { ||
+    try {
+        ^jj bookmark list --all-remotes -T 'if(remote, name ++ "@" ++ remote ++ "\t" ++ if(normal_target, normal_target.description().first_line(), "") ++ "\n", "")' err> /dev/null
+            | lines
+            | str trim
+            | where { |b| not ($b | is-empty) }
+            | each { |b|
+                let p = $b | split row "\t"
+                if ($p | length) >= 1 { {value: $p.0, description: ($p | get 1? | default "")} }
+            } | compact | where { |b| not ($b.value | str ends-with "@git") } | uniq-by value
     } catch { null }
 }
 
@@ -380,6 +396,18 @@ let inshellah_jj_remotes = { ||
                 if ($p | length) >= 1 { {value: $p.0, description: ($p | get 1? | default "remote")} }
             } | compact
     } catch { null }
+}
+
+let inshellah_jj_push_bookmarks = { ||
+    let bookmarks = do $inshellah_jj_bookmarks | default []
+    let remotes = do $inshellah_jj_remotes | default []
+    $bookmarks
+        | each { |b|
+            $remotes | each { |r|
+                {value: $"($b.value)@($r.value)", description: ($b.description? | default "")}
+            }
+        }
+        | flatten
 }
 
 let inshellah_jj_ops = { ||
@@ -710,6 +738,12 @@ let inshellah_complete = { |spans|
                     do $inshellah_jj_revs
                 } else if ($prev_span == "--remote") {
                     do $inshellah_jj_remotes
+                } else if ($prev_span == "--bookmark" or $prev_span == "-b") {
+                    if ($sub == "git" and ($spans | get 2? | default "") == "push") {
+                        do $inshellah_jj_push_bookmarks
+                    } else {
+                        do $inshellah_jj_bookmarks
+                    }
                 } else if ($prev_span == "--at-operation" or $prev_span == "--at-op") {
                     do $inshellah_jj_ops
                 } else if $span_len <= 2 {
@@ -718,8 +752,10 @@ let inshellah_complete = { |spans|
                     let verb = $spans | get 2? | default ""
                     if $span_len <= 3 {
                         $bookmark_verbs | each { |v| {value: $v, description: "bookmark subcommand"} }
-                    } else if ($verb in ["delete" "forget" "move" "rename" "set" "track" "untrack" "advance"]) {
+                    } else if ($verb in ["delete" "forget" "move" "rename" "set" "advance"]) {
                         do $inshellah_jj_bookmarks
+                    } else if ($verb in ["track" "untrack"]) {
+                        do $inshellah_jj_remote_bookmarks
                     } else { null }
                 } else if ($sub == "tag") {
                     let verb = $spans | get 2? | default ""
