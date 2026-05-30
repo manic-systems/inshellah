@@ -947,6 +947,17 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
             let mut mp_result = parse_manpage_string(&contents);
             if !mp_result.entries.is_empty() || !mp_result.subcommands.is_empty() {
                 strip_subcmd_prefix(&mut mp_result, &hyphenated);
+                // a group command whose body listed no children. sibling
+                // `cmd-sub.N` pages are indexed by the manpage walk in phase
+                // 2, so the only gap here is the help-only case (no sibling
+                // pages — subcommands documented solely in `--help`).
+                if looks_like_unenumerated_group(&mp_result)
+                    && !has_sibling_manpages(&ctx.mandirs, &hyphenated)
+                    && let Some(subs) =
+                        group_subcommands_from_help(&job.bin_path, &job.sub_args, ctx.timeout_ms)
+                {
+                    mp_result.subcommands = subs;
+                }
                 let _ = write_result(&ctx.cache_dir, &full_cmd, "manpage", &mp_result);
                 ctx.indexed.lock().insert(full_cmd);
                 enqueue_subcommands(&job, &mp_result.subcommands, submit);
@@ -1901,6 +1912,103 @@ fn resolve_and_cache(
     resolve_command_path_and_cache(user_dir, mandirs, cmd_name, &[], path, timeout_ms)
 }
 
+/// index every descendant manpage of a group command (`cmd-*.N`) into the
+/// user cache, resolving each page's real space-separated name from its
+/// own content. returns whether anything was indexed. lets `subcommands_of`
+/// surface a group's children when its parent page didn't enumerate them.
+fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str) -> bool {
+    let prefix = format!("{hyphenated}-");
+    let mut any = false;
+    for mandir in mandirs {
+        for section in COMMAND_SECTIONS {
+            let secdir = mandir.join(format!("man{section}"));
+            let Ok(entries) = fs::read_dir(&secdir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let Some(fname) = fname.to_str() else { continue };
+                let stem = fname.split('.').next().unwrap_or(fname);
+                if !stem.starts_with(&prefix) {
+                    continue;
+                }
+                if let Some((name, result, subs)) = process_manpage(&entry.path()) {
+                    let _ = write_result(user_dir, &name, "manpage", &result);
+                    for (sub_name, sub_result) in subs {
+                        let _ = write_result(user_dir, &sub_name, "manpage", &sub_result);
+                    }
+                    any = true;
+                }
+            }
+        }
+    }
+    any
+}
+
+/// is there at least one descendant manpage (`cmd-*.N`) for this command?
+/// a cheap existence probe — used to decide whether the manpage route can
+/// supply a group's children before reaching for `--help`.
+fn has_sibling_manpages(mandirs: &[PathBuf], hyphenated: &str) -> bool {
+    let prefix = format!("{hyphenated}-");
+    for mandir in mandirs {
+        for section in COMMAND_SECTIONS {
+            let secdir = mandir.join(format!("man{section}"));
+            let Ok(entries) = fs::read_dir(&secdir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|f| f.starts_with(&prefix))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// scrape a group command's children from `--help` (subcommands only).
+fn group_subcommands_from_help(
+    path: &Path,
+    sub_args: &[String],
+    timeout_ms: u64,
+) -> Option<Vec<ManpageSubcommand>> {
+    let text = if sub_args.is_empty() {
+        try_help(path, timeout_ms)
+    } else {
+        let bin_s = path.to_string_lossy().to_string();
+        try_help_args(&bin_s, sub_args, timeout_ms)
+    }?;
+    let help = parse_help_text(&text);
+    (!help.subcommands.is_empty()).then_some(help.subcommands)
+}
+
+/// a manpage resolved to a group command whose body enumerated no children.
+/// recover them without discarding the manpage's flags: prefer the manpage
+/// route (index the sibling `cmd-sub.N` pages, which `subcommands_of` then
+/// surfaces); fall back to `--help` only when no sibling pages exist. used
+/// by the on-the-fly resolver, which (unlike `index`) doesn't otherwise
+/// walk the sibling pages.
+fn supplement_group_subcommands(
+    result: &mut ManpageResult,
+    user_dir: &Path,
+    mandirs: &[PathBuf],
+    hyphenated: &str,
+    path: &Path,
+    sub_args: &[String],
+    timeout_ms: u64,
+) {
+    if index_sibling_manpages(user_dir, mandirs, hyphenated) {
+        return;
+    }
+    if let Some(subs) = group_subcommands_from_help(path, sub_args, timeout_ms) {
+        result.subcommands = subs;
+    }
+}
+
 fn resolve_command_path_and_cache(
     user_dir: &Path,
     mandirs: &[PathBuf],
@@ -1936,6 +2044,20 @@ fn resolve_command_path_and_cache(
         let mut result = parse_manpage_string(&contents);
         if !result.entries.is_empty() || !result.subcommands.is_empty() {
             strip_subcmd_prefix(&mut result, &hyphenated);
+            // a group command whose manpage body listed no children: recover
+            // them from sibling pages or --help instead of returning a result
+            // that completes to nothing.
+            if looks_like_unenumerated_group(&result) {
+                supplement_group_subcommands(
+                    &mut result,
+                    user_dir,
+                    mandirs,
+                    &hyphenated,
+                    path,
+                    sub_args,
+                    timeout_ms.min(remaining_ms(deadline)),
+                );
+            }
             let _ = write_result(user_dir, &full_cmd, "manpage", &result);
             return Some(result);
         }
