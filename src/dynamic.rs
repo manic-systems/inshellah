@@ -1208,41 +1208,53 @@ const JJ_REV_FLAGS: &[&str] = &[
     "--revisions",
     "--from",
     "--to",
+    "--into",
     "-s",
     "--source",
     "-d",
     "--destination",
     "--insert-after",
     "--insert-before",
+    "-A",
+    "-B",
     "--before",
     "--after",
     "--onto",
     "--change",
 ];
-const JJ_REV_VERBS: &[&str] = &[
+// rewriting verbs draw their primary revset args from mutable(). their
+// destination/anchor flags (below) still draw from all().
+const JJ_MUTABLE_VERBS: &[&str] = &[
     "abandon",
-    "absorb",
     "describe",
-    "diff",
-    "diffedit",
-    "duplicate",
     "edit",
-    "evolog",
-    "interdiff",
-    "log",
     "metaedit",
-    "new",
     "parallelize",
     "rebase",
-    "restore",
-    "revert",
-    "show",
-    "sign",
-    "simplify-parents",
     "split",
     "squash",
-    "unsign",
 ];
+const JJ_DEST_FLAGS: &[&str] = &[
+    "-d",
+    "--destination",
+    "--onto",
+    "--insert-after",
+    "--insert-before",
+    "-A",
+    "-B",
+    "--after",
+    "--before",
+];
+// a bare positional is a fileset, not a revision
+const JJ_FILE_POS_VERBS: &[&str] = &[
+    "absorb", "commit", "diff", "diffedit", "fix", "log", "restore", "split", "squash",
+];
+// a bare positional is a revision the verb rewrites
+const JJ_MUTABLE_POS_VERBS: &[&str] =
+    &["abandon", "describe", "edit", "metaedit", "parallelize"];
+// a bare positional is a revision drawn from all()
+const JJ_ALL_POS_VERBS: &[&str] = &["duplicate", "new", "show"];
+const JJ_CONFIG_VERBS: &[&str] = &["edit", "get", "list", "path", "set", "unset"];
 const JJ_BOOKMARK_VERBS: &[&str] = &[
     "advance", "create", "delete", "forget", "list", "move", "rename", "set", "track", "untrack",
 ];
@@ -1273,26 +1285,24 @@ fn jj_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     } else {
         ""
     };
-    let positionals_after_sub: Vec<&str> = spans
-        .iter()
-        .skip(2)
-        .filter(|s| !s.is_empty() && !s.starts_with('-'))
-        .map(String::as_str)
-        .collect();
+    let last = spans.last().map(String::as_str).unwrap_or("");
 
+    // rebase's `-b`/`--branch` is a revset; git push's `-b`/`--bookmark` is
+    // a local bookmark name. disambiguate on the subcommand.
+    if prev == "--branch" || (prev == "-b" && sub == "rebase") {
+        return jj_revs(ctx, last, "mutable()");
+    }
     if JJ_REV_FLAGS.contains(&prev) {
-        return jj_revs(ctx);
+        return jj_revs(ctx, last, jj_flag_revset(sub, prev));
+    }
+    if prev == "-T" || prev == "--template" {
+        return jj_templates(ctx);
     }
     if prev == "--remote" {
         return jj_remotes(ctx);
     }
     if prev == "--bookmark" || prev == "-b" {
-        let is_git_push = sub == "git" && spans.get(2).map(String::as_str) == Some("push");
-        return if is_git_push {
-            jj_push_bookmarks(ctx)
-        } else {
-            jj_bookmarks(ctx)
-        };
+        return jj_bookmarks(ctx, "all()");
     }
     if prev == "--at-operation" || prev == "--at-op" {
         return jj_ops(ctx);
@@ -1316,12 +1326,32 @@ fn jj_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
             );
         }
         if ["delete", "forget", "move", "rename", "set", "advance"].contains(&verb) {
-            return jj_bookmarks(ctx);
+            return jj_bookmarks(ctx, "all()");
         }
-        if ["track", "untrack"].contains(&verb) {
-            return jj_remote_bookmarks(ctx);
+        if verb == "track" {
+            return jj_remote_bookmarks(ctx, Some(false));
+        }
+        if verb == "untrack" {
+            return jj_remote_bookmarks(ctx, Some(true));
         }
         return None;
+    }
+    if sub == "config" {
+        let verb = spans.get(2).map(String::as_str).unwrap_or("");
+        if span_len <= 3 {
+            return Some(
+                JJ_CONFIG_VERBS
+                    .iter()
+                    .map(|v| Candidate::new(*v, "config subcommand"))
+                    .collect(),
+            );
+        }
+        return match verb {
+            "get" | "g" | "set" | "s" => jj_config_keys(ctx, true, false),
+            "unset" | "u" => jj_config_keys(ctx, true, true),
+            "list" | "l" => jj_config_keys(ctx, false, false),
+            _ => None,
+        };
     }
     if sub == "tag" {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
@@ -1424,16 +1454,72 @@ fn jj_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
         }
         return None;
     }
-    if matches!(sub, "diff" | "log") && positionals_after_sub.is_empty() {
-        return jj_files(ctx);
-    }
-    if JJ_REV_VERBS.contains(&sub) && span_len >= 3 {
-        return jj_revs(ctx);
+    // bare positional argument: file, revision, or nothing, per verb.
+    if span_len >= 3 {
+        if JJ_FILE_POS_VERBS.contains(&sub) {
+            return jj_files(ctx);
+        }
+        if sub == "resolve" {
+            return jj_conflicted_files(ctx);
+        }
+        if JJ_MUTABLE_POS_VERBS.contains(&sub) {
+            return jj_revs(ctx, last, "mutable()");
+        }
+        if JJ_ALL_POS_VERBS.contains(&sub) {
+            return jj_revs(ctx, last, "all()");
+        }
     }
     None
 }
 
-fn jj_revs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+/// rewriting verbs pull their primary revsets from `mutable()`. the same
+/// verb's destination/anchor flags still pull from `all()`.
+fn jj_flag_revset(sub: &str, flag: &str) -> &'static str {
+    if JJ_MUTABLE_VERBS.contains(&sub) && !JJ_DEST_FLAGS.contains(&flag) {
+        "mutable()"
+    } else {
+        "all()"
+    }
+}
+
+/// jj completes the trailing symbol of a (possibly compound) revset and
+/// re-prefixes each candidate with the rest of the expression
+fn jj_revs(ctx: &DynCtx, partial: &str, revset: &str) -> Option<Vec<Candidate>> {
+    let (prepend, _) = split_revset_trailing_name(partial);
+    let mutable = revset != "all()";
+    let groups = if mutable {
+        vec![
+            jj_bookmarks(ctx, revset),
+            jj_change_ids(ctx, revset),
+            jj_revset_aliases(ctx),
+        ]
+    } else {
+        vec![
+            jj_bookmarks(ctx, revset),
+            jj_tags(ctx),
+            jj_change_ids(ctx, revset),
+            jj_remote_bookmarks(ctx, None),
+            jj_revset_aliases(ctx),
+        ]
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<Candidate> = Vec::new();
+    for group in groups.into_iter().flatten() {
+        for c in group {
+            if !seen.insert(c.value.clone()) {
+                continue;
+            }
+            if prepend.is_empty() {
+                out.push(c);
+            } else {
+                out.push(Candidate::new(format!("{prepend}{}", c.value), c.description));
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn jj_change_ids(ctx: &DynCtx, revset: &str) -> Option<Vec<Candidate>> {
     let mut args: Vec<String> = vec![
         "jj".into(),
         "log".into(),
@@ -1444,7 +1530,7 @@ fn jj_revs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     args.extend(
         [
             "-r",
-            "all()",
+            revset,
             "-T",
             r#"change_id.shortest() ++ "\t" ++ description.first_line() ++ "\n""#,
         ]
@@ -1455,12 +1541,179 @@ fn jj_revs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     Some(parse_tabular(&out, 2, |p| Candidate::new(p[0], p[1])))
 }
 
-fn jj_bookmarks(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+/// config option names for `config get`/`set`/`list`/`unset`. `leaves_only`
+/// keeps just settable leaf keys (for get/set/unset), `list` also wants the
+/// intermediate table prefixes, derived here. `set_only` drops defaults so
+/// `unset` offers only keys actually present in a config file.
+fn jj_config_keys(ctx: &DynCtx, leaves_only: bool, set_only: bool) -> Option<Vec<Candidate>> {
+    let mut args: Vec<String> = vec!["jj".into(), "config".into(), "list".into()];
+    if !set_only {
+        args.push("--include-defaults".into());
+    }
+    args.push("-T".into());
+    args.push(r#"name ++ "\n""#.into());
+    let out = run_quiet(&args, ctx.ms_left())?;
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates = Vec::new();
+    for line in out.lines() {
+        let name = line.trim();
+        // skip keys with quoted segments (e.g. `colors."error heading".fg`)
+        if name.is_empty() || name.contains('"') {
+            continue;
+        }
+        if !leaves_only {
+            // emit every dotted prefix as its own candidate
+            let mut idx = 0;
+            while let Some(dot) = name[idx..].find('.') {
+                let end = idx + dot;
+                let prefix = &name[..end];
+                if seen.insert(prefix.to_string()) {
+                    candidates.push(Candidate::new(prefix, "config table"));
+                }
+                idx = end + 1;
+            }
+        }
+        if seen.insert(name.to_string()) {
+            candidates.push(Candidate::new(name, "config key"));
+        }
+    }
+    (!candidates.is_empty()).then_some(candidates)
+}
+
+/// files with unresolved conflicts, for `jj resolve`
+fn jj_conflicted_files(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let out = run_quiet(
+        &["jj".into(), "resolve".into(), "--list".into()],
+        ctx.ms_left(),
+    )?;
+    let mut candidates = Vec::new();
+    for line in out.lines() {
+        // "<path>    N-sided conflict ..."
+        let Some(path) = line.split_whitespace().next() else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        candidates.push(Candidate::new(path, "conflict"));
+    }
+    (!candidates.is_empty()).then_some(candidates)
+}
+
+/// nullary revset aliases (e.g. `trunk`), matching jj's symbol-name set.
+/// parameterised aliases come through quoted (`"trunk()"`) and are skipped.
+fn jj_revset_aliases(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let out = run_quiet(
+        &[
+            "jj".into(),
+            "config".into(),
+            "list".into(),
+            "--include-defaults".into(),
+            "revset-aliases".into(),
+            "-T".into(),
+            r#"name ++ "\n""#.into(),
+        ],
+        ctx.ms_left(),
+    )?;
+    let mut candidates = Vec::new();
+    for line in out.lines() {
+        let Some(name) = line.trim().strip_prefix("revset-aliases.") else {
+            continue;
+        };
+        if name.is_empty() || name.starts_with('"') {
+            continue;
+        }
+        candidates.push(Candidate::new(name, "revset alias"));
+    }
+    (!candidates.is_empty()).then_some(candidates)
+}
+
+/// named templates for `-T`/`--template`. jj stores builtins and user
+/// templates alike under `template-aliases.*`; parameterised ones come
+/// through quoted (`"format_short_id(id)"`) and are skipped, leaving the
+/// same nullary set jj's own completer offers.
+fn jj_templates(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let out = run_quiet(
+        &[
+            "jj".into(),
+            "config".into(),
+            "list".into(),
+            "--include-defaults".into(),
+            "template-aliases".into(),
+            "-T".into(),
+            r#"name ++ "\n""#.into(),
+        ],
+        ctx.ms_left(),
+    )?;
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates = Vec::new();
+    for line in out.lines() {
+        let Some(name) = line.trim().strip_prefix("template-aliases.") else {
+            continue;
+        };
+        if name.is_empty() || name.starts_with('"') {
+            continue;
+        }
+        if seen.insert(name.to_string()) {
+            candidates.push(Candidate::new(name, "template"));
+        }
+    }
+    (!candidates.is_empty()).then_some(candidates)
+}
+
+/// mirrors jj's `split_revset_trailing_name`: locate where the trailing
+/// symbol of a compound revset starts so candidates can be re-prefixed
+/// with everything before it. returns `(prefix, trailing_symbol)`; when
+/// the tail doesn't look like a symbol the whole string is the symbol.
+fn split_revset_trailing_name(s: &str) -> (&str, &str) {
+    let after_op = s
+        .rsplit_once([':', '~', '|', '&', '(', ','])
+        .map(|(_, rest)| rest)
+        .unwrap_or(s);
+    let after_range = after_op
+        .rsplit_once("..")
+        .map(|(_, rest)| rest)
+        .unwrap_or(after_op);
+    let tail = after_range.trim_start();
+    if is_revset_symbol_prefix(tail) {
+        (&s[..s.len() - tail.len()], tail)
+    } else {
+        ("", s)
+    }
+}
+
+/// a partially-typed revset symbol: word chars, `_` and `/`, with single
+/// `@ . + -` separators between (never leading, never doubled). a trailing
+/// separator is allowed so `main@` completes the remote part.
+fn is_revset_symbol_prefix(s: &str) -> bool {
+    let is_sep = |c: char| matches!(c, '@' | '.' | '+' | '-');
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '/';
+    let mut last_was_sep = true;
+    for c in s.chars() {
+        if is_word(c) {
+            last_was_sep = false;
+        } else if is_sep(c) {
+            if last_was_sep {
+                return false;
+            }
+            last_was_sep = true;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// local bookmarks; `revset` (`all()`/`mutable()`) scopes them by their
+/// local target so `mutable()` callers don't offer immutable bookmarks.
+fn jj_bookmarks(ctx: &DynCtx, revset: &str) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
             "jj".into(),
             "bookmark".into(),
             "list".into(),
+            "-r".into(),
+            revset.into(),
             "-T".into(),
             r#"name ++ "\t" ++ if(normal_target, normal_target.description().first_line(), "") ++ "\n""#
                 .into(),
@@ -1487,7 +1740,18 @@ fn jj_bookmarks(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn jj_remote_bookmarks(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+/// remote bookmarks as `name@remote`. `tracked` filters by tracking state
+/// (`Some(true)` for `untrack`, `Some(false)` for `track`, `None` for any).
+/// the synthetic `@git` remote is always excluded.
+fn jj_remote_bookmarks(ctx: &DynCtx, tracked: Option<bool>) -> Option<Vec<Candidate>> {
+    let cond = match tracked {
+        Some(true) => "&& tracked",
+        Some(false) => "&& !tracked",
+        None => "",
+    };
+    let template = format!(
+        r#"if(remote && remote != "git" {cond}, name ++ "@" ++ remote ++ "\t" ++ if(normal_target, normal_target.description().first_line(), "") ++ "\n", "")"#
+    );
     let out = run_quiet(
         &[
             "jj".into(),
@@ -1495,8 +1759,7 @@ fn jj_remote_bookmarks(ctx: &DynCtx) -> Option<Vec<Candidate>> {
             "list".into(),
             "--all-remotes".into(),
             "-T".into(),
-            r#"if(remote, name ++ "@" ++ remote ++ "\t" ++ if(normal_target, normal_target.description().first_line(), "") ++ "\n", "")"#
-                .into(),
+            template,
         ],
         ctx.ms_left(),
     )?;
@@ -1556,24 +1819,6 @@ fn jj_remotes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
         candidates.push(Candidate::new(*name, desc));
     }
     (!candidates.is_empty()).then_some(candidates)
-}
-
-fn jj_push_bookmarks(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let bookmarks = jj_bookmarks(ctx).unwrap_or_default();
-    let remotes = jj_remotes(ctx).unwrap_or_default();
-    if bookmarks.is_empty() || remotes.is_empty() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bookmarks.len() * remotes.len());
-    for b in &bookmarks {
-        for r in &remotes {
-            out.push(Candidate::new(
-                format!("{}@{}", b.value, r.value),
-                b.description.clone(),
-            ));
-        }
-    }
-    (!out.is_empty()).then_some(out)
 }
 
 fn jj_ops(ctx: &DynCtx) -> Option<Vec<Candidate>> {
@@ -1903,6 +2148,32 @@ mod tests {
         ];
         let scope = kubectl_scope(&spans);
         assert!(scope.all);
+    }
+
+    #[test]
+    fn revset_split_plain_symbol_has_no_prefix() {
+        assert_eq!(split_revset_trailing_name("main"), ("", "main"));
+        assert_eq!(split_revset_trailing_name(""), ("", ""));
+    }
+
+    #[test]
+    fn revset_split_compound_keeps_prefix() {
+        assert_eq!(split_revset_trailing_name("main & dev"), ("main & ", "dev"));
+        assert_eq!(split_revset_trailing_name("ancestors("), ("ancestors(", ""));
+        assert_eq!(split_revset_trailing_name("a..b"), ("a..", "b"));
+        assert_eq!(split_revset_trailing_name("x|y~z"), ("x|y~", "z"));
+    }
+
+    #[test]
+    fn revset_symbol_prefix_accepts_remote_and_rejects_leading_sep() {
+        assert!(is_revset_symbol_prefix(""));
+        assert!(is_revset_symbol_prefix("main"));
+        assert!(is_revset_symbol_prefix("main@"));
+        assert!(is_revset_symbol_prefix("main@origin"));
+        assert!(is_revset_symbol_prefix("feature/x"));
+        assert!(!is_revset_symbol_prefix("@"));
+        assert!(!is_revset_symbol_prefix("a@@b"));
+        assert!(!is_revset_symbol_prefix("a b"));
     }
 
     #[test]
