@@ -748,6 +748,38 @@ pub fn extract_commands_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     acc
 }
 
+/// collect the body of a `.SH SUBCOMMAND(S)` section. jj/clap group
+/// manpages enumerate their children there as `.TP` manpage cross-references
+/// rather than the inline `*COMMANDS` layout `extract_commands_section`
+/// handles, so this is a separate, narrowly-scoped grab.
+pub fn extract_subcommand_list_section(lines: &[GroffLine]) -> Vec<GroffLine> {
+    let mut acc: Vec<GroffLine> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if let GroffLine::Macro { name, args } = &lines[i]
+            && name == "SH"
+            && matches!(
+                args.trim().to_ascii_uppercase().as_str(),
+                "SUBCOMMAND" | "SUBCOMMANDS"
+            )
+        {
+            i += 1;
+            while i < lines.len() {
+                if let GroffLine::Macro { name, .. } = &lines[i]
+                    && name == "SH"
+                {
+                    break;
+                }
+                acc.push(lines[i].clone());
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    acc
+}
+
 /// extract SUBCOMMAND-style sections (clap-generated manpages put each
 /// subcommand under its own .SH SUBCOMMAND header with a Usage: line).
 /// returns triples of (name, description, lines) so the caller can re-parse

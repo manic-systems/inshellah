@@ -363,9 +363,28 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
                 }
             }
         }
-        let positionals = sections::extract_synopsis_positionals(lines);
+        let mut positionals = sections::extract_synopsis_positionals(lines);
         let commands_section = sections::extract_commands_section(lines);
         let mut subcommands = commands::extract_subcommands_from_commands(&commands_section);
+        if subcommands.is_empty() {
+            // jj/clap group pages list children as `.SH SUBCOMMANDS` xref
+            // entries instead of an inline COMMANDS layout.
+            let xref_section = sections::extract_subcommand_list_section(lines);
+            if !xref_section.is_empty() {
+                subcommands = commands::extract_subcommand_xrefs(&xref_section);
+            }
+        }
+        if !subcommands.is_empty() {
+            // drop the synopsis's `<subcommands>` placeholder so it can't
+            // fall through to file completion when a typed prefix matches
+            // no child.
+            positionals.retain(|(name, _)| {
+                !matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "subcommand" | "subcommands" | "command" | "commands"
+                )
+            });
+        }
         for positional in sections::extract_description_positionals(lines) {
             if !subcommands
                 .iter()
@@ -710,6 +729,40 @@ Print help
             OwnedSwitch::Both('h', ref l) if l == "help"
         ));
         assert!(r.entries[0].desc.contains("verbosity"));
+    }
+
+    // jj/clap group pages enumerate children as `.SH SUBCOMMANDS` xref
+    // entries (`jj\-bookmark\-advance(1)` + desc), not an inline COMMANDS
+    // layout. the parser must populate `subcommands` from these.
+    const JJ_XREF_MANPAGE: &str = r#".TH "JJ-BOOKMARK" "1"
+.SH NAME
+jj\-bookmark \- Manage bookmarks
+.SH SYNOPSIS
+\fBjj bookmark\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH SUBCOMMANDS
+.TP
+jj\-bookmark\-create(1)
+Create a new bookmark
+.TP
+jj\-bookmark\-set\-url(1)
+Update a bookmark's url
+.TP
+jj\-bookmark\-untrack(1)
+Stop tracking given remote bookmarks
+"#;
+
+    #[test]
+    fn subcommand_xrefs_populate_subcommands() {
+        let r = parse_manpage_string(JJ_XREF_MANPAGE);
+        let names: Vec<&str> = r.subcommands.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["create", "set-url", "untrack"], "got {names:?}");
+        // shared "jj-bookmark-" prefix stripped, multi-word child intact.
+        let set_url = r
+            .subcommands
+            .iter()
+            .find(|s| s.name == "set-url")
+            .expect("set-url child");
+        assert_eq!(set_url.desc, "Update a bookmark's url");
     }
 
     #[test]

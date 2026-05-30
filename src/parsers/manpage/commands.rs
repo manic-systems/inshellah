@@ -108,6 +108,104 @@ pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubc
     out
 }
 
+/// jj/clap group manpages list children in a `.SH SUBCOMMANDS` section as
+/// `.TP` cross-references: a term line like `jj\-bookmark\-advance(1)`
+/// followed by a description line. each child name is the xref with the
+/// shared parent prefix (derived from all the xrefs) and the `(N)` section
+/// suffix stripped, so multi-word names like `set-url` survive intact.
+pub fn extract_subcommand_xrefs(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
+    // pass 1: collect the raw xref tokens and their descriptions.
+    let mut raw: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        match &lines[i] {
+            GroffLine::Macro { name, .. } if name == "TP" => {}
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        i += 1;
+        let Some(GroffLine::Text(term)) = lines.get(i) else {
+            continue;
+        };
+        i += 1;
+        // require a manpage cross-reference shape, "...(N)", so this can't
+        // misfire on other tools' `.SH SUBCOMMAND` layouts.
+        let term = strip_groff_escapes(term);
+        let term = term.trim();
+        let Some(token) = term.strip_suffix(')').and_then(|t| t.rsplit_once('(')) else {
+            continue;
+        };
+        let (token, section) = token;
+        if !section.bytes().all(|b| b.is_ascii_digit()) || section.is_empty() {
+            continue;
+        }
+        let token = token.trim();
+        if token.is_empty() || token.contains(char::is_whitespace) {
+            continue;
+        }
+        let (desc, new_i) = collect_xref_desc(lines, i);
+        i = new_i;
+        raw.push((token.to_string(), first_sentence(&desc)));
+    }
+    // pass 2: strip the prefix shared by every xref (e.g. "jj-bookmark-").
+    let prefix = shared_dash_prefix(raw.iter().map(|(t, _)| t.as_str()));
+    raw.into_iter()
+        .filter_map(|(token, desc)| {
+            let child = token.strip_prefix(&prefix).unwrap_or(&token);
+            is_valid_subcmd(child).then(|| ManpageSubcommand {
+                name: child.to_ascii_lowercase(),
+                desc,
+            })
+        })
+        .collect()
+}
+
+/// longest common prefix of the tokens, truncated to the last `-` so the
+/// remainder is a whole subcommand name. empty for fewer than two tokens.
+fn shared_dash_prefix<'a>(tokens: impl Iterator<Item = &'a str>) -> String {
+    let tokens: Vec<&str> = tokens.collect();
+    let Some((first, rest)) = tokens.split_first() else {
+        return String::new();
+    };
+    if rest.is_empty() {
+        return String::new();
+    }
+    let mut len = first.len();
+    for t in rest {
+        len = first
+            .bytes()
+            .zip(t.bytes())
+            .take(len)
+            .take_while(|(a, b)| a == b)
+            .count();
+    }
+    let common = &first[..len];
+    match common.rfind('-') {
+        Some(idx) => common[..=idx].to_string(),
+        None => String::new(),
+    }
+}
+
+/// collect an xref entry's description: text lines until the next
+/// .TP/.SH/.SS boundary.
+fn collect_xref_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
+    let mut acc: Vec<String> = Vec::new();
+    let mut i = start;
+    while i < lines.len() {
+        match &lines[i] {
+            GroffLine::Text(t) => {
+                acc.push(strip_groff_escapes(t));
+                i += 1;
+            }
+            GroffLine::Macro { name, .. } if name == "TP" || name == "SH" || name == "SS" => break,
+            _ => i += 1,
+        }
+    }
+    (acc.join(" "), i)
+}
+
 /// collect the description for a subcommand entry. handles .RS/.RE blocks
 /// and stops at the next .PP/.SH/.SS boundary.
 fn collect_subcmd_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
