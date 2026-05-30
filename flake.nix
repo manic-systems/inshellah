@@ -94,6 +94,16 @@
             : > "$INSHELLAH_STATIC_FILE"
             nu --no-config-file -c 'source ${./nix/inshellah-completer.nu}; source ${./tests/nushell-completer.nu}'
 
+            printf '%s\n' '[{"value":"--demo","description":"from the generated extern"}]' > "$INSHELLAH_STATIC_FILE"
+            cat > "$TMPDIR/stub-complete.nu" <<'EOF'
+            source ${./nix/inshellah-completer.nu}
+            extern "jj" [...args: string@inshellah-complete-commandline]
+            EOF
+            printf '%s\n' 'jj ' >> "$TMPDIR/stub-complete.nu"
+            cursor=$(( $(wc -c < "$TMPDIR/stub-complete.nu") - 1 ))
+            nu --no-config-file --ide-complete "$cursor" "$TMPDIR/stub-complete.nu" \
+              | grep -- '--demo'
+
             cat > "$TMPDIR/config-load.nu" <<'EOF'
             source ${./nix/inshellah-completer.nu}
 

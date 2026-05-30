@@ -20,6 +20,9 @@ let completer = $env.config.completions.external.completer
 let pass_through = do $completer [demo ""]
 assert-eq ($pass_through | get 0.value) "--demo" "shim returns the binary's JSON unchanged"
 
+let commandline_pass_through = inshellah-complete-commandline "demo " 5
+assert-eq ($commandline_pass_through | get 0.value) "--demo" "commandline adapter returns the binary's JSON unchanged"
+
 "[]" | save --force $env.INSHELLAH_STATIC_FILE
 let empty_list = do $completer [demo ""]
 assert-eq $empty_list null "empty list collapses to null so nu's file completer can take over"

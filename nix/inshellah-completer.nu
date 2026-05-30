@@ -20,7 +20,7 @@ let inshellah_max_results = do {
     if $raw > 0 { $raw } else { $inshellah_default_max_results }
 }
 
-let inshellah_complete = { |spans|
+def inshellah-complete-spans [spans: list<string>] {
     try {
         let completed = (^inshellah complete ...$spans | complete)
         if $completed.exit_code != 0 {
@@ -42,5 +42,18 @@ let inshellah_complete = { |spans|
         null
     }
 }
+
+def inshellah-complete-commandline [line: string, cursor: int] {
+    let prefix = if $cursor <= ($line | str length) {
+        $line | str substring 0..<$cursor
+    } else {
+        $line
+    }
+    let current = ($prefix | split row "\n" | last)
+    let spans = ($current | split row " ")
+    inshellah-complete-spans $spans
+}
+
+let inshellah_complete = { |spans| inshellah-complete-spans $spans }
 
 $env.config.completions.external = {enable: true, max_results: $inshellah_max_results, completer: $inshellah_complete}

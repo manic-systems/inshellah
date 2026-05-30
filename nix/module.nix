@@ -292,21 +292,16 @@ in
         # Install the full nushell completer plus sudo/doas wrapped commands.
         # Nushell otherwise hardcodes sudo/doas to bypass external completers.
         mkdir -p $out/share/nushell/autoload
-        cp ${snippetFile} $out/share/nushell/autoload/inshellah.nu
+        install -m 0644 ${snippetFile} $out/share/nushell/autoload/inshellah.nu
 
         # Register command names for dynamic backends that are actually present
-        # in the linked profile. The externs keep Nu's command list aware of
-        # these commands while the external completer still supplies arguments.
-        stubFile=$out/share/nushell/autoload/inshellah-command-stubs.nu
-        : > "$stubFile"
+        # in the linked profile. Keep these in the same file as the completer
+        # helper so Nu parses the custom rest-arg completer after it is defined.
         for cmd in ${dynamicStubCommandArgs}; do
           if [ -x "$out/bin/$cmd" ]; then
-            printf '@complete external\nextern "%s" [...args]\n\n' "$cmd" >> "$stubFile"
+            printf '\nextern "%s" [...args: string@inshellah-complete-commandline]\n' "$cmd" >> $out/share/nushell/autoload/inshellah.nu
           fi
         done
-        if [ ! -s "$stubFile" ]; then
-          rm -f "$stubFile"
-        fi
       '';
   };
 }

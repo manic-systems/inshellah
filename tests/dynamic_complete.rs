@@ -592,31 +592,15 @@ fn jj_bookmark_track_completes_remote_bookmarks_excluding_at_git() {
 }
 
 #[test]
-fn jj_git_push_bookmark_completes_cross_product() {
+fn jj_git_push_bookmark_completes_local_bookmarks() {
     let h = Harness::new("dyn-jj-push-bookmark");
     let (stdout, _, _) = h.run(&["jj", "git", "push", "--bookmark", ""], &[]);
-    let cands = parse_output(&stdout).expect("push bookmark cross-product");
-    assert_eq!(
-        Harness::values(&cands),
-        vec![
-            "main@origin",
-            "main@upstream",
-            "feature@origin",
-            "feature@upstream",
-        ]
-    );
+    let cands = parse_output(&stdout).expect("push bookmark names");
+    assert_eq!(Harness::values(&cands), vec!["main", "feature"]);
 
     let (short, _, _) = h.run(&["jj", "git", "push", "-b", ""], &[]);
     let short = parse_output(&short).expect("push bookmark with short flag");
-    assert_eq!(
-        Harness::values(&short),
-        vec![
-            "main@origin",
-            "main@upstream",
-            "feature@origin",
-            "feature@upstream",
-        ]
-    );
+    assert_eq!(Harness::values(&short), vec!["main", "feature"]);
 }
 
 #[test]
@@ -655,7 +639,19 @@ fn jj_rebase_destination_completes_revisions() {
     let h = Harness::new("dyn-jj-rebase");
     let (stdout, _, _) = h.run(&["jj", "rebase", "-d", ""], &[]);
     let cands = parse_output(&stdout).expect("revisions");
-    assert_eq!(Harness::values(&cands), vec!["k", "m"]);
+    assert_eq!(
+        Harness::values(&cands),
+        vec![
+            "main",
+            "feature",
+            "v1.0",
+            "v2.0",
+            "k",
+            "m",
+            "main@origin",
+            "feature@upstream",
+        ]
+    );
 }
 
 #[test]
