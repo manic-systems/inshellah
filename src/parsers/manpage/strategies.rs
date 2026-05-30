@@ -406,8 +406,7 @@ pub fn strategy_text_rs(lines: &[GroffLine]) -> Vec<ManpageEntry> {
             }
             GroffLine::Text(tag) if rs_depth == 0 && tag.trim_start().starts_with('-') => {
                 let mut j = i + 1;
-                while j < lines.len()
-                    && matches!(&lines[j], GroffLine::Blank | GroffLine::Comment)
+                while j < lines.len() && matches!(&lines[j], GroffLine::Blank | GroffLine::Comment)
                 {
                     j += 1;
                 }
@@ -638,11 +637,7 @@ fn count_macro(name: &str, lines: &[GroffLine]) -> usize {
         .count()
 }
 
-/// auto-detect and try strategies, return the one with most entries.
-/// first counts macros to determine which strategies are applicable,
-/// then runs all applicable ones and picks the winner by entry count.
-/// if no specialized strategy produces results, falls back to deroff.
-pub fn extract_entries(lines: &[GroffLine]) -> Vec<ManpageEntry> {
+fn specialized_candidates(lines: &[GroffLine]) -> Vec<(&'static str, Vec<ManpageEntry>)> {
     let tp = count_macro("TP", lines);
     let ip = count_macro("IP", lines);
     let pp = count_macro("PP", lines);
@@ -669,22 +664,69 @@ pub fn extract_entries(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     if rs > 0 {
         specialized.push(("Text+RS", strategy_text_rs(lines)));
     }
-    let candidates: Vec<(&str, Vec<ManpageEntry>)> = {
-        let filtered: Vec<_> = specialized
-            .into_iter()
-            .filter(|(_, e)| !e.is_empty())
-            .collect();
-        if filtered.is_empty() {
-            vec![("deroff", strategy_deroff(lines))]
-        } else {
-            filtered
-        }
-    };
+    specialized
+        .into_iter()
+        .filter(|(_, e)| !e.is_empty())
+        .collect()
+}
+
+fn best_entries(candidates: Vec<(&'static str, Vec<ManpageEntry>)>) -> Option<Vec<ManpageEntry>> {
     let mut best: Vec<ManpageEntry> = Vec::new();
     for (_, entries) in candidates {
         if entries.len() >= best.len() {
             best = entries;
         }
     }
-    best
+    (!best.is_empty()).then_some(best)
+}
+
+fn entry_sections(lines: &[GroffLine]) -> Vec<&[GroffLine]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if matches!(line, GroffLine::Macro { name, .. } if matches!(name.as_str(), "SH" | "SS")) {
+            if start < i {
+                out.push(&lines[start..i]);
+            }
+            start = i + 1;
+        }
+    }
+    if start < lines.len() {
+        out.push(&lines[start..]);
+    }
+    out
+}
+
+/// auto-detect and try strategies.
+///
+/// Manpages can mix option layouts by subsection (for example, a `.TP`
+/// "global options" section followed by a ripgrep-style Text+RS section).
+/// Running the strategies once globally and picking the largest result loses
+/// the smaller subsection. Instead, once any structured strategy works for
+/// the full input, split at `.SH`/`.SS` boundaries and keep the best
+/// structured result per local section. The broad deroff fallback is still
+/// used only when no structured strategy works anywhere, which keeps it from
+/// mining unrelated prose subsections for false positives.
+pub fn extract_entries(lines: &[GroffLine]) -> Vec<ManpageEntry> {
+    let whole_candidates = specialized_candidates(lines);
+    if whole_candidates.is_empty() {
+        return strategy_deroff(lines);
+    }
+
+    let sections = entry_sections(lines);
+    if sections.len() <= 1 {
+        return best_entries(whole_candidates).unwrap_or_default();
+    }
+
+    let mut out = Vec::new();
+    for section in sections {
+        if let Some(entries) = best_entries(specialized_candidates(section)) {
+            out.extend(entries);
+        }
+    }
+    if out.is_empty() {
+        best_entries(whole_candidates).unwrap_or_default()
+    } else {
+        out
+    }
 }

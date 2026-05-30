@@ -5,7 +5,10 @@
 
 use nom::{Parser, sequence::preceded};
 
-use crate::parsers::help::{parse_usage_args, parse_usage_flags, skip_command_name};
+use crate::parsers::help::{
+    extract_usage_positionals as help_extract_usage_positionals, parse_usage_args,
+    parse_usage_flags, skip_command_name,
+};
 use crate::parsers::manpage::groff::{
     GroffLine, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
 };
@@ -424,7 +427,29 @@ fn extract_cmd(line: &str) -> Option<String> {
 
 /// extract the lines that form the SYNOPSIS section.
 fn extract_synopsis_section(lines: &[GroffLine]) -> Vec<GroffLine> {
-    extract_named_section(lines, "SYNOPSIS")
+    let mut i = 0;
+    while i < lines.len() {
+        if let GroffLine::Macro { name, args } = &lines[i]
+            && matches!(name.as_str(), "SH" | "SS")
+            && args.trim().eq_ignore_ascii_case("SYNOPSIS")
+        {
+            let stop_on_ss = name == "SS";
+            i += 1;
+            let mut acc: Vec<GroffLine> = Vec::new();
+            while i < lines.len() {
+                if let GroffLine::Macro { name, .. } = &lines[i]
+                    && (name == "SH" || (stop_on_ss && name == "SS"))
+                {
+                    break;
+                }
+                acc.push(lines[i].clone());
+                i += 1;
+            }
+            return acc;
+        }
+        i += 1;
+    }
+    Vec::new()
 }
 
 /// extract positional arguments from the SYNOPSIS section.
@@ -444,6 +469,56 @@ pub fn extract_synopsis_positionals(lines: &[GroffLine]) -> Vec<(String, Positio
             .collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// extract positional arguments from clap-style `Usage:` text embedded in a
+/// manpage section. this is mainly for `.SH SUBCOMMAND` bodies, which are
+/// parsed as standalone command fragments rather than full manpages.
+pub fn extract_usage_positionals_from_lines(lines: &[GroffLine]) -> Vec<(String, Positional)> {
+    let text = render_plain_text_lines(lines);
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    match help_extract_usage_positionals(&text) {
+        Ok((_, positionals)) => positionals
+            .into_iter()
+            .map(|(name, positional)| (name.to_ascii_lowercase(), positional))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn render_plain_text_lines(lines: &[GroffLine]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        match line {
+            GroffLine::Text(text) => {
+                out.push_str(text);
+                out.push('\n');
+            }
+            GroffLine::Macro { name, args } if name == "B" || name == "I" || name == "SY" => {
+                let text = strip_space_macro_args(args);
+                if !text.is_empty() {
+                    out.push_str(&text);
+                    out.push('\n');
+                }
+            }
+            GroffLine::Macro { name, args }
+                if matches!(name.as_str(), "BI" | "BR" | "IB" | "IR" | "RB" | "RI") =>
+            {
+                let text = strip_groff_escapes(&strip_inline_macro_args(args));
+                let text = text.trim();
+                if !text.is_empty() {
+                    out.push_str(text);
+                    out.push('\n');
+                }
+            }
+            GroffLine::Blank => out.push('\n'),
+            GroffLine::Macro { name, .. } if name == "br" => out.push('\n'),
+            _ => (),
+        }
+    }
+    out
 }
 
 /// join the SYNOPSIS section into a single line of plain text, stripping
@@ -730,6 +805,38 @@ pub fn extract_commands_section(lines: &[GroffLine]) -> Vec<GroffLine> {
         if let GroffLine::Macro { name, args } = &lines[i]
             && name == "SH"
             && is_commands_section(args)
+        {
+            i += 1;
+            while i < lines.len() {
+                if let GroffLine::Macro { name, .. } = &lines[i]
+                    && name == "SH"
+                {
+                    break;
+                }
+                acc.push(lines[i].clone());
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    acc
+}
+
+/// collect the body of a `.SH SUBCOMMAND(S)` section. jj/clap group
+/// manpages enumerate their children there as `.TP` manpage cross-references
+/// rather than the inline `*COMMANDS` layout `extract_commands_section`
+/// handles, so this is a separate, narrowly-scoped grab.
+pub fn extract_subcommand_list_section(lines: &[GroffLine]) -> Vec<GroffLine> {
+    let mut acc: Vec<GroffLine> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if let GroffLine::Macro { name, args } = &lines[i]
+            && name == "SH"
+            && matches!(
+                args.trim().to_ascii_uppercase().as_str(),
+                "SUBCOMMAND" | "SUBCOMMANDS"
+            )
         {
             i += 1;
             while i < lines.len() {

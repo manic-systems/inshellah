@@ -233,24 +233,20 @@ pub fn dedup_entries(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
     out
 }
 
-/// merge non-adjacent Short/Long entries that share an identical, non-empty
-/// description into a single `Both` entry. some manpage styles emit `-h` and
-/// `--help` as independent .TP / .IP blocks rather than as the comma-joined
-/// `-h, --help` form that `combine_short_long_alternates` already handles.
-/// without this pass, two separate completions reach the runtime — and the
-/// completer can't offer the "(aka --help) show help" / "(aka -h) show help"
-/// cross-references that `Both` triggers.
+/// merge non-adjacent Short/Long entries into a single `Both` entry only when
+/// the match is low-risk. some manpage styles emit `-h` and `--help` as
+/// independent .TP / .IP blocks rather than as the comma-joined `-h, --help`
+/// form that `combine_short_long_alternates` already handles.
 ///
 /// pairing rule (deliberately conservative): a Short and a Long pair up only
-/// when their `desc` fields are byte-equal and non-empty. matching on
-/// description avoids false positives like merging `-n` (number) with
-/// `--no-color`, where the short letter happens to match the long's first
-/// letter but the flags are unrelated. each Short is consumed at most once,
-/// each Long takes at most one Short — repeated descriptions don't cascade.
+/// when they are the only entries with that exact non-empty description, the
+/// short character looks like an abbreviation for the long name, and the
+/// description has enough substance to identify the option. tiny generic
+/// descriptions are allowed only for common obvious aliases such as help and
+/// version. wrong aliases are worse than missing synthesized aliases.
 pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
     use std::collections::HashMap;
     use std::collections::HashSet;
-    use std::collections::hash_map::Entry;
 
     // index `Both` pairs already present so we never synthesize a duplicate.
     // some manpages re-state a flag in multiple sections (an OPTIONS body
@@ -265,16 +261,27 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
         }
     }
 
-    let mut short_for_desc: HashMap<&str, (usize, char, Option<OwnedParam>)> = HashMap::new();
+    let mut shorts_by_desc: HashMap<&str, Vec<(usize, char, Option<OwnedParam>)>> = HashMap::new();
+    let mut longs_by_desc: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         if let OwnedSwitch::Short(c) = &e.switch
             && !e.desc.is_empty()
-            && let Entry::Vacant(slot) = short_for_desc.entry(e.desc.as_str())
         {
-            slot.insert((i, *c, e.param.clone()));
+            shorts_by_desc
+                .entry(e.desc.as_str())
+                .or_default()
+                .push((i, *c, e.param.clone()));
+        }
+        if let OwnedSwitch::Long(l) = &e.switch
+            && !e.desc.is_empty()
+        {
+            longs_by_desc
+                .entry(e.desc.as_str())
+                .or_default()
+                .push((i, l.as_str()));
         }
     }
-    if short_for_desc.is_empty() {
+    if shorts_by_desc.is_empty() || longs_by_desc.is_empty() {
         return entries;
     }
 
@@ -283,10 +290,12 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
     for (i, e) in entries.iter().enumerate() {
         if let OwnedSwitch::Long(l) = &e.switch
             && !e.desc.is_empty()
-            && let Some((s_idx, c, s_param)) = short_for_desc.get(e.desc.as_str())
-            && *s_idx != i
-            && !to_drop.contains(s_idx)
+            && let Some(shorts) = shorts_by_desc.get(e.desc.as_str())
+            && let Some(longs) = longs_by_desc.get(e.desc.as_str())
+            && shorts.len() == 1
+            && longs.len() == 1
         {
+            let (s_idx, c, s_param) = &shorts[0];
             if existing_both.contains(&(*c, l.as_str())) {
                 // a Both(c, l) with the same chars already exists, so the
                 // standalone Short+Long pair is redundant — drop both rather
@@ -294,13 +303,18 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
                 to_drop.insert(*s_idx);
                 to_drop.insert(i);
                 out.push(e.clone());
-            } else {
+            } else if *s_idx != i
+                && !to_drop.contains(s_idx)
+                && plausible_description_alias(*c, l, &e.desc)
+            {
                 to_drop.insert(*s_idx);
                 out.push(ManpageEntry {
                     switch: OwnedSwitch::Both(*c, l.clone()),
                     param: e.param.clone().or_else(|| s_param.clone()),
                     desc: e.desc.clone(),
                 });
+            } else {
+                out.push(e.clone());
             }
         } else {
             out.push(e.clone());
@@ -313,6 +327,28 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
         .enumerate()
         .filter_map(|(i, e)| (!to_drop.contains(&i)).then_some(e))
         .collect()
+}
+
+fn plausible_description_alias(short: char, long: &str, desc: &str) -> bool {
+    let short = short.to_ascii_lowercase();
+    let first = long
+        .chars()
+        .find(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase());
+    if first != Some(short) {
+        return false;
+    }
+    if is_common_obvious_alias(short, long) {
+        return true;
+    }
+    desc.split_whitespace().count() >= 4
+}
+
+fn is_common_obvious_alias(short: char, long: &str) -> bool {
+    matches!(
+        (short, long.to_ascii_lowercase().as_str()),
+        ('h', "help") | ('v', "verbose") | ('v', "version")
+    )
 }
 
 /// parse a manpage from its classified lines.
@@ -363,9 +399,28 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
                 }
             }
         }
-        let positionals = sections::extract_synopsis_positionals(lines);
+        let mut positionals = sections::extract_synopsis_positionals(lines);
         let commands_section = sections::extract_commands_section(lines);
         let mut subcommands = commands::extract_subcommands_from_commands(&commands_section);
+        if subcommands.is_empty() {
+            // jj/clap group pages list children as `.SH SUBCOMMANDS` xref
+            // entries instead of an inline COMMANDS layout.
+            let xref_section = sections::extract_subcommand_list_section(lines);
+            if !xref_section.is_empty() {
+                subcommands = commands::extract_subcommand_xrefs(&xref_section);
+            }
+        }
+        if !subcommands.is_empty() {
+            // drop the synopsis's `<subcommands>` placeholder so it can't
+            // fall through to file completion when a typed prefix matches
+            // no child.
+            positionals.retain(|(name, _)| {
+                !matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "subcommand" | "subcommands" | "command" | "commands"
+                )
+            });
+        }
         for positional in sections::extract_description_positionals(lines) {
             if !subcommands
                 .iter()
@@ -427,10 +482,14 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
     let subs: Vec<(String, ManpageResult)> = sub_sections
         .into_iter()
         .map(|(name, desc, lines)| {
+            let mut positionals = sections::extract_synopsis_positionals(&lines);
+            if positionals.is_empty() {
+                positionals = sections::extract_usage_positionals_from_lines(&lines);
+            }
             let mut sub_result = ManpageResult {
                 entries: strategies::extract_entries(&lines),
                 subcommands: Vec::new(),
-                positionals: Default::default(),
+                positionals,
                 description: desc,
             };
             sub_result.normalize();
@@ -575,7 +634,12 @@ Second flag desc.
         // mis-recognized as new top-level text and parsed twice / out of
         // order, or the first desc would be truncated.
         let r = parse_manpage_string(TEXT_RS_NESTED_MANPAGE);
-        assert_eq!(r.entries.len(), 2, "expected exactly 2 flags, got {}", r.entries.len());
+        assert_eq!(
+            r.entries.len(),
+            2,
+            "expected exactly 2 flags, got {}",
+            r.entries.len()
+        );
         assert!(matches!(
             r.entries[0].switch,
             OwnedSwitch::Both('x', ref l) if l == "foo"
@@ -629,7 +693,12 @@ Only show matches surrounded by line boundaries.
         // separated by `.sp` — no `.PP` to anchor on. covers both the
         // `-s PARAM, --long=PARAM` form and the simpler `-s, --long` form.
         let r = parse_manpage_string(TEXT_RS_MANPAGE);
-        assert_eq!(r.entries.len(), 3, "expected 3 entries, got {}", r.entries.len());
+        assert_eq!(
+            r.entries.len(),
+            3,
+            "expected 3 entries, got {}",
+            r.entries.len()
+        );
         // -e, --regexp with PARAM between short and comma
         assert!(matches!(
             r.entries[0].switch,
@@ -712,6 +781,145 @@ Print help
         assert!(r.entries[0].desc.contains("verbosity"));
     }
 
+    // jj/clap group pages enumerate children as `.SH SUBCOMMANDS` xref
+    // entries (`jj\-bookmark\-advance(1)` + desc), not an inline COMMANDS
+    // layout. the parser must populate `subcommands` from these.
+    const JJ_XREF_MANPAGE: &str = r#".TH "JJ-BOOKMARK" "1"
+.SH NAME
+jj\-bookmark \- Manage bookmarks
+.SH SYNOPSIS
+\fBjj bookmark\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH SUBCOMMANDS
+.TP
+jj\-bookmark\-create(1)
+Create a new bookmark
+.TP
+jj\-bookmark\-set\-url(1)
+Update a bookmark's url
+.TP
+jj\-bookmark\-untrack(1)
+Stop tracking given remote bookmarks
+"#;
+
+    #[test]
+    fn subcommand_xrefs_populate_subcommands() {
+        let r = parse_manpage_string(JJ_XREF_MANPAGE);
+        let names: Vec<&str> = r.subcommands.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["create", "set-url", "untrack"], "got {names:?}");
+        // shared "jj-bookmark-" prefix stripped, multi-word child intact.
+        let set_url = r
+            .subcommands
+            .iter()
+            .find(|s| s.name == "set-url")
+            .expect("set-url child");
+        assert_eq!(set_url.desc, "Update a bookmark's url");
+    }
+
+    #[test]
+    fn mixed_option_subsections_keep_local_strategy_winners() {
+        let groff = r#".TH MIXED "1"
+.SH NAME
+mixed \- demo
+.SH OPTIONS
+.SS GENERAL OPTIONS
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Show all entries.
+.SS SEARCH OPTIONS
+\fB\-e\fR \fIPATTERN\fR, \fB\-\-regexp\fR=\fIPATTERN\fR
+.RS 4
+Search for a pattern.
+.RE
+.sp
+\fB\-f\fR \fIFILE\fR, \fB\-\-file\fR=\fIFILE\fR
+.RS 4
+Read patterns from a file.
+.RE
+"#;
+        let r = parse_manpage_string(groff);
+        assert_eq!(r.entries.len(), 3, "entries: {:?}", r.entries);
+        assert!(r.entries.iter().any(|e| matches!(
+            &e.switch,
+            OwnedSwitch::Both('a', l) if l == "all"
+        )));
+        assert!(r.entries.iter().any(|e| matches!(
+            &e.switch,
+            OwnedSwitch::Both('e', l) if l == "regexp"
+        )));
+        assert!(r.entries.iter().any(|e| matches!(
+            &e.switch,
+            OwnedSwitch::Both('f', l) if l == "file"
+        )));
+    }
+
+    #[test]
+    fn description_only_alias_merge_rejects_generic_descriptions() {
+        let groff = r#".TH ALIASES "1"
+.SH NAME
+aliases \- demo
+.SH OPTIONS
+.TP
+\fB\-a\fR
+Enable output
+.TP
+\fB\-\-all\fR
+Enable output
+"#;
+        let r = parse_manpage_string(groff);
+        assert_eq!(r.entries.len(), 2, "entries: {:?}", r.entries);
+        assert!(
+            !r.entries
+                .iter()
+                .any(|e| matches!(&e.switch, OwnedSwitch::Both('a', l) if l == "all")),
+            "generic identical descriptions should not synthesize aliases: {:?}",
+            r.entries
+        );
+        assert!(
+            r.entries
+                .iter()
+                .any(|e| matches!(e.switch, OwnedSwitch::Short('a')))
+        );
+        assert!(
+            r.entries
+                .iter()
+                .any(|e| matches!(&e.switch, OwnedSwitch::Long(l) if l == "all"))
+        );
+    }
+
+    #[test]
+    fn clap_subcommand_sections_keep_usage_positionals() {
+        let groff = r#".TH APP "1"
+.SH NAME
+app \- demo
+.SH SYNOPSIS
+app [OPTIONS] <COMMAND>
+.SH SUBCOMMAND
+Clone a repository.
+Usage: clone [OPTIONS] <repository> [directory]
+.TP
+\fB\-\-depth\fR \fIDEPTH\fR
+Limit history depth.
+"#;
+        let (_parent, subs) = parse_manpage_with_subs(groff);
+        assert_eq!(subs.len(), 1, "subs: {:?}", subs);
+        let (name, result) = &subs[0];
+        assert_eq!(name, "clone");
+        assert_eq!(
+            result
+                .positionals
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["repository", "directory"],
+            "positionals: {:?}",
+            result.positionals
+        );
+        assert!(result.entries.iter().any(|e| matches!(
+            &e.switch,
+            OwnedSwitch::Long(l) if l == "depth"
+        )));
+    }
+
     #[test]
     fn mdoc_format_detected() {
         let src = ".Sh NAME\n.Nm test\n.Nd a test\n.Sh DESCRIPTION\nstuff\n";
@@ -769,22 +977,23 @@ Print help
     }
 
     #[test]
-    fn merge_pairs_each_short_at_most_once() {
-        // two longs share a description with a single short — the first long
-        // wins, the second stays as-is.
+    fn merge_rejects_ambiguous_repeated_descriptions() {
+        // two longs share a description with a single short, so description
+        // equality alone is not enough evidence to synthesize either alias.
         let entries = vec![
             entry(OwnedSwitch::Short('h'), "show help"),
             entry(OwnedSwitch::Long("help".to_string()), "show help"),
             entry(OwnedSwitch::Long("usage".to_string()), "show help"),
         ];
         let merged = merge_short_long_pairs(entries);
-        assert_eq!(merged.len(), 2);
-        assert!(matches!(
-            merged[0].switch,
-            OwnedSwitch::Both('h', ref l) if l == "help"
-        ));
+        assert_eq!(merged.len(), 3);
+        assert!(matches!(merged[0].switch, OwnedSwitch::Short('h')));
         assert!(matches!(
             merged[1].switch,
+            OwnedSwitch::Long(ref l) if l == "help"
+        ));
+        assert!(matches!(
+            merged[2].switch,
             OwnedSwitch::Long(ref l) if l == "usage"
         ));
     }
@@ -844,9 +1053,12 @@ Print help
             ManpageEntry {
                 switch: OwnedSwitch::Short('o'),
                 param: Some(OwnedParam::Mandatory("FILE".to_string())),
-                desc: "write output".to_string(),
+                desc: "write command output to file".to_string(),
             },
-            entry(OwnedSwitch::Long("output".to_string()), "write output"),
+            entry(
+                OwnedSwitch::Long("output".to_string()),
+                "write command output to file",
+            ),
         ];
         let merged = merge_short_long_pairs(entries);
         assert_eq!(merged.len(), 1);
