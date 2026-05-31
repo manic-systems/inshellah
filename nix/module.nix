@@ -9,7 +9,7 @@
 # The `complete` command reads from this directory as a system overlay.
 #
 # This module body only uses options shared by NixOS and nix-darwin
-# (environment.{variables,systemPackages,pathsToLink,extraSetup}), so the
+# (environment.{variables,systemPackages,extraSetup}), so the
 # same file backs both flake outputs. On macOS the indexer scrapes Mach-O
 # binaries; on Linux, ELF — selected by the inshellah build's target os.
 #
@@ -32,33 +32,6 @@ let
   cfg = config.programs.inshellah;
   completerSnippet = ./inshellah-completer.nu;
   defaultPackage = pkgs.callPackage ./package.nix { };
-  dynamicStubCommands = [
-    "systemctl"
-    "journalctl"
-    "coredumpctl"
-    "loginctl"
-    "machinectl"
-    "networkctl"
-    "hostnamectl"
-    "timedatectl"
-    "localectl"
-    "ssh"
-    "scp"
-    "sftp"
-    "docker"
-    "podman"
-    "kubectl"
-    "git"
-    "jj"
-    "npm"
-    "pnpm"
-    "yarn"
-    "make"
-    "just"
-    "cargo"
-    "pkill"
-  ];
-  dynamicStubCommandArgs = lib.escapeShellArgs dynamicStubCommands;
 in
 {
   options.programs.inshellah = {
@@ -267,10 +240,7 @@ in
       [
         (lib.hiPrio wrapped)
         cfg.package
-    ];
-    environment.pathsToLink = [
-      "/share/nushell/autoload"
-    ];
+      ];
     environment.extraSetup =
       let
         inshellah = "${cfg.package}/bin/inshellah";
@@ -300,19 +270,10 @@ in
 
         find ${destDir} -maxdepth 1 -empty -delete
 
-        # Install the full nushell completer plus sudo/doas wrapped commands.
-        # Nushell otherwise hardcodes sudo/doas to bypass external completers.
-        mkdir -p $out/share/nushell/autoload
-        install -m 0644 ${snippetFile} $out/share/nushell/autoload/inshellah.nu
-
-        # Register command names for dynamic backends that are actually present
-        # in the linked profile. Keep these in the same file as the completer
-        # helper so Nu parses the custom rest-arg completer after it is defined.
-        for cmd in ${dynamicStubCommandArgs}; do
-          if [ -x "$out/bin/$cmd" ]; then
-            printf '\nextern "%s" [...args: string@inshellah-complete-commandline]\n' "$cmd" >> $out/share/nushell/autoload/inshellah.nu
-          fi
-        done
+        # no per-command stubs: an extern/def makes nu complete its own (empty)
+        # declared flags for a leading `-`; the external completer handles all.
+        mkdir -p $out/share/nushell/vendor/autoload
+        install -m 0644 ${snippetFile} $out/share/nushell/vendor/autoload/inshellah.nu
       '';
   };
 }

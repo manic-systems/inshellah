@@ -69,12 +69,10 @@ autoloaded nushell shim.
 - runs `inshellah index "$out"` during the system profile build,
   producing one file per command under `$out/share/inshellah/`.
 - drops the full nushell external-completer shim into
-  `/share/nushell/autoload/`, including sudo/doas overrides so elevated
-  commands still complete through inshellah.
-- emits lightweight command-name stubs for live-provider commands
-  that are present in the system profile, so tools like `git` and `jj`
-  appear in nushell's command list while inshellah still supplies their
-  argument completions lazily.
+  `/share/nushell/vendor/autoload/`, including sudo/doas overrides so elevated
+  commands still complete through inshellah. the single external completer
+  handles every external command (flags, subcommands, live values); no
+  per-command stubs are needed.
 - exposes the same shim as a read-only `snippet` option for users who
   want to source or inspect it manually.
 
@@ -153,7 +151,7 @@ immediately after a space, alongside subcommands. these map to the
 
 ## using the completer
 
-the module installs the completer under nushell's autoload path, so no
+the module installs the completer under nushell's vendor autoload path, so no
 hand-written nushell config is needed for the normal NixOS case. package
 `vendor/autoload` trees are not linked by the module; generated and native
 completion data stays behind `inshellah complete` so priority is consistent.
@@ -252,11 +250,10 @@ is configured.
 built-in (`help commands | where name == "thecommand"`) — built-ins
 are excluded.
 
-**command name missing but arguments complete after typing it**: the
-command may be installed only in a user profile. the system module can
-only generate command-name stubs for binaries linked into the system
-profile, though the external completer can still complete arguments
-once the command word has been typed.
+**a command's arguments don't complete**: the external completer fires for
+any external on `PATH`, but only commands linked into the system profile are
+indexed at build time. user-profile commands still complete live (dynamic
+providers) and on-the-fly (`--help`), just without a prebuilt cache.
 
 **stale completions after update**: the index regenerates on every
 `nixos-rebuild`. if a command changed its flags, rebuild.
