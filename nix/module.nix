@@ -245,7 +245,18 @@ in
         wrapped = pkgs.writeShellScriptBin "inshellah" ''
           case "''${1:-}" in
             complete|query|dump|purge)
-              exec ${cfg.package}/bin/inshellah "$@" --dir "''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}"
+              has_dir=0
+              for arg in "$@"; do
+                if [ "$arg" = "--dir" ]; then
+                  has_dir=1
+                  break
+                fi
+              done
+              if [ "$has_dir" = 1 ]; then
+                exec ${cfg.package}/bin/inshellah "$@"
+              else
+                exec ${cfg.package}/bin/inshellah "$@" --dir "''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}"
+              fi
               ;;
             *)
               exec ${cfg.package}/bin/inshellah "$@"

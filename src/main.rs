@@ -28,7 +28,7 @@ use inshellah::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
     extract_synopsis_command, parse_manpage_string, parse_manpage_with_subs, read_manpage_file,
 };
-use inshellah::parsers::nushell::{generate_extern, generate_module, is_nushell_builtin};
+use inshellah::parsers::nushell::{generate_extern, is_nushell_builtin};
 use inshellah::pool::{ScrapePool, Submitter};
 use inshellah::store::{
     all_commands, default_store_path, ensure_dir, file_type_of, filename_of_command, lookup,
@@ -2698,37 +2698,68 @@ fn cmd_complete(
 // --- completions self-emission ---
 
 fn cmd_completions() {
-    // emit completions for inshellah itself.
-    let entries: Vec<ManpageEntry> = vec![ManpageEntry {
-        switch: OwnedSwitch::Both('h', "help".to_string()),
-        param: None,
-        desc: "show help".to_string(),
-    }];
-    let subs = [
-        "index",
-        "manpage",
-        "manpage-dir",
-        "complete",
-        "query",
-        "dump",
-        "diff",
-        "purge",
-        "completions",
-    ];
-    let mut subcommands = Vec::new();
-    for s in subs {
-        subcommands.push(ManpageSubcommand {
-            name: s.to_string(),
-            desc: String::new(),
-        });
-    }
-    let result = ManpageResult {
-        entries,
-        subcommands,
-        positionals: Default::default(),
-        description: "nushell completions engine".to_string(),
-    };
-    print!("{}", generate_module("inshellah", &result));
+    // Emit hand-maintained completions for the current CLI. The parser-driven
+    // generator is aimed at arbitrary commands; inshellah's own surface is
+    // small enough that explicit subcommand externs give better completions.
+    print!(
+        r#"module inshellah-completions {{
+export extern "inshellah" [
+    --help(-h)                      # show help
+]
+
+export extern "inshellah index" [
+    ...prefix: path
+    --dir: path                     # completion output directory
+    --ignore: path                  # file of commands to skip
+    --help-only: path               # file of commands to scrape with --help only
+    --prefix: string                # extra colon-separated scrape prefixes
+    --timeout-ms: int               # per-subprocess timeout in milliseconds
+    --workers: int                  # parallel scrape workers
+]
+
+export extern "inshellah complete" [
+    cmd: string
+    ...args: string
+    --dir: string                   # writable cache plus read-only dirs
+    --timeout-ms: int               # on-the-fly scrape timeout in milliseconds
+]
+
+export extern "inshellah query" [
+    cmd: string
+    ...subcommand: string
+    --dir: string                   # completion directories to read
+]
+
+export extern "inshellah dump" [
+    --dir: string                   # completion directories to read
+]
+
+export extern "inshellah diff" [
+    cmd?: string
+    ...subcommand: string
+    --dir: path                     # extra man directory to inspect
+    --timeout-ms: int               # help scrape timeout in milliseconds
+    --scan: path                    # scan a prefix for source divergence
+]
+
+export extern "inshellah purge" [
+    --dir: string                   # writable cache plus read-only dirs
+]
+
+export extern "inshellah manpage" [
+    file: path
+]
+
+export extern "inshellah manpage-dir" [
+    dir: path
+]
+
+export extern "inshellah completions" []
+}}
+
+use inshellah-completions *
+"#
+    );
 }
 
 // --- argument parsing ---

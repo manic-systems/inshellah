@@ -23,6 +23,26 @@ assert-eq ($pass_through | get 0.value) "--demo" "shim returns the binary's JSON
 let commandline_pass_through = inshellah-complete-commandline "demo " 5
 assert-eq ($commandline_pass_through | get 0.value) "--demo" "commandline adapter returns the binary's JSON unchanged"
 
+let arg_file = (mktemp)
+with-env { INSHELLAH_ARG_FILE: $arg_file } {
+    let _ = inshellah-complete-commandline 'demo "quoted arg"  --flag ' 26
+}
+let parsed_args = (open $arg_file | lines)
+assert-eq $parsed_args [complete demo "quoted arg" --flag ""] "commandline adapter uses nu ast tokenization"
+
+# Regression: stub-extern commands parse with a shape_internalcall head, not
+# shape_external. The tokenizer must keep that head, else the command name is
+# stripped and `jj git a` gets completed as if it were `git a`. The fake
+# backend echoes its args, so this asserts the real spans — unlike the
+# --ide-complete check, whose backend ignores args entirely.
+extern "jj" [...args: string@inshellah-complete-commandline]
+let stub_arg_file = (mktemp)
+with-env { INSHELLAH_ARG_FILE: $stub_arg_file } {
+    let _ = inshellah-complete-commandline 'jj git a' 8
+}
+let stub_args = (open $stub_arg_file | lines)
+assert-eq $stub_args [complete jj git a] "stub-extern command head (shape_internalcall) survives tokenization"
+
 "[]" | save --force $env.INSHELLAH_STATIC_FILE
 let empty_list = do $completer [demo ""]
 assert-eq $empty_list null "empty list collapses to null so nu's file completer can take over"

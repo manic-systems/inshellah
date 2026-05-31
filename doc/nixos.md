@@ -64,7 +64,8 @@ autoloaded nushell shim.
 ## what the module does
 
 - installs the inshellah binary, wrapped so the system completion path
-  is found automatically.
+  is found automatically. when you pass `--dir` explicitly, the wrapper
+  leaves your value unchanged.
 - runs `inshellah index "$out"` during the system profile build,
   producing one file per command under `$out/share/inshellah/`.
 - drops the full nushell external-completer shim into

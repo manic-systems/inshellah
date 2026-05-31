@@ -20,16 +20,12 @@ inshellah index /usr /usr/local
 inshellah index /usr --dir ~/my-completions
 ```
 
-then wire up the completer in `~/.config/nushell/config.nu`:
+then wire up the completer in `~/.config/nushell/config.nu`. the bundled
+shim is preferred because it treats invalid JSON, `null`, and empty lists as
+"let nushell fall back" instead of throwing during completion:
 
 ```nu
-$env.config.completions.external = {
-    enable: true
-    completer: {|spans|
-        inshellah complete ...$spans
-        | from json
-    }
-}
+source /path/to/inshellah-completer.nu
 ```
 
 that's it. tab-completion now works for every command indexed.
@@ -38,12 +34,14 @@ that's it. tab-completion now works for every command indexed.
 
 ```
 inshellah index PREFIX... [--dir PATH] [--ignore FILE] [--help-only FILE]
-                          [--workers N] [--timeout-ms N]
+                          [--prefix PATH[:PATH...]] [--workers N]
+                          [--timeout-ms N]
     index completions into a directory of json/nu files.
     PREFIX is a directory containing bin/ and share/man/.
     default dir: $XDG_CACHE_HOME/inshellah
     --ignore FILE     skip listed commands entirely
     --help-only FILE  skip manpages for listed commands, use --help instead
+    --prefix PATHS    extra scrape prefixes, colon-separated
     --workers N       worker-thread count
     --timeout-ms N    per-subprocess timeout in ms (default: 200)
 
@@ -61,11 +59,21 @@ inshellah query CMD [--dir PATH[:PATH...]]
 inshellah dump [--dir PATH[:PATH...]]
     list indexed commands.
 
+inshellah diff CMD [SUB...] [--dir EXTRA_MANDIR] [--timeout-ms N]
+inshellah diff --scan PREFIX
+    compare manpage-derived and --help-derived command data.
+
+inshellah purge [--dir PATH[:PATH...]]
+    clear the writable on-the-fly cache. read-only system dirs are untouched.
+
 inshellah manpage FILE
     parse a manpage and emit a nushell extern block.
 
 inshellah manpage-dir DIR
     batch-process manpages under DIR (man1 and man8 sections).
+
+inshellah completions
+    generate nushell completions for inshellah itself.
 ```
 
 ## what gets handled
