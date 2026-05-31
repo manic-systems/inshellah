@@ -21,8 +21,7 @@ fn unique_temp_dir(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let n = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir =
-        std::env::temp_dir().join(format!("{name}-{}-{}-{}", std::process::id(), nanos, n));
+    let dir = std::env::temp_dir().join(format!("{name}-{}-{}-{}", std::process::id(), nanos, n));
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }
@@ -35,8 +34,8 @@ fn write_executable(bin_dir: &Path, name: &str, script: &str) {
     fs::set_permissions(&path, perms).expect("chmod fake bin");
 }
 
-/// fake shims with the minimum output each parser in `src/dynamic.rs`
-/// needs to exercise its branches. keep in lockstep with the parsers.
+/// fake shims with the minimum output each provider needs to exercise its
+/// branches. keep in lockstep with the provider parsers.
 fn install_fakes(bin_dir: &Path) {
     fs::create_dir_all(bin_dir).expect("bin dir");
 
@@ -92,7 +91,7 @@ case "${1:-}" in
     ;;
   for-each-ref)
     if [ -n "${INSHELLAH_GIT_ARGS_FILE:-}" ]; then
-      printf '%s\n' "$*" > "$INSHELLAH_GIT_ARGS_FILE"
+      printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$INSHELLAH_GIT_ARGS_FILE"
     fi
     case "$*" in
       *"refs/heads refs/remotes refs/tags"*)
@@ -220,14 +219,8 @@ impl Harness {
         let cache_dir = root.join("cache");
         fs::create_dir_all(&cache_dir).expect("cache dir");
         let mut aux_files = BTreeMap::new();
-        aux_files.insert(
-            "KUBECTL_ARGS_FILE".into(),
-            root.join("kubectl-args.txt"),
-        );
-        aux_files.insert(
-            "INSHELLAH_GIT_ARGS_FILE".into(),
-            root.join("git-args.txt"),
-        );
+        aux_files.insert("KUBECTL_ARGS_FILE".into(), root.join("kubectl-args.txt"));
+        aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), root.join("git-args.txt"));
         Harness {
             bin_dir,
             cache_dir,
@@ -285,6 +278,14 @@ impl Harness {
 // === nix ===
 
 #[test]
+fn unknown_command_returns_null_for_file_fallback() {
+    let h = Harness::new("dyn-unknown");
+    let (stdout, stderr, ok) = h.run(&["definitely-not-inshellah-dynamic", ""], &[]);
+    assert!(ok, "stderr={stderr}");
+    assert_eq!(stdout.trim(), "null", "stdout={stdout}");
+}
+
+#[test]
 fn nix_top_level_completions_use_get_completions_env() {
     let h = Harness::new("dyn-nix-top");
     let (stdout, stderr, ok) = h.run(&["nix", ""], &[]);
@@ -309,7 +310,7 @@ fn nix_slow_completion_times_out_when_budget_is_short() {
         &["nix", "slow", ""],
         &[("INSHELLAH_DYNAMIC_TIMEOUT_MS", "50")],
     );
-    assert!(parse_output(&stdout).is_none(), "stdout={stdout}");
+    assert_eq!(stdout.trim(), "null", "stdout={stdout}");
 }
 
 #[test]
@@ -358,10 +359,7 @@ fn kubectl_resource_names_complete_with_namespace_preserved() {
 #[test]
 fn kubectl_rollout_uses_resource_kind() {
     let h = Harness::new("dyn-kubectl-rollout");
-    let (stdout, _, _) = h.run(
-        &["kubectl", "rollout", "status", "deployment", ""],
-        &[],
-    );
+    let (stdout, _, _) = h.run(&["kubectl", "rollout", "status", "deployment", ""], &[]);
     let cands = parse_output(&stdout).expect("rollout target");
     assert_eq!(cands[0].description, "deployment");
 }
@@ -435,10 +433,7 @@ fn git_remote_subcommand_offers_verbs_then_filters_fuzzily() {
     assert_eq!(Harness::values(&fuzzy), vec!["show"]);
 
     let (exact, _, _) = h.run(&["git", "remote", "show"], &[]);
-    assert!(
-        parse_output(&exact).is_none(),
-        "exact dynamic match should disappear"
-    );
+    assert_eq!(exact.trim(), "null", "stdout={exact}");
 
     let (named, _, _) = h.run(&["git", "remote", "show", ""], &[]);
     let named = parse_output(&named).expect("remote names");
@@ -524,10 +519,7 @@ fn git_rm_completes_tracked_paths() {
 fn git_worktree_add_first_arg_falls_through_to_files() {
     let h = Harness::new("dyn-git-worktree-add");
     let (stdout, _, _) = h.run(&["git", "worktree", "add", ""], &[]);
-    assert!(
-        parse_output(&stdout).is_none(),
-        "worktree add at first positional should hand off"
-    );
+    assert_eq!(stdout.trim(), "null", "stdout={stdout}");
 }
 
 #[test]
@@ -552,6 +544,38 @@ fn git_dynamic_limit_zero_omits_count_flag() {
     );
 }
 
+#[test]
+fn git_dynamic_limit_is_passed_to_native_provider() {
+    let h = Harness::new("dyn-git-limit");
+    let (_stdout, _, _) = h.run(
+        &["git", "fetch", "origin", ""],
+        &[("INSHELLAH_DYNAMIC_LIMIT", "7")],
+    );
+    let captured = h.read_aux("INSHELLAH_GIT_ARGS_FILE");
+    assert!(
+        captured.contains("--count 7"),
+        "dynamic limit should be passed to git, got: {captured}"
+    );
+}
+
+#[test]
+fn git_explicit_path_after_elevation_uses_dynamic_provider() {
+    for wrapper in ["sudo", "doas"] {
+        let h = Harness::new(&format!("dyn-git-{wrapper}-path"));
+        let git_path = h.bin_dir.join("git").to_string_lossy().into_owned();
+        let (stdout, stderr, ok) = h.run(&[wrapper, &git_path, "fetch", "origin", ""], &[]);
+        assert!(ok, "{wrapper} stderr={stderr}");
+        let cands = parse_output(&stdout).expect("refs");
+        assert!(Harness::values(&cands).iter().any(|v| v == "main"));
+
+        let captured = h.read_aux("INSHELLAH_GIT_ARGS_FILE");
+        assert!(
+            captured.contains(&format!("argv0={git_path}")),
+            "{wrapper} should invoke explicit git path, got: {captured}"
+        );
+    }
+}
+
 // === jj ===
 
 #[test]
@@ -561,7 +585,21 @@ fn jj_top_level_includes_common_verbs() {
     let cands = parse_output(&stdout).expect("top-level verbs");
     let values = Harness::values(&cands);
     assert!(values.iter().any(|v| v == "bookmark"));
+    assert!(values.iter().any(|v| v == "config"));
     assert!(values.iter().any(|v| v == "git"));
+}
+
+#[test]
+fn jj_aliases_route_to_canonical_value_providers() {
+    let h = Harness::new("dyn-jj-aliases");
+
+    let (desc, _, _) = h.run(&["jj", "desc", ""], &[]);
+    let desc = parse_output(&desc).expect("desc revisions");
+    assert!(Harness::values(&desc).iter().any(|v| v == "main"));
+
+    let (ci, _, _) = h.run(&["jj", "ci", ""], &[]);
+    let ci = parse_output(&ci).expect("ci files");
+    assert_eq!(Harness::values(&ci), vec!["src/main.rs", "README.md"]);
 }
 
 #[test]

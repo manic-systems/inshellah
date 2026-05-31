@@ -1,10 +1,11 @@
 # runtime completion resolution
 
-when a command isn't in the static index yet, `inshellah complete`
-runs `--help` (or `-h`) on the binary, caches the result in the user
-directory, and returns completions immediately. tab-completion just
-works for tools installed outside the indexed prefixes — via cargo,
-pip, npm, go, etc.
+`inshellah complete` uses the static index first. if an uncached command
+or subcommand is needed, it runs `--help` (or `-h`), caches the result in
+the user directory, and returns completions immediately. if the static
+index reaches a value slot or leaf argument it cannot answer, inshellah
+asks a live provider. if no static or live provider has candidates, it
+prints `null` so nushell can use its normal file completion.
 
 ## how it works
 
@@ -12,12 +13,16 @@ typing `docker compose up --<TAB>`:
 
 1. nushell calls `inshellah complete docker compose up --`
 2. inshellah looks up the longest matching prefix in the index
-3. if found, it fuzzy-matches flags and subcommands against the partial input
-4. if not found, it locates the binary in `$PATH`, runs `--help`,
+3. if found, it fuzzy-matches indexed flags and subcommands against the
+   partial input
+4. if a value slot or leaf argument remains, it asks the command's live
+   provider, if one exists
+5. if no indexed prefix is found, it locates the binary in `$PATH`, runs `--help`,
    recursively resolves subcommands, caches the results in the user
    directory (`$XDG_CACHE_HOME/inshellah`), and returns completions
 
-all subsequent completions for that command are served from cache.
+all subsequent static completions for that command are served from cache.
+live providers stay live because their values can change between keypresses.
 
 elevation wrappers (`sudo`, `doas`, `pkexec`, `su`, `run0`) are
 stripped before lookup: `sudo docker compose up --` resolves against
@@ -69,8 +74,10 @@ your shell before nushell starts.
 |---|---|---|
 | `INSHELLAH_FLAG_TRIGGERS` | `-` | characters that surface flag completions when a partial token begins with one of them. set to `-+` to also trigger on `+`; whitespace is ignored. an empty value disables prefix-triggered flags (leaving only `INSHELLAH_FLAG_ON_EMPTY`). |
 | `INSHELLAH_FLAG_ON_EMPTY` | `0` | when truthy (`1`/`true`/`yes`/`on`), also surface flags on an empty token — i.e. right after a space — alongside subcommands. otherwise an empty token hands off to file/dynamic completion. |
-| `INSHELLAH_MAX_COMPLETIONS` | `0` | cap on the number of candidates returned (and nushell's `max_results` when sourcing the bundled snippet). `0` imposes no inshellah cap; nushell's own default of 200 still applies. |
-| `INSHELLAH_TIMEOUT_MS` | `200` | per-subprocess timeout for the on-the-fly `--help` resolution. an explicit `--timeout-ms` flag overrides it. |
+| `INSHELLAH_DYNAMIC_TIMEOUT_MS` | `5000` | wall-clock budget in milliseconds shared by live provider subprocesses for one completion request. `0` disables this runtime timeout. on timeout the provider returns no candidates and inshellah prints `null` if nothing else can answer. |
+| `INSHELLAH_DYNAMIC_LIMIT` | `200` | cap passed to live providers that support native limits, such as `git for-each-ref --count`, `jj log -n`, and `docker ps --last`. `0` omits those provider-specific limit flags; providers without native caps ignore it. |
+| `INSHELLAH_TIMEOUT_MS` | `200` | per-subprocess timeout for on-the-fly `--help` resolution of uncached commands and subcommands. it also bounds the current `adb` value provider. an explicit `--timeout-ms` flag overrides it. this is separate from `INSHELLAH_DYNAMIC_TIMEOUT_MS`. |
+| `INSHELLAH_MAX_COMPLETIONS` | `0` | cap on candidates returned by indexed/static matching, and nushell's `max_results` when sourcing the bundled snippet. `0` imposes no inshellah cap; nushell's own default of 200 still applies. |
 
 ### flag triggering
 
@@ -116,6 +123,32 @@ for upfront indexing on non-nixos systems:
 ```sh
 inshellah index /usr /usr/local
 ```
+
+## live providers
+
+live providers are narrow value completers. they run only after the
+static index has handled command structure and either reaches a known
+value slot or has no leaf candidates to offer. unsupported commands,
+empty provider output, parse failures, and provider timeouts all hand off
+with `null`.
+
+| command | provider |
+|---|---|
+| `nix` | `NIX_GET_COMPLETIONS`, with optional `meta.description` lookup |
+| `systemctl` / `journalctl` | systemd unit names |
+| `coredumpctl` | units and pids |
+| `loginctl` | users and sessions |
+| `machinectl` / `networkctl` | machines and links |
+| `ssh` / `scp` / `sftp` | ssh config and known_hosts names |
+| `adb` | device selectors and installed package names |
+| `docker` / `podman` | containers and image refs by subcommand |
+| `kubectl` | resource names from the selected cluster and namespace |
+| `git` | refs and worktree paths |
+| `jj` | revisions, operations, bookmarks, remotes, files, and workspaces |
+| `npm` / `pnpm` / `yarn` | package.json scripts |
+| `make` / `just` | targets and recipes |
+| `cargo` | workspace targets for `--bin`, `--example`, and related slots |
+| `kill` / `pkill` | pid and command pairs |
 
 ## macOS developer toolchain
 

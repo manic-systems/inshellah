@@ -71,7 +71,7 @@ autoloaded nushell shim.
 - drops the full nushell external-completer shim into
   `/share/nushell/autoload/`, including sudo/doas overrides so elevated
   commands still complete through inshellah.
-- emits lightweight command-name stubs for dynamic-completion backends
+- emits lightweight command-name stubs for live-provider commands
   that are present in the system profile, so tools like `git` and `jj`
   appear in nushell's command list while inshellah still supplies their
   argument completions lazily.
@@ -109,12 +109,12 @@ programs.inshellah = {
   # default of 200ms)
   timeoutMs = null;
 
-  # timeout in ms for live dynamic completions at tab-completion time
-  # set to 0 to disable the runtime timeout
+  # wall-clock timeout in ms for live providers at tab-completion time.
+  # set to 0 to disable this runtime timeout
   dynamicTimeoutMs = 5000;
 
-  # result cap requested from live providers that support native limits
-  # set to 0 to omit native result-limit flags
+  # result cap requested from live providers that support native limits.
+  # set to 0 to omit provider-specific limit flags
   dynamicLimit = 200;
 
   # characters that trigger flag completions when a partial token begins
@@ -125,7 +125,8 @@ programs.inshellah = {
   # with subcommands. default false
   flagOnEmpty = false;
 
-  # cap on candidates returned and nushell's max_results. 0 = no cap
+  # cap on indexed/static candidates returned and nushell's max_results.
+  # 0 = no inshellah cap
   # (nushell's built-in default of 200 still applies)
   maxCompletions = 0;
 
@@ -142,11 +143,11 @@ programs.inshellah = {
 ### flag-triggering behaviour
 
 `flagTriggers` and `flagOnEmpty` control when option/flag completions are
-offered. By default flags appear only after a leading `-`. Add characters
-to `flagTriggers` (e.g. `"-+"`) to trigger on them as well — for a
+offered. by default flags appear only after a leading `-`. add characters
+to `flagTriggers` (e.g. `"-+"`) to trigger on them as well - for a
 non-dash trigger the text after it is matched against the bare flag name,
-so `+ver` completes to `--verbose`. Set `flagOnEmpty = true` to list flags
-immediately after a space, alongside subcommands. These map to the
+so `+ver` completes to `--verbose`. set `flagOnEmpty = true` to list flags
+immediately after a space, alongside subcommands. these map to the
 `INSHELLAH_FLAG_TRIGGERS` / `INSHELLAH_FLAG_ON_EMPTY` environment variables
 (see [runtime-completions.md](runtime-completions.md)).
 
@@ -180,33 +181,43 @@ or copy the snippet directly into `~/.config/nushell/config.nu`:
 $env.config.completions.external = { ... }
 ```
 
-the snippet provides both static lookups against the system index and
-runtime fallbacks for cases the static index can't cover:
+the snippet calls `inshellah complete`, which uses the static system index
+first. live providers run only for value slots and leaf arguments the
+index cannot answer. if the static index and live provider both have no
+candidates, or if a provider times out, the completer returns `null` so
+nushell can fall back to normal file completion.
 
-runtime fallbacks have a default 5s timeout, controlled by
-`programs.inshellah.dynamicTimeoutMs` or `INSHELLAH_DYNAMIC_TIMEOUT_MS`
-when sourcing the snippet manually. providers with native result caps use
-`programs.inshellah.dynamicLimit` or `INSHELLAH_DYNAMIC_LIMIT`, defaulting
-to 200. set either value to 0 to disable that guard. on timeout the
-completer returns `null` so nushell can fall back to its normal completion
-behavior.
+the provider timeout defaults to 5s and is controlled by
+`programs.inshellah.dynamicTimeoutMs` / `INSHELLAH_DYNAMIC_TIMEOUT_MS`.
+set it to 0 to disable the runtime timeout. providers with native result
+caps use `programs.inshellah.dynamicLimit` / `INSHELLAH_DYNAMIC_LIMIT`,
+defaulting to 200. set it to 0 to omit provider-specific limit flags;
+providers without native caps ignore it.
 
-| command | dynamic source |
+`programs.inshellah.completeTimeoutMs` / `INSHELLAH_TIMEOUT_MS` is
+separate: it is the per-subprocess timeout for on-the-fly `--help`
+resolution of uncached commands, and also bounds the current `adb` value
+provider. `programs.inshellah.maxCompletions` /
+`INSHELLAH_MAX_COMPLETIONS` caps indexed/static candidates and the
+snippet's nushell `max_results`.
+
+| command | provider |
 |---|---|
-| `nix` | flake refs via `NIX_GET_COMPLETIONS`, with optional `meta.description` |
-| `systemctl` / `journalctl` | unit names from `list-units` |
-| `coredumpctl` | units + pids |
-| `loginctl` | users / sessions |
-| `machinectl` / `networkctl` | machines / links |
-| `ssh` / `scp` / `sftp` | hostnames from ssh config + known_hosts |
-| `docker` / `podman` | containers + image refs by subcommand |
-| `kubectl` | resource names from the live cluster |
-| `git` | refs + worktree paths |
+| `nix` | `NIX_GET_COMPLETIONS`, with optional `meta.description` lookup |
+| `systemctl` / `journalctl` | systemd unit names |
+| `coredumpctl` | units and pids |
+| `loginctl` | users and sessions |
+| `machinectl` / `networkctl` | machines and links |
+| `ssh` / `scp` / `sftp` | ssh config and known_hosts names |
+| `adb` | device selectors and installed package names |
+| `docker` / `podman` | containers and image refs by subcommand |
+| `kubectl` | resource names from the selected cluster and namespace |
+| `git` | refs and worktree paths |
 | `jj` | revisions, operations, bookmarks, remotes, files, and workspaces |
-| `npm` / `pnpm` / `yarn` | scripts from package.json |
-| `make` / `just` | targets / recipes |
-| `cargo` | workspace targets behind `--bin` / `--example` / etc. |
-| `kill` / `pkill` | pid+comm pairs |
+| `npm` / `pnpm` / `yarn` | package.json scripts |
+| `make` / `just` | targets and recipes |
+| `cargo` | workspace targets for `--bin`, `--example`, and related slots |
+| `kill` / `pkill` | pid and command pairs |
 
 ## home manager and user-level package managers
 

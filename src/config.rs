@@ -2,21 +2,22 @@
 //! runtime configuration for the `complete` path.
 //!
 //! the completer reads a handful of behavioural knobs from the
-//! environment. this matches the mechanism already used for the dynamic
-//! nushell shim (`INSHELLAH_DYNAMIC_*`): the nixos module exports the
+//! environment. this matches the mechanism already used for live dynamic
+//! providers (`INSHELLAH_DYNAMIC_*`): the nixos module exports the
 //! variables via `environment.variables`, and users sourcing the snippet
 //! by hand can export them directly. every field has a compiled-in
 //! default that reproduces the historical behaviour, so an unconfigured
 //! install behaves exactly as before.
 
 /// per-subprocess timeout default for the dynamic `--help` resolve path
+/// and the current `adb` value provider.
 /// when neither `--timeout-ms` nor `INSHELLAH_TIMEOUT_MS` is set.
 pub const DEFAULT_TIMEOUT_MS: u64 = 200;
 
-/// wall-clock budget (ms) for the dynamic completer. 0 disables.
+/// wall-clock budget (ms) for live dynamic providers. 0 disables.
 pub const DEFAULT_DYNAMIC_TIMEOUT_MS: u64 = 5000;
 
-/// cap on rows the dynamic completer asks native list commands for
+/// cap on rows live dynamic providers ask native list commands for
 /// (e.g. `git for-each-ref --count N`). 0 omits the flag.
 pub const DEFAULT_DYNAMIC_LIMIT: usize = 200;
 
@@ -38,12 +39,13 @@ pub struct Config {
     /// static completer. `0` means no inshellah-imposed cap (nushell's own
     /// `max_results` still applies).
     pub max_completions: usize,
-    /// per-subprocess timeout (ms) for the dynamic `--help` resolve path.
+    /// per-subprocess timeout (ms) for dynamic `--help` resolution and
+    /// the current `adb` value provider.
     pub timeout_ms: u64,
-    /// wall-clock budget shared across dynamic completer subprocesses.
+    /// wall-clock budget shared across live dynamic provider subprocesses.
     /// distinct from `timeout_ms`, which only governs `--help` resolution.
     pub dynamic_timeout_ms: u64,
-    /// row cap the dynamic completer applies to native list commands.
+    /// row cap live dynamic providers apply to native list commands.
     pub dynamic_limit: usize,
 }
 
