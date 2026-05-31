@@ -4,6 +4,7 @@
 //! nothing. the nushell shim is now just JSON glue; this module is the
 //! source of truth for everything that used to live in its match arms.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
@@ -12,6 +13,17 @@ use crate::subprocess::{run_quiet, run_quiet_with};
 /// candidates as JSON `{"value":..,"description":..}`, or None to hand
 /// off to nu's file completer.
 pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
+    dynamic_complete_with_path(spans, None, cfg)
+}
+
+/// Like `dynamic_complete`, but subprocess-backed providers invoke
+/// `explicit_cmd_path` for the completed command instead of resolving
+/// `spans[0]` through PATH.
+pub fn dynamic_complete_with_path(
+    spans: &[String],
+    explicit_cmd_path: Option<&Path>,
+    cfg: &Config,
+) -> Option<Vec<String>> {
     if spans.is_empty() {
         return None;
     }
@@ -23,6 +35,8 @@ pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
     let ctx = DynCtx {
         deadline,
         limit: cfg.dynamic_limit,
+        cmd_name: &spans[0],
+        explicit_cmd_path,
     };
     let raw = dispatch(spans, &ctx)?;
     let last = spans.last().map(String::as_str).unwrap_or("");
@@ -35,12 +49,14 @@ pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
 }
 
 #[derive(Clone, Copy)]
-struct DynCtx {
+struct DynCtx<'a> {
     deadline: Option<Instant>,
     limit: usize,
+    cmd_name: &'a str,
+    explicit_cmd_path: Option<&'a Path>,
 }
 
-impl DynCtx {
+impl DynCtx<'_> {
     fn ms_left(&self) -> u64 {
         match self.deadline {
             None => u64::MAX,
@@ -64,6 +80,25 @@ impl DynCtx {
         } else {
             vec![flag.to_string(), self.limit.to_string()]
         }
+    }
+
+    fn bin(&self, name: &str) -> String {
+        if self.cmd_name == name
+            && let Some(path) = self.explicit_cmd_path
+        {
+            return path.to_string_lossy().into_owned();
+        }
+        name.to_string()
+    }
+
+    fn command_spans(&self, spans: &[String]) -> Vec<String> {
+        let mut args = spans.to_vec();
+        if let Some(path) = self.explicit_cmd_path
+            && !args.is_empty()
+        {
+            args[0] = path.to_string_lossy().into_owned();
+        }
+        args
     }
 }
 
@@ -234,7 +269,7 @@ fn nix_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     }
     let nix_index = spans.len() - 1;
     let last = spans.last().map(String::as_str).unwrap_or("");
-    let cmd_args: Vec<String> = spans.to_vec();
+    let cmd_args = ctx.command_spans(spans);
     let raw = run_quiet_with(&cmd_args, ctx.ms_left(), |cmd| {
         cmd.env("NIX_GET_COMPLETIONS", nix_index.to_string());
     })?;
@@ -285,7 +320,7 @@ fn nix_eval_description(installable: &str, ctx: &DynCtx) -> Option<String> {
         return None;
     }
     let args: Vec<String> = vec![
-        "nix".into(),
+        ctx.bin("nix"),
         "eval".into(),
         "--raw".into(),
         "--impure".into(),
@@ -353,7 +388,7 @@ fn first_positional(args: &[String]) -> Option<&str> {
 }
 
 fn unit_candidates(scope: &[&str], prefix: &str, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec!["systemctl".into()];
+    let mut args: Vec<String> = vec![ctx.bin("systemctl")];
     args.extend(scope.iter().map(|s| s.to_string()));
     args.extend(
         [
@@ -420,7 +455,7 @@ fn coredumpctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candida
     let last = spans.last().map(String::as_str).unwrap_or("");
     let mut out = unit_candidates(&[], last, ctx).unwrap_or_default();
 
-    let mut args: Vec<String> = vec!["coredumpctl".into(), "list".into()];
+    let mut args: Vec<String> = vec![ctx.bin("coredumpctl"), "list".into()];
     args.extend(ctx.limit_args("-n"));
     args.extend(["--no-pager", "--no-legend"].into_iter().map(str::to_string));
     if let Some(text) = run_quiet(&args, ctx.ms_left()) {
@@ -459,7 +494,7 @@ fn loginctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>
     if user_verbs.contains(&sub) && spans.len() >= 3 {
         let out = run_quiet(
             &[
-                "loginctl".into(),
+                ctx.bin("loginctl"),
                 "list-users".into(),
                 "--no-pager".into(),
                 "--no-legend".into(),
@@ -478,7 +513,7 @@ fn loginctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>
     } else if session_verbs.contains(&sub) && spans.len() >= 3 {
         let out = run_quiet(
             &[
-                "loginctl".into(),
+                ctx.bin("loginctl"),
                 "list-sessions".into(),
                 "--no-pager".into(),
                 "--no-legend".into(),
@@ -510,7 +545,7 @@ fn machinectl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidat
     }
     let out = run_quiet(
         &[
-            "machinectl".into(),
+            ctx.bin("machinectl"),
             "list".into(),
             "--no-pager".into(),
             "--no-legend".into(),
@@ -544,7 +579,7 @@ fn networkctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidat
     }
     let out = run_quiet(
         &[
-            "networkctl".into(),
+            ctx.bin("networkctl"),
             "list".into(),
             "--no-pager".into(),
             "--no-legend".into(),
@@ -615,7 +650,7 @@ const DOCKER_CONTAINER_VERBS: &[&str] = &[
 const DOCKER_IMAGE_VERBS: &[&str] = &["run", "rmi", "tag", "push", "pull", "history", "save", "create"];
 
 fn docker_like_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let cmd = spans[0].clone();
+    let cmd = ctx.bin(spans[0].as_str());
     let sub = spans.get(1).map(String::as_str).unwrap_or("");
     if DOCKER_CONTAINER_VERBS.contains(&sub) {
         let mut args = vec![cmd, "ps".into()];
@@ -730,7 +765,7 @@ fn kubectl_names(kind: &str, spans: &[String], ctx: &DynCtx) -> Option<Vec<Candi
     } else {
         "custom-columns=NAME:.metadata.name"
     };
-    let mut args: Vec<String> = vec!["kubectl".into(), "get".into(), kind.into()];
+    let mut args: Vec<String> = vec![ctx.bin("kubectl"), "get".into(), kind.into()];
     args.extend(scope.args.iter().cloned());
     args.extend(
         ["--no-headers", "-o", columns]
@@ -1023,7 +1058,7 @@ fn git_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 fn git_refs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec!["git".into(), "for-each-ref".into()];
+    let mut args: Vec<String> = vec![ctx.bin("git"), "for-each-ref".into()];
     args.extend(ctx.limit_args("--count"));
     args.push("--format=%(refname:short)%09%(objecttype)%09%(contents:subject)".into());
     args.extend(
@@ -1036,7 +1071,7 @@ fn git_refs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 fn git_branches(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec!["git".into(), "for-each-ref".into()];
+    let mut args: Vec<String> = vec![ctx.bin("git"), "for-each-ref".into()];
     args.extend(ctx.limit_args("--count"));
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/heads".into());
@@ -1045,7 +1080,7 @@ fn git_branches(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 fn git_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec!["git".into(), "for-each-ref".into()];
+    let mut args: Vec<String> = vec![ctx.bin("git"), "for-each-ref".into()];
     args.extend(ctx.limit_args("--count"));
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/tags".into());
@@ -1054,7 +1089,7 @@ fn git_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 fn git_remotes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let out = run_quiet(&["git".into(), "remote".into()], ctx.ms_left())?;
+    let out = run_quiet(&[ctx.bin("git"), "remote".into()], ctx.ms_left())?;
     let mut candidates = Vec::new();
     for line in out.lines() {
         let trimmed = line.trim();
@@ -1067,7 +1102,7 @@ fn git_remotes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 fn git_stashes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec!["git".into(), "stash".into(), "list".into()];
+    let mut args: Vec<String> = vec![ctx.bin("git"), "stash".into(), "list".into()];
     args.extend(ctx.limit_args("-n"));
     let out = run_quiet(&args, ctx.ms_left())?;
     let mut candidates = Vec::new();
@@ -1087,7 +1122,7 @@ fn git_stashes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 fn git_status_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "git".into(),
+            ctx.bin("git"),
             "status".into(),
             "--porcelain".into(),
             "-uall".into(),
@@ -1111,7 +1146,7 @@ fn git_status_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 fn git_tracked_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let out = run_quiet(&["git".into(), "ls-files".into()], ctx.ms_left())?;
+    let out = run_quiet(&[ctx.bin("git"), "ls-files".into()], ctx.ms_left())?;
     let mut candidates = Vec::new();
     for line in out.lines() {
         if line.is_empty() {
@@ -1125,7 +1160,7 @@ fn git_tracked_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 fn git_submodules(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "git".into(),
+            ctx.bin("git"),
             "config".into(),
             "--file".into(),
             ".gitmodules".into(),
@@ -1148,7 +1183,7 @@ fn git_submodules(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 fn git_worktrees(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "git".into(),
+            ctx.bin("git"),
             "worktree".into(),
             "list".into(),
             "--porcelain".into(),
@@ -1521,7 +1556,7 @@ fn jj_revs(ctx: &DynCtx, partial: &str, revset: &str) -> Option<Vec<Candidate>> 
 
 fn jj_change_ids(ctx: &DynCtx, revset: &str) -> Option<Vec<Candidate>> {
     let mut args: Vec<String> = vec![
-        "jj".into(),
+        ctx.bin("jj"),
         "log".into(),
         "--ignore-working-copy".into(),
         "--no-graph".into(),
@@ -1546,7 +1581,7 @@ fn jj_change_ids(ctx: &DynCtx, revset: &str) -> Option<Vec<Candidate>> {
 /// intermediate table prefixes, derived here. `set_only` drops defaults so
 /// `unset` offers only keys actually present in a config file.
 fn jj_config_keys(ctx: &DynCtx, leaves_only: bool, set_only: bool) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec!["jj".into(), "config".into(), "list".into()];
+    let mut args: Vec<String> = vec![ctx.bin("jj"), "config".into(), "list".into()];
     if !set_only {
         args.push("--include-defaults".into());
     }
@@ -1583,7 +1618,7 @@ fn jj_config_keys(ctx: &DynCtx, leaves_only: bool, set_only: bool) -> Option<Vec
 /// files with unresolved conflicts, for `jj resolve`
 fn jj_conflicted_files(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
-        &["jj".into(), "resolve".into(), "--list".into()],
+        &[ctx.bin("jj"), "resolve".into(), "--list".into()],
         ctx.ms_left(),
     )?;
     let mut candidates = Vec::new();
@@ -1605,7 +1640,7 @@ fn jj_conflicted_files(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 fn jj_revset_aliases(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "jj".into(),
+            ctx.bin("jj"),
             "config".into(),
             "list".into(),
             "--include-defaults".into(),
@@ -1635,7 +1670,7 @@ fn jj_revset_aliases(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 fn jj_templates(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "jj".into(),
+            ctx.bin("jj"),
             "config".into(),
             "list".into(),
             "--include-defaults".into(),
@@ -1709,7 +1744,7 @@ fn is_revset_symbol_prefix(s: &str) -> bool {
 fn jj_bookmarks(ctx: &DynCtx, revset: &str) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "jj".into(),
+            ctx.bin("jj"),
             "bookmark".into(),
             "list".into(),
             "-r".into(),
@@ -1754,7 +1789,7 @@ fn jj_remote_bookmarks(ctx: &DynCtx, tracked: Option<bool>) -> Option<Vec<Candid
     );
     let out = run_quiet(
         &[
-            "jj".into(),
+            ctx.bin("jj"),
             "bookmark".into(),
             "list".into(),
             "--all-remotes".into(),
@@ -1786,7 +1821,7 @@ fn jj_remote_bookmarks(ctx: &DynCtx, tracked: Option<bool>) -> Option<Vec<Candid
 fn jj_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "jj".into(),
+            ctx.bin("jj"),
             "tag".into(),
             "list".into(),
             "--all-remotes".into(),
@@ -1808,7 +1843,7 @@ fn jj_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 
 fn jj_remotes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
-        &["jj".into(), "git".into(), "remote".into(), "list".into()],
+        &[ctx.bin("jj"), "git".into(), "remote".into(), "list".into()],
         ctx.ms_left(),
     )?;
     let mut candidates = Vec::new();
@@ -1823,7 +1858,7 @@ fn jj_remotes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 
 fn jj_ops(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let mut args: Vec<String> = vec![
-        "jj".into(),
+        ctx.bin("jj"),
         "op".into(),
         "log".into(),
         "--ignore-working-copy".into(),
@@ -1845,7 +1880,7 @@ fn jj_ops(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 fn jj_files(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "jj".into(),
+            ctx.bin("jj"),
             "file".into(),
             "list".into(),
             "--ignore-working-copy".into(),
@@ -1866,7 +1901,7 @@ fn jj_files(ctx: &DynCtx) -> Option<Vec<Candidate>> {
 fn jj_workspaces(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run_quiet(
         &[
-            "jj".into(),
+            ctx.bin("jj"),
             "workspace".into(),
             "list".into(),
             "-T".into(),
@@ -1936,7 +1971,7 @@ fn just_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
         return None;
     }
     let out = run_quiet(
-        &["just".into(), "--list".into(), "--unsorted".into()],
+        &[ctx.bin("just"), "--list".into(), "--unsorted".into()],
         ctx.ms_left(),
     )?;
     let mut candidates = Vec::new();
@@ -1975,7 +2010,7 @@ fn cargo_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     }
     let out = run_quiet(
         &[
-            "cargo".into(),
+            ctx.bin("cargo"),
             "metadata".into(),
             "--no-deps".into(),
             "--format-version".into(),

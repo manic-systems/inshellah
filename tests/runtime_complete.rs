@@ -3,7 +3,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use inshellah::parsers::manpage::{ManpageEntry, ManpageResult, ManpageSubcommand, OwnedSwitch};
+use inshellah::parsers::manpage::{
+    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
+};
 use inshellah::store::{filename_of_command, write_native, write_result};
 
 fn unique_temp_dir(name: &str) -> std::path::PathBuf {
@@ -100,6 +102,192 @@ exit 2
             .join(format!("{}.json", filename_of_command("fakecmd clone")))
             .is_file(),
         "subcommand cache was not written"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_does_not_cache_timed_out_partial_help() {
+    let root = unique_temp_dir("inshellah-partial-help-timeout");
+    let bin_dir = root.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let slow = bin_dir.join("slowhelp");
+    fs::write(
+        &slow,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  printf 'Usage: slowhelp [OPTIONS]\nOptions:\n  --partial partial output\n'
+  sleep 1
+  exit 0
+fi
+exit 2
+"#,
+    )
+    .expect("write slowhelp");
+    let mut perms = fs::metadata(&slow).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&slow, perms).expect("chmod");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("--timeout-ms")
+        .arg("40")
+        .arg("slowhelp")
+        .arg("--")
+        .env(
+            "PATH",
+            format!("{}:{}", bin_dir.display(), old_path.to_string_lossy()),
+        )
+        .output()
+        .expect("run inshellah complete");
+
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert_eq!(stdout.trim(), "null", "stdout = {stdout}");
+    assert!(
+        !cache_dir.join("slowhelp.json").exists(),
+        "partial timed-out help was cached"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_lookup_skips_global_flag_values_before_subcommands() {
+    let root = unique_temp_dir("inshellah-global-flag-value");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let parent = ManpageResult {
+        entries: vec![ManpageEntry {
+            switch: OwnedSwitch::Long("config".to_string()),
+            param: Some(OwnedParam::Mandatory("FILE".to_string())),
+            desc: "config file".to_string(),
+        }],
+        subcommands: vec![ManpageSubcommand {
+            name: "sub".to_string(),
+            desc: "subcommand".to_string(),
+        }],
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    let child = ManpageResult {
+        entries: vec![ManpageEntry {
+            switch: OwnedSwitch::Long("child".to_string()),
+            param: None,
+            desc: "child flag".to_string(),
+        }],
+        subcommands: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "demo", "help", &parent).expect("parent cache");
+    write_result(&cache_dir, "demo sub", "help", &child).expect("child cache");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("demo")
+        .arg("--config")
+        .arg("cfg")
+        .arg("sub")
+        .arg("--")
+        .output()
+        .expect("run inshellah complete");
+
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains(r#""value":"--child""#), "stdout = {stdout}");
+    assert!(
+        !stdout.contains(r#""value":"--config""#),
+        "resolved parent instead of child: {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_dynamic_git_uses_explicit_executable_path() {
+    let root = unique_temp_dir("inshellah-explicit-git-dynamic");
+    let explicit_dir = root.join("explicit");
+    let path_dir = root.join("path");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&explicit_dir).expect("explicit dir");
+    fs::create_dir_all(&path_dir).expect("path dir");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let explicit_git = explicit_dir.join("git");
+    fs::write(
+        &explicit_git,
+        r#"#!/bin/sh
+if [ "$1" = "remote" ]; then
+  printf 'explicit-origin\n'
+  exit 0
+fi
+exit 2
+"#,
+    )
+    .expect("write explicit git");
+    let path_git = path_dir.join("git");
+    fs::write(
+        &path_git,
+        r#"#!/bin/sh
+if [ "$1" = "remote" ]; then
+  printf 'path-origin\n'
+  exit 0
+fi
+exit 2
+"#,
+    )
+    .expect("write path git");
+    for git in [&explicit_git, &path_git] {
+        let mut perms = fs::metadata(git).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(git, perms).expect("chmod");
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("--timeout-ms")
+        .arg("100")
+        .arg(explicit_git.to_string_lossy().as_ref())
+        .arg("push")
+        .arg("")
+        .env("PATH", &path_dir)
+        .output()
+        .expect("run inshellah complete");
+
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(
+        stdout.contains(r#""value":"explicit-origin""#),
+        "stdout = {stdout}"
+    );
+    assert!(
+        !stdout.contains("path-origin"),
+        "dynamic provider invoked PATH git: {stdout}"
     );
 
     let _ = fs::remove_dir_all(root);
