@@ -28,14 +28,13 @@ too.
 
 ```nu
 # ~/.config/nushell/config.nu
-$env.config.completions.external = {
-    enable: true
-    completer: {|spans|
-        inshellah complete ...$spans
-        | from json
-    }
-}
+source /path/to/inshellah-completer.nu
 ```
+
+the bundled shim wraps `inshellah complete` defensively: malformed JSON,
+`null`, and empty candidate lists return `null`, which lets nushell fall
+back to its normal file completion. a raw `| from json` example is shorter
+but can throw errors while tab-completing.
 
 with the nixos module, no extra config is needed beyond enabling the
 module — the wrapper has the system paths baked in.
@@ -46,8 +45,12 @@ to manually specify system dirs, use colon-separated `--dir`:
 $env.config.completions.external = {
     enable: true
     completer: {|spans|
-        inshellah complete ...$spans --dir $"($env.XDG_CACHE_HOME)/inshellah:/run/current-system/sw/share/inshellah"
-        | from json
+        let completed = (inshellah complete ...$spans --dir $"($env.XDG_CACHE_HOME)/inshellah:/run/current-system/sw/share/inshellah" | complete)
+        if $completed.exit_code == 0 {
+            try { $completed.stdout | from json } catch { null }
+        } else {
+            null
+        }
     }
 }
 ```

@@ -49,6 +49,9 @@
             rustc
           ];
           fakeInshellah = pkgs.writeShellScriptBin "inshellah" ''
+            if [ -n "''${INSHELLAH_ARG_FILE:-}" ]; then
+              printf '%s\n' "$@" > "$INSHELLAH_ARG_FILE"
+            fi
             if [ "''${1:-}" = complete ]; then
               if [ -n "''${INSHELLAH_STATIC_FILE:-}" ] && [ -s "$INSHELLAH_STATIC_FILE" ]; then
                 cat "$INSHELLAH_STATIC_FILE"

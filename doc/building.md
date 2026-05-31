@@ -72,13 +72,7 @@ inshellah dump
 wire up the nushell completer in `~/.config/nushell/config.nu`:
 
 ```nu
-$env.config.completions.external = {
-    enable: true
-    completer: {|spans|
-        inshellah complete ...$spans
-        | from json
-    }
-}
+source /path/to/inshellah-completer.nu
 ```
 
 see [nushell-integration.md](nushell-integration.md) for full
