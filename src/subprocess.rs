@@ -129,7 +129,11 @@ fn run_cmd_inner(
                 revents: 0,
             },
             libc::pollfd {
-                fd: if stderr_open { stderr_fd.unwrap_or(-1) } else { -1 },
+                fd: if stderr_open {
+                    stderr_fd.unwrap_or(-1)
+                } else {
+                    -1
+                },
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -190,10 +194,7 @@ fn run_cmd_inner(
     }
     let _ = child.wait();
 
-    if capped {
-        buf.truncate(MAX_CAPTURE_BYTES);
-    }
-    if buf.is_empty() {
+    if timed_out || capped || buf.is_empty() {
         None
     } else {
         Some(String::from_utf8_lossy(&buf).into_owned())
@@ -205,7 +206,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_cmd_caps_captured_output() {
+    fn run_cmd_rejects_capped_output() {
         let out = run_cmd(
             &[
                 "head".into(),
@@ -215,12 +216,19 @@ mod tests {
             ],
             2000,
         );
-        if let Some(s) = out {
-            assert_eq!(
-                s.len(),
-                MAX_CAPTURE_BYTES,
-                "captured output not clamped to cap"
-            );
-        }
+        assert!(out.is_none(), "capped output must not look parseable");
+    }
+
+    #[test]
+    fn run_cmd_rejects_timed_out_output() {
+        let out = run_cmd(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "printf 'Usage: demo\\nOptions:\\n  --partial partial\\n'; sleep 1".into(),
+            ],
+            20,
+        );
+        assert!(out.is_none(), "timed-out output must not look parseable");
     }
 }

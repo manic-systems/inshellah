@@ -170,6 +170,9 @@ fn entry_score(e: &ManpageEntry) -> i32 {
     switch_bonus + param_bonus + desc_bonus
 }
 
+type ShortAliasCandidate = (usize, char, Option<OwnedParam>);
+type LongAliasCandidate<'a> = (usize, &'a str);
+
 /// collapse duplicate flag entries that refer to the same flag.
 ///
 /// real-world manpages emit duplicates for several reasons:
@@ -261,8 +264,8 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
         }
     }
 
-    let mut shorts_by_desc: HashMap<&str, Vec<(usize, char, Option<OwnedParam>)>> = HashMap::new();
-    let mut longs_by_desc: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
+    let mut shorts_by_desc: HashMap<&str, Vec<ShortAliasCandidate>> = HashMap::new();
+    let mut longs_by_desc: HashMap<&str, Vec<LongAliasCandidate<'_>>> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         if let OwnedSwitch::Short(c) = &e.switch
             && !e.desc.is_empty()

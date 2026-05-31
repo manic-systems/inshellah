@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use inshellah::config::{Config, DEFAULT_TIMEOUT_MS};
-use inshellah::dynamic::dynamic_complete;
+use inshellah::dynamic::dynamic_complete_with_path;
 use inshellah::parsers::help::help_parser;
 use inshellah::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
@@ -326,12 +326,16 @@ fn classify_binary(_bindir: &Path, full: &Path) -> Classify {
 /// we deliberately skip the third historical `help`-subcommand variant:
 /// if neither flag yielded usable text, a positional `help` is unlikely
 /// to do anything different and the extra spawn dominates indexing cost.
-fn try_help(bin: &Path, timeout_ms: u64) -> Option<String> {
+fn try_help_until(bin: &Path, timeout_ms: u64, deadline: Instant) -> Option<String> {
     let bin_s = bin.to_string_lossy().to_string();
     for variant in [&["--help"][..], &["-h"][..]] {
+        let attempt_ms = timeout_ms.min(remaining_ms(deadline));
+        if attempt_ms == 0 {
+            return None;
+        }
         let mut args = vec![bin_s.clone()];
         args.extend(variant.iter().map(|s| s.to_string()));
-        if let Some(out) = run_cmd(&args, timeout_ms) {
+        if let Some(out) = run_cmd(&args, attempt_ms) {
             let cleaned = fast_strip_ansi::strip_ansi_string(&out);
             if !cleaned.trim().is_empty() {
                 return Some(cleaned.to_string());
@@ -339,6 +343,14 @@ fn try_help(bin: &Path, timeout_ms: u64) -> Option<String> {
         }
     }
     None
+}
+
+fn try_help(bin: &Path, timeout_ms: u64) -> Option<String> {
+    try_help_until(
+        bin,
+        timeout_ms,
+        Instant::now() + Duration::from_millis(timeout_ms),
+    )
 }
 
 fn is_nushell_source(text: &str) -> bool {
@@ -371,7 +383,8 @@ fn extract_matching_words(text: &str, needles: &[&str]) -> Vec<String> {
 
 /// try to get native nushell completions from a binary that supports them.
 fn try_native_completion(bin: &Path, timeout_ms: u64) -> Option<String> {
-    let help_text = try_help(bin, timeout_ms)?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let help_text = try_help_until(bin, timeout_ms, deadline)?;
     // look for words like "completion", "completions" — typical subcommand
     let candidates = extract_matching_words(&help_text, &["complet"]);
     let bin_s = bin.to_string_lossy().to_string();
@@ -386,7 +399,11 @@ fn try_native_completion(bin: &Path, timeout_ms: u64) -> Option<String> {
             ],
             vec![bin_s.clone(), sub.clone(), "--shell=nushell".to_string()],
         ] {
-            if let Some(out) = run_cmd(&args_form, timeout_ms) {
+            let attempt_ms = timeout_ms.min(remaining_ms(deadline));
+            if attempt_ms == 0 {
+                return None;
+            }
+            if let Some(out) = run_cmd(&args_form, attempt_ms) {
                 let cleaned = fast_strip_ansi::strip_ansi_string(&out);
                 if is_nushell_source(&cleaned) {
                     return Some(cleaned.to_string());
@@ -811,6 +828,47 @@ mod main_tests {
         let future = Instant::now() + Duration::from_millis(500);
         let r = remaining_ms(future);
         assert!(r > 0 && r <= 500, "remaining {r} out of (0, 500]");
+    }
+
+    #[test]
+    fn native_completion_probe_uses_one_shared_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "inshellah-native-deadline-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("temp dir");
+        let bin = root.join("nativeish");
+        fs::write(
+            &bin,
+            r#"#!/bin/sh
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  printf 'Usage: nativeish\nCommands:\n  completionalpha\n  completionbeta\n  completiongamma\n'
+  exit 0
+fi
+sleep 1
+"#,
+        )
+        .expect("write script");
+        let mut perms = fs::metadata(&bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).expect("chmod");
+
+        let start = Instant::now();
+        let out = try_native_completion(&bin, 80);
+        let elapsed = start.elapsed();
+        assert!(out.is_none());
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "native probing multiplied timeout across candidates: {elapsed:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }
 
@@ -2221,8 +2279,8 @@ fn resolve_command_path_and_cache(
             // a group command whose manpage body listed no children: recover
             // them from sibling pages or --help instead of returning a result
             // that completes to nothing.
-            if looks_like_unenumerated_group(&result) {
-                if supplement_group_subcommands(
+            if looks_like_unenumerated_group(&result)
+                && supplement_group_subcommands(
                     &mut result,
                     user_dir,
                     mandirs,
@@ -2230,9 +2288,9 @@ fn resolve_command_path_and_cache(
                     path,
                     sub_args,
                     timeout_ms.min(remaining_ms(deadline)),
-                ) {
-                    source = "manpage+help";
-                }
+                )
+            {
+                source = "manpage+help";
             }
             let _ = write_result(user_dir, &full_cmd, source, &result);
             return Some(result);
@@ -2295,6 +2353,73 @@ fn resolve_command_path_and_cache(
 }
 
 const ELEVATION_COMMANDS: &[&str] = &["sudo", "doas", "pkexec", "su", "run0"];
+
+fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
+    if token.contains('=') {
+        return false;
+    }
+    result.entries.iter().any(|entry| {
+        if entry.param.is_none() {
+            return false;
+        }
+        match &entry.switch {
+            OwnedSwitch::Long(long) => token == format!("--{long}"),
+            OwnedSwitch::Short(short) => {
+                let mut chars = token.chars();
+                matches!(
+                    (chars.next(), chars.next(), chars.next()),
+                    (Some('-'), Some(c), None) if c == *short
+                )
+            }
+            OwnedSwitch::Both(short, long) => {
+                token == format!("--{long}") || {
+                    let mut chars = token.chars();
+                    matches!(
+                        (chars.next(), chars.next(), chars.next()),
+                        (Some('-'), Some(c), None) if c == *short
+                    )
+                }
+            }
+        }
+    })
+}
+
+fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> Vec<String> {
+    let mut tokens = vec![cmd_name.to_string()];
+    let mut current = lookup(dirs, cmd_name);
+    let mut skip_next_value = false;
+
+    for token in rest {
+        if token.is_empty() {
+            tokens.push(token.clone());
+            continue;
+        }
+        if skip_next_value {
+            skip_next_value = false;
+            continue;
+        }
+        if token.starts_with('-') {
+            if current
+                .as_ref()
+                .is_some_and(|result| switch_takes_value(result, token))
+            {
+                skip_next_value = true;
+            }
+            continue;
+        }
+
+        tokens.push(token.clone());
+        let name = tokens
+            .iter()
+            .filter(|t| !t.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        current = lookup(dirs, &name).or(current);
+    }
+
+    tokens
+}
 
 fn cmd_complete(
     spans: &[String],
@@ -2360,27 +2485,19 @@ fn cmd_complete(
         return;
     }
 
-    // strip intermediate flag tokens — they aren't part of subcommand path
-    let mut tokens: Vec<String> = vec![cmd_name.clone()];
-    if !rest.is_empty() {
-        let (last, leading) = rest.split_last().unwrap();
-        for t in leading {
-            if !t.starts_with('-') || t.is_empty() {
-                tokens.push(t.clone());
-            }
-        }
-        tokens.push(last.clone());
-    }
-
     let last_token = rest.last().cloned().unwrap_or_default();
-    // lookup tokens exclude the partial unless the user has typed a trailing space
-    let lookup_tokens: Vec<String> = if last_token.is_empty() {
-        tokens.clone()
-    } else if tokens.len() > 1 {
-        tokens[..tokens.len() - 1].to_vec()
+    let complete_rest: &[String] = if last_token.is_empty() || rest.is_empty() {
+        &rest
     } else {
-        vec![cmd_name.clone()]
+        &rest[..rest.len() - 1]
     };
+    let mut lookup_tokens = lookup_path_tokens(&dirs, &cmd_name, complete_rest);
+    if last_token.is_empty()
+        && !rest.is_empty()
+        && !lookup_tokens.last().is_some_and(|t| t.is_empty())
+    {
+        lookup_tokens.push(String::new());
+    }
 
     // try longest-prefix match: "git stash apply" → "git stash" → "git"
     let find_result = |toks: &[String]| -> Option<(String, ManpageResult, usize)> {
@@ -2566,7 +2683,9 @@ fn cmd_complete(
     if want_files || candidates.is_empty() {
         // spans are post-elevation, so `sudo nix ...` reaches the dynamic
         // dispatch as `[nix, ...]` and hits the nix branch.
-        if let Some(dyn_candidates) = dynamic_complete(&spans, cfg) {
+        if let Some(dyn_candidates) =
+            dynamic_complete_with_path(&spans, explicit_cmd_path.as_deref(), cfg)
+        {
             print_completion_candidates(&dyn_candidates);
         } else {
             println!("null");
