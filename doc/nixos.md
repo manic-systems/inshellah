@@ -69,7 +69,7 @@ autoloaded nushell shim.
 - runs `inshellah index "$out"` during the system profile build,
   producing one file per command under `$out/share/inshellah/`.
 - drops the full nushell external-completer shim into
-  `/share/nushell/autoload/`, including sudo/doas overrides so elevated
+  `/share/nushell/vendor/autoload/`, including sudo/doas overrides so elevated
   commands still complete through inshellah.
 - emits lightweight command-name stubs for live-provider commands
   that are present in the system profile, so tools like `git` and `jj`
@@ -153,7 +153,7 @@ immediately after a space, alongside subcommands. these map to the
 
 ## using the completer
 
-the module installs the completer under nushell's autoload path, so no
+the module installs the completer under nushell's vendor autoload path, so no
 hand-written nushell config is needed for the normal NixOS case. package
 `vendor/autoload` trees are not linked by the module; generated and native
 completion data stays behind `inshellah complete` so priority is consistent.
