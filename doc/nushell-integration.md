@@ -30,6 +30,12 @@ source /path/to/inshellah-completer.nu
 
 that's it. tab-completion now works for every command indexed.
 
+the external completer contract is explicit: `[...]` means inshellah is
+answering this position, and `null` means "let nushell decide". inshellah
+returns `null` for file-like leaf positions with no static or live
+provider candidates, so nushell's normal file completion remains the
+fallback.
+
 ## commands
 
 ```
@@ -92,6 +98,10 @@ inshellah completions
 - **elevation wrappers**: `sudo`, `doas`, `pkexec`, `su`, `run0` are
   stripped before lookup, including when the real target is given as
   an absolute path.
+- **live values**: after indexed command structure is handled, value
+  slots and leaf arguments may be completed by narrow live providers
+  such as git refs, ssh hosts, systemd units, kubernetes resources,
+  adb devices/packages, package scripts, and process ids.
 - **exclusions**: nushell built-ins (ls, cd, mv, etc.) are skipped —
   nushell serves its own completions for those.
 
@@ -153,5 +163,8 @@ it is not sourced from your own config or another autoload path. inshellah's
 ## nixos
 
 `programs.inshellah.enable = true` will index at system build time and
-ship a richer completer with runtime fallbacks (live cluster queries,
-git/ssh/docker/k8s lookups, etc.). see [nixos.md](nixos.md).
+ship the same external completer with live providers enabled for commands
+present in the system profile. the module also exports
+`INSHELLAH_DYNAMIC_TIMEOUT_MS`, `INSHELLAH_DYNAMIC_LIMIT`,
+`INSHELLAH_TIMEOUT_MS`, and `INSHELLAH_MAX_COMPLETIONS` from the matching
+module options. see [nixos.md](nixos.md).
