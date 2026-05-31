@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inshellah::parsers::manpage::{ManpageEntry, ManpageResult, ManpageSubcommand, OwnedSwitch};
-use inshellah::store::write_result;
+use inshellah::store::{filename_of_command, write_native, write_result};
 
 fn unique_temp_dir(name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -96,7 +96,9 @@ exit 2
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains("--depth"), "stdout = {stdout}");
     assert!(
-        cache_dir.join("fakecmd_clone.json").is_file(),
+        cache_dir
+            .join(format!("{}.json", filename_of_command("fakecmd clone")))
+            .is_file(),
         "subcommand cache was not written"
     );
 
@@ -696,13 +698,354 @@ fn purge_clears_user_cache_but_not_system_dirs() {
 
     // user cache entry gone, non-cache file kept, system dir untouched.
     assert!(
-        !user_dir.join("usercmd.json").exists(),
+        !user_dir
+            .join(format!("{}.json", filename_of_command("usercmd")))
+            .exists(),
         "user entry not purged"
     );
     assert!(user_dir.join("keep.txt").exists(), "non-cache file removed");
     assert!(
-        system_dir.join("syscmd.json").exists(),
+        system_dir
+            .join(format!("{}.json", filename_of_command("syscmd")))
+            .exists(),
         "system dir must not be purged"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_dir_overlay_uses_user_before_system() {
+    let root = unique_temp_dir("inshellah-dir-overlay");
+    let user_dir = root.join("user");
+    let system_dir = root.join("system");
+    fs::create_dir_all(&user_dir).expect("user dir");
+    fs::create_dir_all(&system_dir).expect("system dir");
+
+    let user = ManpageResult {
+        entries: vec![ManpageEntry {
+            switch: OwnedSwitch::Long("user".to_string()),
+            param: None,
+            desc: "user flag".to_string(),
+        }],
+        subcommands: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    let system = ManpageResult {
+        entries: vec![ManpageEntry {
+            switch: OwnedSwitch::Long("system".to_string()),
+            param: None,
+            desc: "system flag".to_string(),
+        }],
+        subcommands: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&user_dir, "demo", "help", &user).expect("user cache");
+    write_result(&system_dir, "demo", "manpage", &system).expect("system cache");
+
+    let dir_arg = format!("{}:{}", user_dir.display(), system_dir.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .args(["complete", "--dir", &dir_arg, "demo", "--"])
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains(r#""value":"--user""#), "stdout = {stdout}");
+    assert!(
+        !stdout.contains(r#""value":"--system""#),
+        "stdout = {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_empty_native_file_does_not_shadow_json() {
+    let root = unique_temp_dir("inshellah-empty-native");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    write_native(
+        &cache_dir,
+        "demo",
+        r#"export extern "other" [
+  --native
+]
+"#,
+    )
+    .expect("native cache");
+    let json = ManpageResult {
+        entries: vec![ManpageEntry {
+            switch: OwnedSwitch::Long("json".to_string()),
+            param: None,
+            desc: "json flag".to_string(),
+        }],
+        subcommands: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "demo", "help", &json).expect("json cache");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .args(["demo", "--"])
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains(r#""value":"--json""#), "stdout = {stdout}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_discovers_underscored_subcommand_from_encoded_cache() {
+    let root = unique_temp_dir("inshellah-underscore-subcommand");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let parent = ManpageResult {
+        entries: Vec::new(),
+        subcommands: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    let child = ManpageResult {
+        entries: Vec::new(),
+        subcommands: Vec::new(),
+        positionals: Vec::new(),
+        description: "underscored child".to_string(),
+    };
+    write_result(&cache_dir, "demo", "manpage", &parent).expect("parent cache");
+    write_result(&cache_dir, "demo foo_bar", "manpage", &child).expect("child cache");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .args(["demo", ""])
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains(r#""value":"foo_bar""#), "stdout = {stdout}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn runtime_manpage_resolution_supplements_from_help() {
+    let root = unique_temp_dir("inshellah-manpage-help-runtime");
+    let bin_dir = root.join("bin");
+    let man_dir = root.join("share/man/man1");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    fs::create_dir_all(&man_dir).expect("man dir");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let demo = bin_dir.join("demo");
+    fs::write(
+        &demo,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  cat <<'EOF'
+Usage: demo [OPTIONS] <input>
+
+Commands:
+  help_sub    from help
+
+Options:
+  -v, --verbose              verbose output
+EOF
+  exit 0
+fi
+exit 2
+"#,
+    )
+    .expect("write demo");
+    let mut perms = fs::metadata(&demo).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&demo, perms).expect("chmod");
+
+    fs::write(
+        man_dir.join("demo.1"),
+        r#".TH DEMO 1
+.SH NAME
+demo \- demo command
+.SH OPTIONS
+.TP
+.B \-\-from\-man
+man flag
+.SH COMMANDS
+.TP
+.B man-sub
+from man
+"#,
+    )
+    .expect("write manpage");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("--timeout-ms")
+        .arg("1000")
+        .args(["demo", "--"])
+        .env(
+            "PATH",
+            format!("{}:{}", bin_dir.display(), old_path.to_string_lossy()),
+        )
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(
+        stdout.contains(r#""value":"--from-man""#),
+        "stdout = {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""value":"--verbose""#),
+        "stdout = {stdout}"
+    );
+
+    let cache = fs::read_to_string(cache_dir.join(format!("{}.json", filename_of_command("demo"))))
+        .expect("cache json");
+    let value: serde_json::Value = serde_json::from_str(&cache).expect("cache value");
+    assert_eq!(
+        value.get("source").and_then(|v| v.as_str()),
+        Some("manpage+help")
+    );
+    assert!(
+        value["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sc| sc["name"] == "help_sub"),
+        "cache = {cache}"
+    );
+    assert!(
+        value["positionals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "input"),
+        "cache = {cache}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn index_manpage_results_are_supplemented_from_help() {
+    let root = unique_temp_dir("inshellah-manpage-help-index");
+    let bin_dir = root.join("bin");
+    let man_dir = root.join("share/man/man1");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    fs::create_dir_all(&man_dir).expect("man dir");
+
+    let demo = bin_dir.join("demo");
+    fs::write(
+        &demo,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  cat <<'EOF'
+Usage: demo [OPTIONS] <input>
+
+Commands:
+  from_help    from help
+
+Options:
+  -v, --verbose              verbose output
+EOF
+  exit 0
+fi
+exit 2
+"#,
+    )
+    .expect("write demo");
+    let mut perms = fs::metadata(&demo).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&demo, perms).expect("chmod");
+
+    fs::write(
+        man_dir.join("demo.1"),
+        r#".TH DEMO 1
+.SH NAME
+demo \- demo command
+.SH OPTIONS
+.TP
+.B \-\-man\-only\-flag
+man flag
+"#,
+    )
+    .expect("write manpage");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("index")
+        .arg(&root)
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("--timeout-ms")
+        .arg("1000")
+        .arg("--workers")
+        .arg("1")
+        .output()
+        .expect("run inshellah index");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cache = fs::read_to_string(cache_dir.join(format!("{}.json", filename_of_command("demo"))))
+        .expect("cache json");
+    let value: serde_json::Value = serde_json::from_str(&cache).expect("cache value");
+    assert_eq!(
+        value.get("source").and_then(|v| v.as_str()),
+        Some("manpage+help")
+    );
+    let entries = value["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["switch"]["name"] == "man-only-flag"),
+        "cache = {cache}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["switch"]["name"] == "verbose"),
+        "cache = {cache}"
+    );
+    assert!(
+        value["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sc| sc["name"] == "from_help"),
+        "cache = {cache}"
     );
 
     let _ = fs::remove_dir_all(root);

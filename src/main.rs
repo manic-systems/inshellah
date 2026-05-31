@@ -690,6 +690,12 @@ fn manpage_name_has_installed_command(name: &str, binary_names: &HashSet<String>
         .unwrap_or(false)
 }
 
+fn split_command_for_binary(name: &str) -> Option<(&str, Vec<String>)> {
+    let mut parts = name.split_whitespace();
+    let base = parts.next()?;
+    Some((base, parts.map(str::to_string).collect()))
+}
+
 #[cfg(test)]
 mod main_tests {
     use super::*;
@@ -806,7 +812,6 @@ mod main_tests {
         let r = remaining_ms(future);
         assert!(r > 0 && r <= 500, "remaining {r} out of (0, 500]");
     }
-
 }
 
 /// shared state passed to every pool worker. nothing inside mutates
@@ -947,6 +952,15 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
             let mut mp_result = parse_manpage_string(&contents);
             if !mp_result.entries.is_empty() || !mp_result.subcommands.is_empty() {
                 strip_subcmd_prefix(&mut mp_result, &hyphenated);
+                let mut source = "manpage";
+                if supplement_result_from_help_command(
+                    &mut mp_result,
+                    &job.bin_path,
+                    &job.sub_args,
+                    ctx.timeout_ms,
+                ) {
+                    source = "manpage+help";
+                }
                 // a group command whose body listed no children. sibling
                 // `cmd-sub.N` pages are indexed by the manpage walk in phase
                 // 2, so the only gap here is the help-only case (no sibling
@@ -957,8 +971,9 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
                         group_subcommands_from_help(&job.bin_path, &job.sub_args, ctx.timeout_ms)
                 {
                     mp_result.subcommands = subs;
+                    source = "manpage+help";
                 }
-                let _ = write_result(&ctx.cache_dir, &full_cmd, "manpage", &mp_result);
+                let _ = write_result(&ctx.cache_dir, &full_cmd, source, &mp_result);
                 ctx.indexed.lock().insert(full_cmd);
                 enqueue_subcommands(&job, &mp_result.subcommands, submit);
                 return;
@@ -1012,6 +1027,11 @@ fn cmd_index(
         .filter(|(name, _)| !ignorelist.contains(name))
         .map(|(name, _)| name.clone())
         .collect();
+    let binary_paths: std::collections::HashMap<String, PathBuf> = binaries
+        .iter()
+        .filter(|(name, _)| !ignorelist.contains(name))
+        .cloned()
+        .collect();
 
     // phase 1: parallel scrape of every eligible binary via the BFS pool.
     // shared state lives in an Arc<ScrapeCtx>; the `indexed` set is the
@@ -1058,7 +1078,7 @@ fn cmd_index(
         alen.cmp(&blen).then_with(|| a.cmp(b))
     });
     for manpage_path in manpages {
-        let Some((name, result, sub_sections)) = process_manpage(&manpage_path) else {
+        let Some((name, mut result, sub_sections)) = process_manpage(&manpage_path) else {
             continue;
         };
         if !manpage_name_has_installed_command(&name, &binary_names) {
@@ -1084,16 +1104,31 @@ fn cmd_index(
         if is_nushell_builtin(&name) {
             continue;
         }
+        let mut source = "manpage";
+        if let Some((base_cmd, sub_args)) = split_command_for_binary(&name)
+            && let Some(path) = binary_paths.get(base_cmd)
+            && supplement_result_from_help_command(&mut result, path, &sub_args, timeout_ms)
+        {
+            source = "manpage+help";
+        }
         // clap-style SUBCOMMAND sections produce real, fully-populated
         // sub-files (each with its own flags + positionals); they take
         // priority over COMMANDS-section leaf stubs.
-        write_result(dir, &name, "manpage", &result)?;
+        write_result(dir, &name, source, &result)?;
         indexed.insert(name.clone());
         for (sub_cmd, sub_result) in &sub_sections {
             if indexed.contains(sub_cmd) {
                 continue;
             }
-            write_result(dir, sub_cmd, "manpage", sub_result)?;
+            let mut sub_result = sub_result.clone();
+            let mut sub_source = "manpage";
+            if let Some((base_cmd, sub_args)) = split_command_for_binary(sub_cmd)
+                && let Some(path) = binary_paths.get(base_cmd)
+                && supplement_result_from_help_command(&mut sub_result, path, &sub_args, timeout_ms)
+            {
+                sub_source = "manpage+help";
+            }
+            write_result(dir, sub_cmd, sub_source, &sub_result)?;
             indexed.insert(sub_cmd.clone());
         }
         // for COMMANDS-section subcommands that aren't already covered by
@@ -1259,11 +1294,7 @@ fn cmd_diff(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
     );
     println!(
         "  help:    {}",
-        if help_text.is_some() {
-            "ok"
-        } else {
-            "(none)"
-        }
+        if help_text.is_some() { "ok" } else { "(none)" }
     );
 
     let subs = |r: &Option<ManpageResult>| -> Vec<String> {
@@ -1927,7 +1958,9 @@ fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str
             };
             for entry in entries.flatten() {
                 let fname = entry.file_name();
-                let Some(fname) = fname.to_str() else { continue };
+                let Some(fname) = fname.to_str() else {
+                    continue;
+                };
                 let stem = fname.split('.').next().unwrap_or(fname);
                 if !stem.starts_with(&prefix) {
                     continue;
@@ -1986,6 +2019,136 @@ fn group_subcommands_from_help(
     (!help.subcommands.is_empty()).then_some(help.subcommands)
 }
 
+fn help_result_for_command(
+    path: &Path,
+    sub_args: &[String],
+    timeout_ms: u64,
+) -> Option<ManpageResult> {
+    let text = if sub_args.is_empty() {
+        try_help(path, timeout_ms)
+    } else {
+        let bin_s = path.to_string_lossy().to_string();
+        try_help_args(&bin_s, sub_args, timeout_ms)
+    }?;
+    let result = parse_help_text(&text);
+    if let Some(leaf) = sub_args.last()
+        && result
+            .subcommands
+            .iter()
+            .any(|sc| sc.name.eq_ignore_ascii_case(leaf))
+    {
+        return None;
+    }
+    Some(result)
+}
+
+fn entry_has_long(result: &ManpageResult, long: &str) -> bool {
+    result.entries.iter().any(|e| match &e.switch {
+        OwnedSwitch::Long(name) | OwnedSwitch::Both(_, name) => name == long,
+        OwnedSwitch::Short(_) => false,
+    })
+}
+
+fn entry_has_short(result: &ManpageResult, short: char) -> bool {
+    result.entries.iter().any(|e| match &e.switch {
+        OwnedSwitch::Short(c) | OwnedSwitch::Both(c, _) => *c == short,
+        OwnedSwitch::Long(_) => false,
+    })
+}
+
+fn fill_flag_alias_from_help(result: &mut ManpageResult, short: char, long: &str) -> bool {
+    if !entry_has_long(result, long) {
+        for entry in &mut result.entries {
+            if matches!(entry.switch, OwnedSwitch::Short(c) if c == short) {
+                entry.switch = OwnedSwitch::Both(short, long.to_string());
+                return true;
+            }
+        }
+    }
+    if !entry_has_short(result, short) {
+        for entry in &mut result.entries {
+            if matches!(&entry.switch, OwnedSwitch::Long(name) if name == long) {
+                entry.switch = OwnedSwitch::Both(short, long.to_string());
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn supplement_result_from_help(result: &mut ManpageResult, help: &ManpageResult) -> bool {
+    let mut changed = false;
+
+    if result.description.is_empty() && !help.description.is_empty() {
+        result.description = help.description.clone();
+        changed = true;
+    }
+
+    for help_entry in &help.entries {
+        match &help_entry.switch {
+            OwnedSwitch::Both(short, long) => {
+                if fill_flag_alias_from_help(result, *short, long) {
+                    changed = true;
+                    continue;
+                }
+                if entry_has_short(result, *short) || entry_has_long(result, long) {
+                    continue;
+                }
+            }
+            OwnedSwitch::Long(long) if entry_has_long(result, long) => continue,
+            OwnedSwitch::Short(short) if entry_has_short(result, *short) => continue,
+            _ => {}
+        }
+        result.entries.push(help_entry.clone());
+        changed = true;
+    }
+
+    for help_sub in &help.subcommands {
+        match result
+            .subcommands
+            .iter_mut()
+            .find(|sc| sc.name.eq_ignore_ascii_case(&help_sub.name))
+        {
+            Some(existing) if existing.desc.is_empty() && !help_sub.desc.is_empty() => {
+                existing.desc = help_sub.desc.clone();
+                changed = true;
+            }
+            Some(_) => {}
+            None => {
+                result.subcommands.push(help_sub.clone());
+                changed = true;
+            }
+        }
+    }
+
+    for (name, positional) in &help.positionals {
+        if !result
+            .positionals
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+        {
+            result.positionals.push((name.clone(), positional.clone()));
+            changed = true;
+        }
+    }
+
+    if changed {
+        result.normalize();
+    }
+    changed
+}
+
+fn supplement_result_from_help_command(
+    result: &mut ManpageResult,
+    path: &Path,
+    sub_args: &[String],
+    timeout_ms: u64,
+) -> bool {
+    help_result_for_command(path, sub_args, timeout_ms)
+        .as_ref()
+        .is_some_and(|help| supplement_result_from_help(result, help))
+}
+
 /// a manpage resolved to a group command whose body enumerated no children.
 /// recover them without discarding the manpage's flags: prefer the manpage
 /// route (index the sibling `cmd-sub.N` pages, which `subcommands_of` then
@@ -2000,13 +2163,15 @@ fn supplement_group_subcommands(
     path: &Path,
     sub_args: &[String],
     timeout_ms: u64,
-) {
+) -> bool {
     if index_sibling_manpages(user_dir, mandirs, hyphenated) {
-        return;
+        return false;
     }
     if let Some(subs) = group_subcommands_from_help(path, sub_args, timeout_ms) {
         result.subcommands = subs;
+        return true;
     }
+    false
 }
 
 fn resolve_command_path_and_cache(
@@ -2044,11 +2209,20 @@ fn resolve_command_path_and_cache(
         let mut result = parse_manpage_string(&contents);
         if !result.entries.is_empty() || !result.subcommands.is_empty() {
             strip_subcmd_prefix(&mut result, &hyphenated);
+            let mut source = "manpage";
+            if supplement_result_from_help_command(
+                &mut result,
+                path,
+                sub_args,
+                timeout_ms.min(remaining_ms(deadline)),
+            ) {
+                source = "manpage+help";
+            }
             // a group command whose manpage body listed no children: recover
             // them from sibling pages or --help instead of returning a result
             // that completes to nothing.
             if looks_like_unenumerated_group(&result) {
-                supplement_group_subcommands(
+                if supplement_group_subcommands(
                     &mut result,
                     user_dir,
                     mandirs,
@@ -2056,9 +2230,11 @@ fn resolve_command_path_and_cache(
                     path,
                     sub_args,
                     timeout_ms.min(remaining_ms(deadline)),
-                );
+                ) {
+                    source = "manpage+help";
+                }
             }
-            let _ = write_result(user_dir, &full_cmd, "manpage", &result);
+            let _ = write_result(user_dir, &full_cmd, source, &result);
             return Some(result);
         }
     }
@@ -2128,8 +2304,9 @@ fn cmd_complete(
     timeout_ms: u64,
     cfg: &Config,
 ) {
-    let mut dirs: Vec<PathBuf> = system_dirs.to_vec();
+    let mut dirs: Vec<PathBuf> = Vec::with_capacity(system_dirs.len() + 1);
     dirs.push(user_dir.to_path_buf());
+    dirs.extend(system_dirs.iter().cloned());
 
     // skip past elevation wrappers (sudo, doas) to find the real command
     let mut explicit_cmd_path: Option<PathBuf> = None;
@@ -2483,8 +2660,12 @@ fn parse_index_args(args: &[String]) -> IndexArgs {
             "--prefix" => {
                 i += 1;
                 if i < args.len() {
-                    out.prefixes
-                        .extend(args[i].split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+                    out.prefixes.extend(
+                        args[i]
+                            .split(':')
+                            .filter(|s| !s.is_empty())
+                            .map(PathBuf::from),
+                    );
                 }
             }
             "--timeout-ms" => {
@@ -2690,7 +2871,11 @@ fn main() {
                     eprintln!("error: diff requires a CMD argument");
                     std::process::exit(1);
                 }
-                cmd_diff(&positional, &dirs, timeout_override.unwrap_or(cfg.timeout_ms));
+                cmd_diff(
+                    &positional,
+                    &dirs,
+                    timeout_override.unwrap_or(cfg.timeout_ms),
+                );
             }
         }
         "purge" => {

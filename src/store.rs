@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! filesystem store for parsed completion data.
 //!
-//! write side: serialize ManpageResult to JSON, derive sanitised
-//! filenames from command names ("git add" → git_add.json).
+//! write side: serialize ManpageResult to JSON, derive reversible safe
+//! filenames from command names ("git add" → v1%git%20add.json).
 //!
 //! read side: look up a command by name across the user cache + system
 //! dirs, deserialize JSON or parse a .nu extern blob back into a result.
@@ -39,10 +39,25 @@ pub fn ensure_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
-/// derive a safe filename from a command name.
-/// spaces in subcommand names ("git add") become "_" ("git_add").
-/// any other non-filesystem-safe characters are also replaced.
+const ENCODED_FILENAME_PREFIX: &str = "v1%";
+
+/// derive a safe, reversible filename from a command name.
+///
+/// older cache files used "_" for both spaces and literal underscores,
+/// so "foo bar" and "foo_bar" collided. new files carry a version marker
+/// and percent-encode every byte except a small portable filename subset.
 pub fn filename_of_command(cmd: &str) -> String {
+    let mut out = String::from(ENCODED_FILENAME_PREFIX);
+    for b in cmd.as_bytes() {
+        match *b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' => out.push(*b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn legacy_filename_of_command(cmd: &str) -> String {
     cmd.chars()
         .map(|c| match c {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
@@ -52,12 +67,52 @@ pub fn filename_of_command(cmd: &str) -> String {
         .collect()
 }
 
-/// reverse: a filename "git_add" produces command name "git add".
-/// underscores are flipped to spaces unconditionally — names that
-/// genuinely contained an underscore round-trip as spaces, which is
-/// acceptable since the read side is only used for display.
+fn filename_candidates(cmd: &str) -> Vec<String> {
+    let encoded = filename_of_command(cmd);
+    let legacy = legacy_filename_of_command(cmd);
+    if encoded == legacy {
+        vec![encoded]
+    } else {
+        vec![encoded, legacy]
+    }
+}
+
+fn decode_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_encoded_filename(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = *bytes.get(i + 1)?;
+            let lo = *bytes.get(i + 2)?;
+            out.push((decode_hex(hi)? << 4) | decode_hex(lo)?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// reverse a cache filename stem into its command name. versioned names
+/// decode exactly; legacy underscore names keep their historical display
+/// behavior for compatibility.
 pub fn command_of_filename(base: &str) -> String {
-    base.replace('_', " ")
+    if let Some(encoded) = base.strip_prefix(ENCODED_FILENAME_PREFIX) {
+        decode_encoded_filename(encoded).unwrap_or_else(|| base.replace('_', " "))
+    } else {
+        base.replace('_', " ")
+    }
 }
 
 fn escape_json(s: &str) -> String {
@@ -226,6 +281,17 @@ fn read_json_result(path: &Path) -> Option<(String, ManpageResult)> {
         .unwrap_or("json")
         .to_string();
     Some((source, result_from_json(&v)))
+}
+
+fn source_from_json_data(data: &str) -> String {
+    serde_json::from_str::<Value>(data)
+        .ok()
+        .and_then(|v| v.get("source").and_then(|x| x.as_str()).map(String::from))
+        .unwrap_or_else(|| "json".to_string())
+}
+
+fn has_completion_content(result: &ManpageResult) -> bool {
+    !result.entries.is_empty() || !result.subcommands.is_empty() || !result.positionals.is_empty()
 }
 
 fn switch_from_json(v: &Value) -> Option<OwnedSwitch> {
@@ -518,40 +584,39 @@ struct NuBlock {
 /// subcommand lookups because clap-generated .nu files contain all extern
 /// blocks in a single file.
 pub fn lookup(dirs: &[PathBuf], command: &str) -> Option<ManpageResult> {
-    let base_name = filename_of_command(command);
-    let parent_base = command
-        .find(' ')
-        .map(|i| filename_of_command(&command[..i]));
-
     for directory in dirs {
-        let nu_path = directory.join(format!("{base_name}.nu"));
-        if let Some(data) = read_file(&nu_path) {
-            return Some(parse_nu_completions(command, &data));
-        }
-        if let Some(pb) = &parent_base {
-            let parent_nu = directory.join(format!("{pb}.nu"));
-            if let Some(data) = read_file(&parent_nu) {
-                let r = parse_nu_completions(command, &data);
-                if !r.entries.is_empty() || !r.subcommands.is_empty() || !r.positionals.is_empty() {
-                    return Some(r);
+        for base_name in filename_candidates(command) {
+            let nu_path = directory.join(format!("{base_name}.nu"));
+            if let Some(data) = read_file(&nu_path) {
+                let result = parse_nu_completions(command, &data);
+                if has_completion_content(&result) {
+                    return Some(result);
                 }
             }
         }
-    }
-
-    for directory in dirs {
-        let json_path = directory.join(format!("{base_name}.json"));
-        if let Some((source, result)) = read_json_result(&json_path)
-            && source != "help"
-        {
-            return Some(result);
+        if let Some(parent) = command.find(' ').map(|i| &command[..i]) {
+            for parent_base in filename_candidates(parent) {
+                let parent_nu = directory.join(format!("{parent_base}.nu"));
+                if let Some(data) = read_file(&parent_nu) {
+                    let result = parse_nu_completions(command, &data);
+                    if has_completion_content(&result) {
+                        return Some(result);
+                    }
+                }
+            }
         }
-    }
-
-    for directory in dirs {
-        let json_path = directory.join(format!("{base_name}.json"));
-        if let Some((_, result)) = read_json_result(&json_path) {
-            return Some(result);
+        let mut help_result = None;
+        for base_name in filename_candidates(command) {
+            let json_path = directory.join(format!("{base_name}.json"));
+            if let Some((source, result)) = read_json_result(&json_path) {
+                if source != "help" {
+                    return Some(result);
+                }
+                help_result.get_or_insert(result);
+            }
+        }
+        if help_result.is_some() {
+            return help_result;
         }
     }
     None
@@ -559,17 +624,28 @@ pub fn lookup(dirs: &[PathBuf], command: &str) -> Option<ManpageResult> {
 
 /// look up a command's raw stored data (JSON or .nu source).
 pub fn lookup_raw(dirs: &[PathBuf], command: &str) -> Option<String> {
-    let base_name = filename_of_command(command);
     for directory in dirs {
-        let nu_path = directory.join(format!("{base_name}.nu"));
-        if let Some(data) = read_file(&nu_path) {
-            return Some(data);
+        for base_name in filename_candidates(command) {
+            let nu_path = directory.join(format!("{base_name}.nu"));
+            if let Some(data) = read_file(&nu_path) {
+                let result = parse_nu_completions(command, &data);
+                if has_completion_content(&result) {
+                    return Some(data);
+                }
+            }
         }
-    }
-    for directory in dirs {
-        let json_path = directory.join(format!("{base_name}.json"));
-        if let Some(data) = read_file(&json_path) {
-            return Some(data);
+        let mut help_data = None;
+        for base_name in filename_candidates(command) {
+            let json_path = directory.join(format!("{base_name}.json"));
+            if let Some(data) = read_file(&json_path) {
+                if source_from_json_data(&data) != "help" {
+                    return Some(data);
+                }
+                help_data.get_or_insert(data);
+            }
+        }
+        if help_data.is_some() {
+            return help_data;
         }
     }
     None
@@ -627,11 +703,10 @@ pub fn purge_dir(dir: &Path) -> io::Result<usize> {
     Ok(removed)
 }
 
-/// discover subcommands of a command by scanning filenames in the store
-/// (e.g. for "git", finds "git_add.json", "git_log.json").
+/// discover subcommands of a command by scanning filenames in the store.
 pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand> {
-    let prefix = format!("{}_", filename_of_command(command));
     let mut seen: HashMap<String, ManpageSubcommand> = HashMap::new();
+    let command_prefix = format!("{command} ");
     for directory in dirs {
         let Ok(entries) = fs::read_dir(directory) else {
             continue;
@@ -641,15 +716,15 @@ pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand>
             let Some(filename) = filename.to_str() else {
                 continue;
             };
-            if !filename.starts_with(&prefix) {
-                continue;
-            }
             let is_json = filename.ends_with(".json");
             let Some(base) = chop_extension(filename) else {
                 continue;
             };
-            let rest = &base[prefix.len()..];
-            if rest.is_empty() || rest.contains('_') {
+            let stored_command = command_of_filename(base);
+            let Some(rest) = stored_command.strip_prefix(&command_prefix) else {
+                continue;
+            };
+            if rest.is_empty() || rest.contains(' ') {
                 continue;
             }
             if seen.contains_key(rest) {
@@ -684,22 +759,31 @@ pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand>
 /// determine how a command was indexed: "help", "manpage", "native", etc.
 /// for JSON files, returns the "source" field. for .nu files, returns "native".
 pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
-    let base = filename_of_command(command);
     for directory in dirs {
-        let nu_path = directory.join(format!("{base}.nu"));
-        if nu_path.exists() {
-            return Some("native".to_string());
+        for base in filename_candidates(command) {
+            let nu_path = directory.join(format!("{base}.nu"));
+            if let Some(data) = read_file(&nu_path) {
+                let result = parse_nu_completions(command, &data);
+                if has_completion_content(&result) {
+                    return Some("native".to_string());
+                }
+            }
         }
-    }
-    for directory in dirs {
-        let json_path = directory.join(format!("{base}.json"));
-        if json_path.exists() {
-            return Some(
-                read_file(&json_path)
-                    .and_then(|d| serde_json::from_str::<Value>(&d).ok())
-                    .and_then(|v| v.get("source").and_then(|x| x.as_str()).map(String::from))
-                    .unwrap_or_else(|| "json".to_string()),
-            );
+        let mut help_source = None;
+        for base in filename_candidates(command) {
+            let json_path = directory.join(format!("{base}.json"));
+            if json_path.exists() {
+                let source = read_file(&json_path)
+                    .map(|d| source_from_json_data(&d))
+                    .unwrap_or_else(|| "json".to_string());
+                if source != "help" {
+                    return Some(source);
+                }
+                help_source.get_or_insert(source);
+            }
+        }
+        if help_source.is_some() {
+            return help_source;
         }
     }
     None
@@ -745,6 +829,145 @@ mod tests {
             .filter(|n| n.ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encoded_filenames_round_trip_spaces_and_underscores() {
+        let spaced = filename_of_command("demo foo");
+        let underscored = filename_of_command("demo foo_bar");
+        assert_ne!(spaced, underscored);
+        assert_eq!(command_of_filename(&spaced), "demo foo");
+        assert_eq!(command_of_filename(&underscored), "demo foo_bar");
+        assert_eq!(command_of_filename("demo_foo"), "demo foo");
+    }
+
+    #[test]
+    fn lookup_ignores_empty_native_result_before_json() {
+        let dir = unique_dir("empty-native");
+        fs::create_dir_all(&dir).unwrap();
+        write_file(
+            &dir.join(format!("{}.nu", filename_of_command("demo"))),
+            r#"export extern "other" [
+  --native
+]
+"#,
+        )
+        .unwrap();
+        let result = ManpageResult {
+            entries: vec![ManpageEntry {
+                switch: OwnedSwitch::Long("json".to_string()),
+                param: None,
+                desc: "json flag".to_string(),
+            }],
+            subcommands: Vec::new(),
+            positionals: Vec::new(),
+            description: String::new(),
+        };
+        write_result(&dir, "demo", "help", &result).unwrap();
+
+        let found = lookup(std::slice::from_ref(&dir), "demo").unwrap();
+        assert!(
+            found
+                .entries
+                .iter()
+                .any(|e| matches!(&e.switch, OwnedSwitch::Long(name) if name == "json"))
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lookup_reads_legacy_underscore_json() {
+        let dir = unique_dir("legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let result = ManpageResult {
+            entries: vec![ManpageEntry {
+                switch: OwnedSwitch::Long("legacy".to_string()),
+                param: None,
+                desc: String::new(),
+            }],
+            subcommands: Vec::new(),
+            positionals: Vec::new(),
+            description: String::new(),
+        };
+        write_file(
+            &dir.join("demo_child.json"),
+            &json_of_result("help", &result),
+        )
+        .unwrap();
+        let found = lookup(std::slice::from_ref(&dir), "demo child").unwrap();
+        assert!(
+            found
+                .entries
+                .iter()
+                .any(|e| matches!(&e.switch, OwnedSwitch::Long(name) if name == "legacy"))
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lookup_prefers_non_help_json_within_directory() {
+        let dir = unique_dir("source-priority");
+        fs::create_dir_all(&dir).unwrap();
+        let help = ManpageResult {
+            entries: vec![ManpageEntry {
+                switch: OwnedSwitch::Long("help".to_string()),
+                param: None,
+                desc: String::new(),
+            }],
+            subcommands: Vec::new(),
+            positionals: Vec::new(),
+            description: String::new(),
+        };
+        let manpage = ManpageResult {
+            entries: vec![ManpageEntry {
+                switch: OwnedSwitch::Long("manpage".to_string()),
+                param: None,
+                desc: String::new(),
+            }],
+            subcommands: Vec::new(),
+            positionals: Vec::new(),
+            description: String::new(),
+        };
+        write_result(&dir, "demo child", "help", &help).unwrap();
+        write_file(
+            &dir.join("demo_child.json"),
+            &json_of_result("manpage", &manpage),
+        )
+        .unwrap();
+
+        let found = lookup(std::slice::from_ref(&dir), "demo child").unwrap();
+        assert!(
+            found
+                .entries
+                .iter()
+                .any(|e| matches!(&e.switch, OwnedSwitch::Long(name) if name == "manpage"))
+        );
+        assert_eq!(
+            file_type_of(std::slice::from_ref(&dir), "demo child").as_deref(),
+            Some("manpage")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subcommands_of_decodes_immediate_underscored_child() {
+        let dir = unique_dir("subcommands");
+        fs::create_dir_all(&dir).unwrap();
+        let result = ManpageResult {
+            entries: Vec::new(),
+            subcommands: Vec::new(),
+            positionals: Vec::new(),
+            description: "child desc".to_string(),
+        };
+        write_result(&dir, "demo foo_bar", "manpage", &result).unwrap();
+        write_result(&dir, "demo foo_bar nested", "manpage", &result).unwrap();
+        let subs = subcommands_of(std::slice::from_ref(&dir), "demo");
+        assert_eq!(
+            subs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["foo_bar"]
+        );
+        assert_eq!(subs[0].desc, "child desc");
         let _ = fs::remove_dir_all(&dir);
     }
 }
