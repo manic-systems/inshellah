@@ -11,9 +11,12 @@ use inshellah::parsers::manpage::{
 };
 use inshellah::parsers::nushell::{generate_extern, generate_module};
 use inshellah::store::{json_of_result, parse_nu_completions, result_from_json};
-use inshellah::types::{HelpResult, Param, Switch};
 
-fn parse(txt: &str) -> HelpResult<'_> {
+// both parsers now produce the owned model; these aliases keep the ported
+// assertions (which match on `Switch::`/`Param::` variants) unchanged.
+use inshellah::parsers::manpage::{OwnedParam as Param, OwnedSwitch as Switch};
+
+fn parse(txt: &str) -> ManpageResult {
     match help_parser(txt) {
         Ok((_, r)) => r,
         Err(e) => panic!("parse_help failed: {e:?}"),
@@ -77,7 +80,7 @@ fn multiline_desc() {
     let txt = "      --block-size=SIZE      with -l, scale sizes by SIZE when printing them;\n                               e.g., '--block-size=M'; see SIZE format below\n";
     let r = parse(txt);
     assert_eq!(r.entries.len(), 1);
-    let combined: String = r.entries[0].desc.join(" ");
+    let combined: String = r.entries[0].desc.clone();
     assert!(combined.len() > 50, "desc was: {combined}");
 }
 
@@ -154,7 +157,7 @@ fn aliased_subcommands_keep_canonical_name() {
     // the canonical (first) name is kept; the alias is discarded.
     let txt = "Commands:\n  build, b    Compile the current package\n  check, c    Analyze the current package\n  clean       Remove the target directory\n";
     let r = parse(txt);
-    let names: Vec<&str> = r.subcommands.iter().map(|sc| sc.name).collect();
+    let names: Vec<&str> = r.subcommands.iter().map(|sc| sc.name.as_str()).collect();
     assert!(names.contains(&"build"), "subcommands: {names:?}");
     assert!(names.contains(&"check"), "subcommands: {names:?}");
     assert!(names.contains(&"clean"), "subcommands: {names:?}");
@@ -227,7 +230,7 @@ fn slash_switch_separator() {
     let e = &r.entries[0];
     assert!(matches!(&e.switch, Switch::Both('v', l) if *l == "verbose"));
     assert!(e.param.is_none());
-    let combined: String = e.desc.join(" ");
+    let combined = e.desc.clone();
     assert_eq!(combined.trim(), "Increase verbosity");
 }
 
@@ -735,14 +738,10 @@ Record changes to the repository.
 
 // --- Nushell generation tests ---
 
-fn to_owned_result(r: &HelpResult<'_>) -> ManpageResult {
-    r.into()
-}
-
 #[test]
 fn nushell_basic() {
     let r = parse("  -a, --all                  do not ignore entries starting with .\n");
-    let nu = generate_extern("ls", &to_owned_result(&r));
+    let nu = generate_extern("ls", &r);
     assert!(nu.contains("export extern \"ls\""), "nu = {nu}");
     assert!(nu.contains("--all(-a)"), "nu = {nu}");
     assert!(nu.contains("# do not ignore"), "nu = {nu}");
@@ -752,7 +751,7 @@ fn nushell_basic() {
 fn nushell_param_types() {
     let txt = "  -w, --width=COLS           set output width\n      --block-size=SIZE      scale sizes\n  -o, --output FILE          output file\n";
     let r = parse(txt);
-    let nu = generate_extern("ls", &to_owned_result(&r));
+    let nu = generate_extern("ls", &r);
     assert!(nu.contains("--width(-w): int"), "nu = {nu}");
     assert!(nu.contains("--block-size: string"), "nu = {nu}");
     assert!(nu.contains("--output(-o): path"), "nu = {nu}");
@@ -762,7 +761,7 @@ fn nushell_param_types() {
 fn nushell_subcommands() {
     let txt = "Common Commands:\n  run         Create and run a new container\n  exec        Execute a command\n\nFlags:\n  -D, --debug              Enable debug mode\n";
     let r = parse(txt);
-    let nu = generate_extern("docker", &to_owned_result(&r));
+    let nu = generate_extern("docker", &r);
     assert!(nu.contains("export extern \"docker\""), "nu = {nu}");
     assert!(nu.contains("--debug(-D)"), "nu = {nu}");
     assert!(nu.contains("export extern \"docker run\""), "nu = {nu}");
@@ -772,7 +771,7 @@ fn nushell_subcommands() {
 #[test]
 fn positional_order_survives_cache_and_generation() {
     let txt = "usage: git clone [<options>] [--] <repository> [directory]\n";
-    let result = to_owned_result(&parse(txt));
+    let result = parse(txt);
     assert_eq!(
         result
             .positionals
@@ -821,7 +820,7 @@ scale sizes by SIZE
 #[test]
 fn nushell_module() {
     let r = parse("  -v, --verbose              verbose output\n");
-    let nu = generate_module("myapp", &to_owned_result(&r));
+    let nu = generate_module("myapp", &r);
     assert!(nu.contains("module myapp-completions"), "nu = {nu}");
     assert!(nu.contains("export extern \"myapp\""), "nu = {nu}");
     assert!(nu.contains("--verbose(-v)"), "nu = {nu}");
@@ -848,7 +847,7 @@ fn long_switch_rejects_dash_only_separator_lines() {
 fn dedup_entries_help() {
     let txt = "  -v, --verbose              verbose output\n  --verbose                  verbose mode\n  -v                         be verbose\n";
     let r = parse(txt);
-    let nu = generate_extern("test", &to_owned_result(&r));
+    let nu = generate_extern("test", &r);
     let count = nu.matches("--verbose").count();
     assert_eq!(count, 1, "expected --verbose to appear once, nu = {nu}");
     assert!(nu.contains("--verbose(-v)"), "nu = {nu}");
@@ -939,7 +938,7 @@ Options:
     assert!(
         has_start,
         "expected start in subcommands: {:?}",
-        r.subcommands.iter().map(|sc| sc.name).collect::<Vec<_>>()
+        r.subcommands.iter().map(|sc| sc.name.as_str()).collect::<Vec<_>>()
     );
     assert!(r.entries.len() >= 2);
 }

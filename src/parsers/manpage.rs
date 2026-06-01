@@ -31,7 +31,7 @@ mod strategies;
 use std::io::{self, Read};
 use std::path::Path;
 
-use crate::types::{HelpResult, OptionEntry, Param, Positional, Subcommand, Switch};
+use crate::types::Positional;
 
 pub use self::groff::{GroffLine, classify_line, strip_groff_escapes};
 pub use self::sections::{extract_subcommand_sections, extract_synopsis_command};
@@ -79,76 +79,6 @@ impl ManpageResult {
     pub fn normalize(&mut self) {
         let entries = std::mem::take(&mut self.entries);
         self.entries = dedup_entries(merge_short_long_pairs(entries));
-    }
-}
-
-impl From<&Switch<'_>> for OwnedSwitch {
-    fn from(s: &Switch<'_>) -> Self {
-        match s {
-            Switch::Short(c) => OwnedSwitch::Short(*c),
-            Switch::Long(l) => OwnedSwitch::Long((*l).to_string()),
-            Switch::Both(c, l) => OwnedSwitch::Both(*c, (*l).to_string()),
-        }
-    }
-}
-
-impl From<&Param<'_>> for OwnedParam {
-    fn from(p: &Param<'_>) -> Self {
-        match p {
-            Param::Mandatory(s) => OwnedParam::Mandatory((*s).to_string()),
-            Param::Optional(s) => OwnedParam::Optional((*s).to_string()),
-        }
-    }
-}
-
-impl From<&OptionEntry<'_>> for ManpageEntry {
-    fn from(e: &OptionEntry<'_>) -> Self {
-        let desc: String = e
-            .desc
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        ManpageEntry {
-            switch: (&e.switch).into(),
-            param: e.param.as_ref().map(Into::into),
-            desc,
-        }
-    }
-}
-
-impl From<&Subcommand<'_>> for ManpageSubcommand {
-    fn from(sc: &Subcommand<'_>) -> Self {
-        // lowercase the subcommand name here so (a) file naming is
-        // consistent (meat_yum.json vs meat_YUM.json) and (b) recursive
-        // --help probes use the lowercase form, which is what most real
-        // CLIs accept — even tools like meat that DISPLAY uppercase
-        // names in their help text dispatch on the lowercased argument.
-        ManpageSubcommand {
-            name: sc.name.to_ascii_lowercase(),
-            desc: sc.desc.to_string(),
-        }
-    }
-}
-
-impl From<&HelpResult<'_>> for ManpageResult {
-    fn from(r: &HelpResult<'_>) -> Self {
-        let mut result = ManpageResult {
-            entries: r.entries.iter().map(Into::into).collect(),
-            subcommands: r.subcommands.iter().map(Into::into).collect(),
-            // positional names are stored lowercased so output is
-            // stable across the various places we extract them from
-            // (synopsis, usage, cli11 sections).
-            positionals: r
-                .positionals
-                .iter()
-                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-                .collect(),
-            description: r.desc.to_string(),
-        };
-        result.normalize();
-        result
     }
 }
 

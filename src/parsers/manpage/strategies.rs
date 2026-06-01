@@ -12,7 +12,6 @@ use crate::parsers::manpage::groff::{
     GroffLine, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
 };
 use crate::parsers::manpage::{ManpageEntry, OwnedParam, OwnedSwitch};
-use crate::types::{Param, Switch};
 
 /// collect consecutive text lines, joining them with spaces.
 /// returns (collected, remaining).
@@ -79,35 +78,16 @@ fn collect_description_lines(lines: &[GroffLine], start: usize) -> (String, usiz
     (acc.join(" "), i)
 }
 
-fn to_owned_switch(s: Switch<'_>) -> OwnedSwitch {
-    match s {
-        Switch::Short(c) => OwnedSwitch::Short(c),
-        Switch::Long(l) => OwnedSwitch::Long(l.to_string()),
-        Switch::Both(c, l) => OwnedSwitch::Both(c, l.to_string()),
-    }
-}
-
-fn to_owned_param(p: Param<'_>) -> OwnedParam {
-    match p {
-        Param::Mandatory(s) => OwnedParam::Mandatory(s.to_string()),
-        Param::Optional(s) => OwnedParam::Optional(s.to_string()),
-    }
-}
-
 /// attempt to parse a tag string (e.g. "-v, --verbose FILE") into an entry.
 /// uses the nom switch_parser + param_parser from the help module.
 /// returns None if the tag doesn't look like a flag definition.
 pub fn parse_tag_to_entry(tag: &str, desc: String) -> Option<ManpageEntry> {
     let tag = strip_groff_escapes(tag);
     let tag = tag.trim();
-    let result: nom::IResult<&str, (Switch<'_>, Option<Param<'_>>)> =
+    let result: nom::IResult<&str, (OwnedSwitch, Option<OwnedParam>)> =
         (switch_parser, opt(param_parser)).parse(tag);
     match result {
-        Ok((_, (switch, param))) => Some(ManpageEntry {
-            switch: to_owned_switch(switch),
-            param: param.map(to_owned_param),
-            desc,
-        }),
+        Ok((_, (switch, param))) => Some(ManpageEntry { switch, param, desc }),
         Err(_) => None,
     }
 }
@@ -520,15 +500,8 @@ pub fn strategy_deroff(lines: &[GroffLine]) -> Vec<ManpageEntry> {
         }
     }
     match help_parser(&buffer) {
-        Ok((_, result)) => result
-            .entries
-            .into_iter()
-            .map(|e| ManpageEntry {
-                switch: to_owned_switch(e.switch),
-                param: e.param.map(to_owned_param),
-                desc: e.desc.join(" "),
-            })
-            .collect(),
+        // help_parser already emits owned ManpageEntry with a joined desc.
+        Ok((_, result)) => result.entries,
         Err(_) => Vec::new(),
     }
 }

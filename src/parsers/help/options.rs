@@ -1,6 +1,36 @@
 use crate::make_parser;
 use crate::parsers::help::helpers::is_option_char;
-use crate::types::*;
+use crate::parsers::manpage::{OwnedParam, OwnedSwitch};
+
+// Borrowed parse intermediates, private to the option parser. The public
+// `switch_parser` / `param_parser` / `parse_usage_flags` emit the owned model
+// (`OwnedSwitch` / `OwnedParam`) so the rest of the codebase has one type
+// hierarchy; these zero-copy forms only exist between nom combinators here.
+enum Switch<'a> {
+    Short(char),
+    Long(&'a str),
+    Both(char, &'a str),
+}
+
+enum Param<'a> {
+    Mandatory(&'a str),
+    Optional(&'a str),
+}
+
+fn own_switch(s: Switch<'_>) -> OwnedSwitch {
+    match s {
+        Switch::Short(c) => OwnedSwitch::Short(c),
+        Switch::Long(l) => OwnedSwitch::Long(l.to_string()),
+        Switch::Both(c, l) => OwnedSwitch::Both(c, l.to_string()),
+    }
+}
+
+fn own_param(p: Param<'_>) -> OwnedParam {
+    match p {
+        Param::Mandatory(s) => OwnedParam::Mandatory(s.to_string()),
+        Param::Optional(s) => OwnedParam::Optional(s.to_string()),
+    }
+}
 
 use nom::bytes::complete::{take_till, take_till1};
 use nom::character::complete::{space0, space1};
@@ -89,7 +119,7 @@ make_parser!(spaced_type_param -> Param<'a>,
     ) => Param::Mandatory
 );
 
-make_parser!(pub param_parser -> Param<'a>, alt((
+make_parser!(param_parser_borrowed -> Param<'a>, alt((
     eq_optional_angle_param,
     eq_optional_param,
     eq_mandatory_param,
@@ -99,6 +129,9 @@ make_parser!(pub param_parser -> Param<'a>, alt((
     spaced_uppercase_param,
     spaced_type_param,
 )));
+
+// public param parser: the owned model at the module boundary.
+make_parser!(pub param_parser -> OwnedParam, param_parser_borrowed => own_param);
 
 macro_rules! switch_pair {
     ($name:ident, $left:expr, $sep:expr, $right:expr => |$a:ident, $b:ident| $body:expr) => {
@@ -161,7 +194,7 @@ make_parser!(short_as_switch -> Switch<'a>, short_switch => Switch::Short);
 make_parser!(negatable_long_as_switch -> Switch<'a>, negatable_long_switch => Switch::Long);
 make_parser!(long_as_switch -> Switch<'a>, long_switch => Switch::Long);
 
-make_parser!(pub switch_parser -> Switch<'a>,
+make_parser!(switch_parser_borrowed -> Switch<'a>,
     alt((
         short_comma_negatable_long,
         short_space_negatable_long,
@@ -174,6 +207,9 @@ make_parser!(pub switch_parser -> Switch<'a>,
         long_as_switch,
     ))
 );
+
+// public switch parser: the owned model at the module boundary.
+make_parser!(pub switch_parser -> OwnedSwitch, switch_parser_borrowed => own_switch);
 
 // `{--long | -s}` — manpage SYNOPSIS-line switch pair. nix-env's
 // synopsis is the canonical case: `[{--file | -f} path] [{--profile |
@@ -197,7 +233,7 @@ make_parser!(brace_pipe_switch -> Switch<'a>,
 );
 
 make_parser!(usage_switch_parser -> Switch<'a>,
-    alt((brace_pipe_switch, switch_parser))
+    alt((brace_pipe_switch, switch_parser_borrowed))
 );
 
 // consume any chars except `]`. used to swallow trailing tokens inside a
@@ -209,15 +245,16 @@ make_parser!(take_till_bracket -> &'a str, take_till(|c: char| c == ']'));
 make_parser!(flag_in_bracket -> (Switch<'a>, Option<Param<'a>>),
     delimited(
         (char('['), space0),
-        (usage_switch_parser, opt(param_parser)),
+        (usage_switch_parser, opt(param_parser_borrowed)),
         (take_till_bracket, char(']'))
     )
 );
 
 // walk the joined SYNOPSIS-line text, collecting every flag-bracketed
 // switch + its first param. non-flag tokens (positional brackets,
-// command name, ellipses) are skipped one char at a time.
-make_parser!(pub parse_usage_flags -> Vec<(Switch<'a>, Option<Param<'a>>)>,
+// command name, ellipses) are skipped one char at a time. Emits the owned
+// model.
+make_parser!(pub parse_usage_flags -> Vec<(OwnedSwitch, Option<OwnedParam>)>,
     many0(alt((
         map(flag_in_bracket, Some),
         // `value(None, ...)` requires `None: Clone` which forces Clone
@@ -225,5 +262,8 @@ make_parser!(pub parse_usage_flags -> Vec<(Switch<'a>, Option<Param<'a>>)>,
         map(satisfy(|c| c != '\n' && c != '\r'), |_| None),
     )))
     => |v: Vec<Option<(Switch<'a>, Option<Param<'a>>)>>|
-        v.into_iter().flatten().collect()
+        v.into_iter()
+            .flatten()
+            .map(|(s, p)| (own_switch(s), p.map(own_param)))
+            .collect()
 );

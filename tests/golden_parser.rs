@@ -18,20 +18,11 @@ use std::fs;
 use std::path::Path;
 
 use inshellah::parsers::help::help_parser;
-use inshellah::parsers::manpage::{OwnedSwitch, parse_manpage_string};
-use inshellah::types::Switch;
+use inshellah::parsers::manpage::{ManpageResult, OwnedSwitch, parse_manpage_string};
 
 mod common;
 
-fn render_switch(s: &Switch) -> String {
-    match s {
-        Switch::Short(c) => format!("-{c}"),
-        Switch::Long(l) => format!("--{l}"),
-        Switch::Both(c, l) => format!("-{c}|--{l}"),
-    }
-}
-
-fn render_owned_switch(s: &OwnedSwitch) -> String {
+fn render_switch(s: &OwnedSwitch) -> String {
     match s {
         OwnedSwitch::Short(c) => format!("-{c}"),
         OwnedSwitch::Long(l) => format!("--{l}"),
@@ -39,8 +30,8 @@ fn render_owned_switch(s: &OwnedSwitch) -> String {
     }
 }
 
-fn render_help(txt: &str) -> String {
-    let (_, r) = help_parser(txt).expect("help parse");
+// both parsers now produce the same owned ManpageResult, so one renderer.
+fn render(r: &ManpageResult) -> String {
     let mut out = String::new();
     out.push_str("subcommands:\n");
     for sc in &r.subcommands {
@@ -57,22 +48,13 @@ fn render_help(txt: &str) -> String {
     out
 }
 
+fn render_help(txt: &str) -> String {
+    let (_, r) = help_parser(txt).expect("help parse");
+    render(&r)
+}
+
 fn render_manpage(txt: &str) -> String {
-    let r = parse_manpage_string(txt);
-    let mut out = String::new();
-    out.push_str("subcommands:\n");
-    for sc in &r.subcommands {
-        let _ = writeln!(out, "  {}", sc.name);
-    }
-    out.push_str("flags:\n");
-    for e in &r.entries {
-        let _ = writeln!(out, "  {}", render_owned_switch(&e.switch));
-    }
-    out.push_str("positionals:\n");
-    for (name, _) in &r.positionals {
-        let _ = writeln!(out, "  {name}");
-    }
-    out
+    render(&parse_manpage_string(txt))
 }
 
 const CASES: &[&str] = &["cargo_help.txt", "getent.1", "widget.1"];

@@ -12,22 +12,25 @@ pub use positionals::{
 
 use std::collections::HashMap;
 
-use crate::{
-    parsers::help::{description::description, helpers::get_indent, subcommands::subcommand_entry},
-    types::*,
+use crate::parsers::help::{
+    description::description, helpers::get_indent, subcommands::subcommand_entry,
 };
+use crate::parsers::manpage::{ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch};
 use nom::{IResult, Parser, character::complete::space0, combinator::opt};
 
 use crate::make_parser;
 
 type EntryParts<'a> = (
     &'a str,
-    (Switch<'a>, Option<Param<'a>>),
+    (OwnedSwitch, Option<OwnedParam>),
     (&'a str, Vec<&'a str>),
 );
 
 // parse a single flag entry: indent + switch + optional param + description.
-make_parser!(entry -> OptionEntry<'a>,
+// switch_parser/param_parser already emit the owned model; the multi-line
+// description is trimmed and joined here (formerly the job of
+// From<&OptionEntry>).
+make_parser!(entry -> ManpageEntry,
     (
         space0,
         (switch_parser, opt(param_parser)),
@@ -36,17 +39,23 @@ make_parser!(entry -> OptionEntry<'a>,
     => |(_, (switch, param), (first, cont))
         : EntryParts<'a>|
     {
-        let mut desc: Vec<&str> = Vec::with_capacity(1 + cont.len());
-        if !first.trim().is_empty() { desc.push(first); }
-        desc.extend(cont.into_iter().filter(|l| !l.trim().is_empty()));
-        OptionEntry { switch, param, desc }
+        let mut lines: Vec<&str> = Vec::with_capacity(1 + cont.len());
+        if !first.trim().is_empty() { lines.push(first); }
+        lines.extend(cont.into_iter().filter(|l| !l.trim().is_empty()));
+        let desc = lines
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        ManpageEntry { switch, param, desc }
     }
 );
 
 /// dedup raw subcommands by case-insensitive name, keeping the entry with
 /// the longest description. preserves first-seen ordering.
-fn dedup_subcommands<'a>(raw: Vec<Subcommand<'a>>) -> Vec<Subcommand<'a>> {
-    let mut by_name: HashMap<String, Subcommand<'a>> = HashMap::new();
+fn dedup_subcommands(raw: Vec<ManpageSubcommand>) -> Vec<ManpageSubcommand> {
+    let mut by_name: HashMap<String, ManpageSubcommand> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for sc in raw {
         let key = sc.name.to_ascii_lowercase();
@@ -130,9 +139,9 @@ fn parser_made_progress(original: &str, rem: &str) -> bool {
 /// build the final HelpResult by scanning help text with lightweight section
 /// awareness. options are accepted in option-like sections and before a
 /// section is known; subcommands are accepted only in command-like sections.
-fn build_help_result<'a>(original: &'a str) -> HelpResult<'a> {
-    let mut entries = Vec::new();
-    let mut raw_subcommands: Vec<Subcommand<'a>> = Vec::new();
+fn build_help_result(original: &str) -> ManpageResult {
+    let mut entries: Vec<ManpageEntry> = Vec::new();
+    let mut raw_subcommands: Vec<ManpageSubcommand> = Vec::new();
     let mut section = HelpSection::Unknown;
     let mut rem = original;
 
@@ -165,24 +174,41 @@ fn build_help_result<'a>(original: &'a str) -> HelpResult<'a> {
         rem = consume_line(rem);
     }
 
-    let subcommands = dedup_subcommands(raw_subcommands);
+    // subcommand names are lowercased here (formerly From<&Subcommand>): file
+    // naming stays consistent and recursive --help probes use the lowercase
+    // form, which is what most CLIs dispatch on.
+    let subcommands = dedup_subcommands(raw_subcommands)
+        .into_iter()
+        .map(|sc| ManpageSubcommand {
+            name: sc.name.to_ascii_lowercase(),
+            desc: sc.desc,
+        })
+        .collect();
     // cli11 positional section takes priority over the usage-line scan
-    // when both are present — cli11 carries types and optionality.
-    let positionals = match extract_cli11_positionals(original) {
+    // when both are present — cli11 carries types and optionality. names are
+    // lowercased for stable output across the extraction sites.
+    let positionals_raw = match extract_cli11_positionals(original) {
         Ok((_, p)) if !p.is_empty() => p,
         _ => extract_usage_positionals(original)
             .map(|(_, p)| p)
             .unwrap_or_default(),
     };
-    HelpResult {
+    let positionals = positionals_raw
+        .into_iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .collect();
+    let mut result = ManpageResult {
         entries,
         subcommands,
         positionals,
-        desc: "",
-    }
+        description: String::new(),
+    };
+    result.normalize();
+    result
 }
 
-/// top-level help parser.
-pub fn help_parser(s: &str) -> IResult<&str, HelpResult<'_>> {
+/// top-level help parser. Emits the owned `ManpageResult` directly, so callers
+/// no longer convert a separate borrowed `HelpResult`.
+pub fn help_parser(s: &str) -> IResult<&str, ManpageResult> {
     Ok(("", build_help_result(s)))
 }

@@ -28,7 +28,7 @@ fn parser_recovers_past_no_bracket_long_form() {
         r.entries.iter().any(|e| {
             matches!(
                 &e.switch,
-                inshellah::types::Switch::Both('v', l) if *l == "verbose"
+                inshellah::parsers::manpage::OwnedSwitch::Both('v', l) if *l == "verbose"
             )
         }),
         "expected -v/--verbose from --[no-]verbose, got {:?}",
@@ -49,27 +49,27 @@ fn parser_keeps_negatable_params() {
     let jobs = r
         .entries
         .iter()
-        .find(|e| matches!(&e.switch, inshellah::types::Switch::Both('j', l) if *l == "jobs"))
+        .find(|e| matches!(&e.switch, inshellah::parsers::manpage::OwnedSwitch::Both('j', l) if *l == "jobs"))
         .expect("jobs entry");
     assert!(matches!(
         &jobs.param,
-        Some(inshellah::types::Param::Mandatory("n"))
+        Some(inshellah::parsers::manpage::OwnedParam::Mandatory(p)) if p == "n"
     ));
 
     let recurse = r
         .entries
         .iter()
-        .find(|e| matches!(&e.switch, inshellah::types::Switch::Long(l) if *l == "recurse-submodules"))
+        .find(|e| matches!(&e.switch, inshellah::parsers::manpage::OwnedSwitch::Long(l) if *l == "recurse-submodules"))
         .expect("recurse-submodules entry");
     assert!(matches!(
         &recurse.param,
-        Some(inshellah::types::Param::Optional("pathspec"))
+        Some(inshellah::parsers::manpage::OwnedParam::Optional(p)) if p == "pathspec"
     ));
 
     let reject = r
         .entries
         .iter()
-        .find(|e| matches!(&e.switch, inshellah::types::Switch::Long(l) if *l == "reject-shallow"))
+        .find(|e| matches!(&e.switch, inshellah::parsers::manpage::OwnedSwitch::Long(l) if *l == "reject-shallow"))
         .expect("reject-shallow entry");
     assert!(
         reject.param.is_none(),
