@@ -5,6 +5,9 @@ use std::time::Instant;
 
 use crate::subprocess;
 
+// the typed candidate and scorer are shared with the static completer.
+pub(crate) use crate::complete::{Candidate, fuzzy_score};
+
 #[derive(Clone, Copy)]
 pub(crate) struct DynCtx<'a> {
     pub(crate) deadline: Option<Instant>,
@@ -59,48 +62,6 @@ impl DynCtx<'_> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Candidate {
-    pub(crate) value: String,
-    pub(crate) description: String,
-}
-
-impl Candidate {
-    pub(crate) fn new(value: impl Into<String>, description: impl Into<String>) -> Self {
-        Candidate {
-            value: value.into(),
-            description: description.into(),
-        }
-    }
-
-    pub(crate) fn into_json(self) -> String {
-        let mut out = String::with_capacity(self.value.len() + self.description.len() + 30);
-        out.push_str(r#"{"value":""#);
-        push_json_escaped(&mut out, &self.value);
-        out.push_str(r#"","description":""#);
-        push_json_escaped(&mut out, &self.description);
-        out.push_str(r#""}"#);
-        out
-    }
-}
-
-fn push_json_escaped(out: &mut String, s: &str) {
-    use std::fmt::Write as _;
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-}
-
 pub(crate) fn run(args: &[String], ctx: &DynCtx) -> Option<String> {
     subprocess::run_quiet(args, ctx.ms_left())
 }
@@ -141,63 +102,6 @@ pub(crate) fn filter_candidates(items: Vec<Candidate>, prefix: &str) -> Option<V
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     Some(scored.into_iter().map(|(_, _, c)| c).collect())
-}
-
-/// duplicate of `main.rs::fuzzy_score`. binary symbols aren't reachable
-/// from the lib crate, so changes here must mirror there.
-fn fuzzy_score(needle: &str, haystack: &str) -> i32 {
-    let needle_len = needle.len();
-    let haystack_len = haystack.len();
-    if needle_len == 0 {
-        return 1;
-    }
-    if needle_len > haystack_len {
-        return 0;
-    }
-    if needle == haystack {
-        return 1000;
-    }
-
-    let needle = needle.as_bytes();
-    let haystack = haystack.as_bytes();
-    if starts_with_ignore_ascii_case(haystack, needle) {
-        return 900 + (needle_len as i32 * 100 / haystack_len as i32);
-    }
-
-    let mut needle_idx = 0usize;
-    let mut score = 0i32;
-    let mut prev_match: Option<usize> = None;
-
-    for (hay_idx, &c) in haystack.iter().enumerate() {
-        if needle_idx >= needle_len {
-            break;
-        }
-        if c.eq_ignore_ascii_case(&needle[needle_idx]) {
-            let boundary = hay_idx == 0
-                || haystack[hay_idx - 1] == b'-'
-                || haystack[hay_idx - 1] == b'_'
-                || (haystack[hay_idx - 1].is_ascii_lowercase()
-                    && haystack[hay_idx].is_ascii_uppercase());
-            let consecutive = prev_match == Some(hay_idx.saturating_sub(1));
-            score += if boundary { 50 } else { 10 };
-            if consecutive {
-                score += 20;
-            }
-            needle_idx += 1;
-            prev_match = Some(hay_idx);
-            continue;
-        }
-    }
-
-    if needle_idx == needle_len { score } else { 0 }
-}
-
-fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.len() >= needle.len()
-        && haystack
-            .iter()
-            .zip(needle)
-            .all(|(&hay, &needle)| hay.eq_ignore_ascii_case(&needle))
 }
 
 /// shared tab-split helper for command output with tabular templates.

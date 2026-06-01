@@ -12,7 +12,6 @@
 //!   completions         emit nushell completion definitions for inshellah itself
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
@@ -21,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use inshellah::complete::{completion_json, fuzzy_score, starts_with_ignore_ascii_case};
 use inshellah::config::{Config, DEFAULT_TIMEOUT_MS};
 use inshellah::dynamic::dynamic_complete_with_path;
 use inshellah::parsers::help::help_parser;
@@ -656,25 +656,8 @@ mod main_tests {
         ));
     }
 
-    #[test]
-    fn fuzzy_score_keeps_completion_ranking_shape() {
-        assert_eq!(fuzzy_score("", "build"), 1);
-        assert_eq!(fuzzy_score("build", "build"), 1000);
-        assert_eq!(fuzzy_score("BUILD", "build"), 1000);
-        assert_eq!(fuzzy_score("bl", "build"), 60);
-        assert_eq!(fuzzy_score("bl", "bundle"), 60);
-        assert_eq!(fuzzy_score("bl", "branch-list"), 100);
-        assert_eq!(fuzzy_score("bl", "blacklist"), 922);
-        assert_eq!(fuzzy_score("bl", "table"), 40);
-    }
-
-    #[test]
-    fn completion_json_escapes_without_changing_shape() {
-        assert_eq!(
-            completion_json("a\"b", "line\nnext"),
-            r#"{"value":"a\"b","description":"line\nnext"}"#
-        );
-    }
+    // fuzzy_score / completion_json ranking + escaping are covered by the
+    // canonical module's own tests (src/complete.rs).
 
     #[test]
     fn completion_dir_mandir_resolves_to_prefix_share_man() {
@@ -1419,87 +1402,6 @@ fn command_name_for_path(path: &Path) -> Option<String> {
 /// - prefix match: 900 + length bonus
 /// - subsequence match: per-character score with bonuses for word boundaries
 ///   and consecutive matches
-fn fuzzy_score(needle: &str, haystack: &str) -> i32 {
-    let needle_len = needle.len();
-    let haystack_len = haystack.len();
-    if needle_len == 0 {
-        return 1;
-    }
-    if needle_len > haystack_len {
-        return 0;
-    }
-    if needle == haystack {
-        return 1000;
-    }
-
-    let needle = needle.as_bytes();
-    let haystack = haystack.as_bytes();
-    if starts_with_ignore_ascii_case(haystack, needle) {
-        return 900 + (needle_len as i32 * 100 / haystack_len as i32);
-    }
-
-    let mut needle_idx = 0usize;
-    let mut score = 0i32;
-    let mut prev_match: Option<usize> = None;
-
-    for (hay_idx, &c) in haystack.iter().enumerate() {
-        if needle_idx >= needle_len {
-            break;
-        }
-        if c.eq_ignore_ascii_case(&needle[needle_idx]) {
-            let boundary = hay_idx == 0
-                || haystack[hay_idx - 1] == b'-'
-                || haystack[hay_idx - 1] == b'_'
-                || (haystack[hay_idx - 1].is_ascii_lowercase()
-                    && haystack[hay_idx].is_ascii_uppercase());
-            let consecutive = prev_match == Some(hay_idx.saturating_sub(1));
-            score += if boundary { 50 } else { 10 };
-            if consecutive {
-                score += 20;
-            }
-            needle_idx += 1;
-            prev_match = Some(hay_idx);
-            continue;
-        }
-    }
-
-    if needle_idx == needle_len { score } else { 0 }
-}
-
-fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.len() >= needle.len()
-        && haystack
-            .iter()
-            .zip(needle)
-            .all(|(&hay, &needle)| hay.eq_ignore_ascii_case(&needle))
-}
-
-fn push_json_escaped(out: &mut String, s: &str) {
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-}
-
-fn completion_json(value: &str, desc: &str) -> String {
-    let mut out = String::with_capacity(value.len() + desc.len() + 30);
-    out.push_str(r#"{"value":""#);
-    push_json_escaped(&mut out, value);
-    out.push_str(r#"","description":""#);
-    push_json_escaped(&mut out, desc);
-    out.push_str(r#""}"#);
-    out
-}
-
 fn entry_completion_desc(e: &ManpageEntry) -> String {
     match &e.param {
         Some(OwnedParam::Mandatory(p)) => {
