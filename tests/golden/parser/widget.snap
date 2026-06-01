@@ -1,0 +1,6 @@
+subcommands:
+flags:
+  -v|--verbose
+  --config
+positionals:
+  command

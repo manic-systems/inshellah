@@ -1,0 +1,19 @@
+Rust's package manager
+
+Usage: cargo [+toolchain] [OPTIONS] [COMMAND]
+
+Options:
+  -V, --version             Print version info and exit
+  -v, --verbose...          Use verbose output
+  -q, --quiet               Do not print cargo log messages
+      --color <WHEN>        Coloring: auto, always, never
+  -h, --help                Print help
+
+Commands:
+  build, b    Compile the current package
+  check, c    Analyze the current package and report errors, but don't build object files
+  clean       Remove the target directory
+  doc, d      Build this package's and its dependencies' documentation
+  run, r      Run a binary or example of the local package
+  test, t     Run the tests
+  help        Displays help for a cargo subcommand

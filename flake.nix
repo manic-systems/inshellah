@@ -126,7 +126,10 @@
             '';
         in
         {
-          rust = mkShellCheck "inshellah-rust-check" rustInputs rustCheckPhase;
+          # nushell is in the rust check inputs so the composed seam test
+          # (tests/seam_nu.rs) runs the real binary through the real nu
+          # tokenizer instead of self-skipping when nu is absent.
+          rust = mkShellCheck "inshellah-rust-check" (rustInputs ++ [ pkgs.nushell ]) rustCheckPhase;
           nushell = mkShellCheck "inshellah-nushell-check" [ pkgs.nushell ] nushellCheckPhase;
           default = mkShellCheck "inshellah-check" (rustInputs ++ [ pkgs.nushell ]) ''
             ${rustCheckPhase}
