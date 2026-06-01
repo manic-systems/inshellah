@@ -30,6 +30,7 @@ use inshellah::parsers::manpage::{
 };
 use inshellah::parsers::nushell::{generate_extern, is_nushell_builtin};
 use inshellah::pool::{ScrapePool, Submitter};
+use inshellah::resolver::{self, NodeClass, Outcome, Probe, resolve_node};
 use inshellah::store::{
     all_commands, default_store_path, ensure_dir, file_type_of, filename_of_command, lookup,
     lookup_raw, parse_nu_completions, purge_dir, subcommands_of, write_native, write_result,
@@ -435,96 +436,6 @@ fn parse_help_text(text: &str) -> ManpageResult {
     }
 }
 
-/// recursively resolve subcommands, returning a vec of (cmd_path, result)
-/// where cmd_path is the full "git stash apply" form. used by the
-/// dynamic-resolve path in `cmd_complete`; the batch indexer uses the
-/// pool instead, which expresses this same BFS shape with workers.
-fn help_resolve(
-    bin: &Path,
-    cmd: &str,
-    depth: u32,
-    timeout_ms: u64,
-    deadline: Instant,
-    acc: &mut Vec<(String, ManpageResult)>,
-) {
-    if acc.len() >= MAX_RESOLVE_RESULTS || Instant::now() >= deadline {
-        return;
-    }
-    let Some(help_text) = try_help(bin, timeout_ms.min(remaining_ms(deadline))) else {
-        return;
-    };
-    let result = parse_help_text(&help_text);
-    acc.push((cmd.to_string(), result));
-    let initial_subs: Vec<String> = acc
-        .last()
-        .map(|(_, r)| {
-            r.subcommands
-                .iter()
-                .map(|sc| sc.name.clone())
-                .filter(|n| n.len() >= 2 && !n.starts_with('-'))
-                .collect()
-        })
-        .unwrap_or_default();
-    let bin_s = bin.to_string_lossy().to_string();
-    for sub in initial_subs {
-        recurse_subcommand(
-            &bin_s,
-            cmd,
-            std::slice::from_ref(&sub),
-            depth + 1,
-            timeout_ms,
-            deadline,
-            acc,
-        );
-    }
-}
-
-fn recurse_subcommand(
-    bin_s: &str,
-    base_cmd: &str,
-    sub_args: &[String],
-    depth: u32,
-    timeout_ms: u64,
-    deadline: Instant,
-    acc: &mut Vec<(String, ManpageResult)>,
-) {
-    if acc.len() >= MAX_RESOLVE_RESULTS || depth > MAX_RECURSE_DEPTH || Instant::now() >= deadline {
-        return;
-    }
-    let full_cmd = format!("{base_cmd} {}", sub_args.join(" "));
-    let Some(text) = try_help_args(bin_s, sub_args, timeout_ms.min(remaining_ms(deadline))) else {
-        return;
-    };
-    let result = parse_help_text(&text);
-    if result.entries.is_empty() && result.subcommands.is_empty() && result.positionals.is_empty() {
-        return;
-    }
-    if let Some(leaf) = sub_args.last() {
-        let self_listed = result
-            .subcommands
-            .iter()
-            .any(|sc| sc.name.eq_ignore_ascii_case(leaf));
-        if self_listed {
-            return;
-        }
-    }
-    let inner_subs: Vec<String> = result
-        .subcommands
-        .iter()
-        .map(|sc| sc.name.clone())
-        .filter(|n| n.len() >= 2 && !n.starts_with('-') && n != "help")
-        .collect();
-    acc.push((full_cmd, result));
-    for sub in inner_subs {
-        if acc.len() >= MAX_RESOLVE_RESULTS {
-            break;
-        }
-        let mut next = sub_args.to_vec();
-        next.push(sub);
-        recurse_subcommand(bin_s, base_cmd, &next, depth + 1, timeout_ms, deadline, acc);
-    }
-}
-
 /// try `bin sub_path... --help` first, then `... -h` if --help came back
 /// empty or "No manual entry…". used by deep subcommand recursion.
 fn try_help_args(bin_s: &str, sub_args: &[String], timeout_ms: u64) -> Option<String> {
@@ -905,17 +816,6 @@ impl PoolJob {
     }
 }
 
-/// hyphenated form used to look up a manpage for a (possibly nested)
-/// command — "git" for top-level, "git-remote" for `git remote`,
-/// "git-stash-apply" for `git stash apply`.
-fn hyphenated_cmd(job: &PoolJob) -> String {
-    if job.sub_args.is_empty() {
-        job.base_cmd.clone()
-    } else {
-        format!("{}-{}", job.base_cmd, job.sub_args.join("-"))
-    }
-}
-
 /// some manpages list subcommands with the parent's name as a prefix —
 /// git.1 has \fBgit-add\fR(1), \fBgit-remote-ext\fR(1), etc. downstream
 /// expects bare subcommand names ("add", "remote-ext") so they dispatch
@@ -941,25 +841,18 @@ fn strip_manpage_subcmd_prefixes(result: &mut ManpageResult, file: &Path, cmd_na
     }
 }
 
-/// enqueue child jobs for each discovered subcommand. shared between the
-/// manpage and help branches of process_pool_job.
-fn enqueue_subcommands(
-    job: &PoolJob,
-    subcommands: &[ManpageSubcommand],
-    submit: &Submitter<PoolJob>,
-) {
-    // matches the sequential recurse_subcommand depth check (`depth > MAX`),
-    // not `>=`, so we get 6 levels (0..=5) of recursion. without this we
-    // were cutting off the last layer of deep clap trees like jay.
+/// enqueue one child job per discovered subcommand token. tokens are already
+/// filtered by the resolver core (`child_tokens`: len >= 2, not a flag, not
+/// `help`).
+fn enqueue_child_jobs(job: &PoolJob, children: &[String], submit: &Submitter<PoolJob>) {
+    // depth check is `> MAX`, not `>=`, so we get 6 levels (0..=5) of
+    // recursion; without it we cut off the last layer of deep clap trees.
     if job.depth > MAX_RECURSE_DEPTH {
         return;
     }
-    for sc in subcommands {
-        if sc.name.len() < 2 || sc.name.starts_with('-') || sc.name == "help" {
-            continue;
-        }
+    for name in children {
         let mut next = job.sub_args.clone();
-        next.push(sc.name.clone());
+        next.push(name.clone());
         submit.submit(PoolJob {
             bin_path: job.bin_path.clone(),
             base_cmd: job.base_cmd.clone(),
@@ -970,103 +863,52 @@ fn enqueue_subcommands(
 }
 
 /// per-job handler called by every worker. populates the cache + enqueues
-/// child jobs (one per discovered subcommand) onto the same pool.
-///
-/// source priority is: (1) native completions, (2) manpage, (3) --help.
-/// --help text is fetched at step 1 only as a probe for the completions
-/// subcommand; it is not mined for content unless steps 1 and 2 both miss.
+/// child jobs (one per discovered subcommand) onto the same pool. shares the
+/// resolver core with the runtime path; the only index-specific concerns are
+/// the `Skip` classification (don't index non-CLIs), the `--help-only` list
+/// (skip the manpage source), and persisting before marking a command indexed.
 fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) {
     let full_cmd = job.full_cmd();
     if ctx.indexed.lock().contains(&full_cmd) {
         return;
     }
-    let bin_s = job.bin_path.to_string_lossy().to_string();
+    let probe = RealProbe {
+        path: &job.bin_path,
+        mandirs: &ctx.mandirs,
+        user_dir: &ctx.cache_dir,
+        timeout_ms: ctx.timeout_ms,
+        // the pool bounds total work and each subprocess is timeout-capped;
+        // there is no per-job wall-clock budget, so leave the deadline open.
+        deadline: Instant::now() + Duration::from_secs(86_400),
+        skip_manpage: ctx.help_only.contains(&job.base_cmd)
+            || ctx.help_only.contains(&full_cmd),
+    };
 
-    // 1. native completions (top-level only — sub-commands don't ship
-    //    their own completion payloads). classify_binary scans the ELF for
-    //    "complet" needles, and try_native_completion confirms by invoking
-    //    the completions subcommand.
-    if job.sub_args.is_empty() {
-        let class = classify_binary(&job.bin_path, &job.bin_path);
-        if matches!(class, Classify::Skip) {
-            return;
-        }
-        if matches!(class, Classify::HasNativeCompletions)
-            && let Some(nu) = try_native_completion(&job.bin_path, ctx.timeout_ms)
-        {
-            let _ = write_native(&ctx.cache_dir, &full_cmd, &nu);
-            ctx.indexed.lock().insert(full_cmd);
-            return;
-        }
+    // non-CLIs are skipped entirely (top-level classification only).
+    if job.sub_args.is_empty() && probe.classify() == NodeClass::Skip {
+        return;
     }
 
-    // 2. manpage as primary content source — structured documentation
-    //    over the curated --help summary.
-    if !ctx.help_only.contains(&job.base_cmd) && !ctx.help_only.contains(&full_cmd) {
-        let hyphenated = hyphenated_cmd(&job);
-        if let Some(mp_path) = find_manpage_path(&ctx.mandirs, &hyphenated)
-            && let Ok(contents) = read_manpage_file(&mp_path)
-        {
-            let mut mp_result = parse_manpage_string(&contents);
-            if !mp_result.entries.is_empty() || !mp_result.subcommands.is_empty() {
-                strip_subcmd_prefix(&mut mp_result, &hyphenated);
-                let mut source = "manpage";
-                if supplement_result_from_help_command(
-                    &mut mp_result,
-                    &job.bin_path,
-                    &job.sub_args,
-                    ctx.timeout_ms,
-                ) {
-                    source = "manpage+help";
-                }
-                // a group command whose body listed no children. sibling
-                // `cmd-sub.N` pages are indexed by the manpage walk in phase
-                // 2, so the only gap here is the help-only case (no sibling
-                // pages — subcommands documented solely in `--help`).
-                if looks_like_unenumerated_group(&mp_result)
-                    && !has_sibling_manpages(&ctx.mandirs, &hyphenated)
-                    && let Some(subs) =
-                        group_subcommands_from_help(&job.bin_path, &job.sub_args, ctx.timeout_ms)
-                {
-                    mp_result.subcommands = subs;
-                    source = "manpage+help";
-                }
-                let _ = write_result(&ctx.cache_dir, &full_cmd, source, &mp_result);
+    match resolve_one(&probe, &job.base_cmd, &job.sub_args) {
+        Outcome::Native { nu } => {
+            if write_native(&ctx.cache_dir, &full_cmd, &nu).is_ok() {
                 ctx.indexed.lock().insert(full_cmd);
-                enqueue_subcommands(&job, &mp_result.subcommands, submit);
-                return;
+            }
+        }
+        Outcome::Empty => {}
+        Outcome::Content {
+            result,
+            source,
+            children,
+        } => {
+            // mark indexed only after a successful write, so a failed persist
+            // doesn't leave a command falsely recorded as done.
+            if write_result(&ctx.cache_dir, &full_cmd, source, &result).is_ok() {
+                ctx.indexed.lock().insert(full_cmd);
+                enqueue_child_jobs(&job, &children, submit);
             }
         }
     }
-
-    // 3. fallback: scrape --help text for content.
-    let text = if job.sub_args.is_empty() {
-        try_help(&job.bin_path, ctx.timeout_ms)
-    } else {
-        try_help_args(&bin_s, &job.sub_args, ctx.timeout_ms)
-    };
-    let Some(text) = text else { return };
-
-    let result = parse_help_text(&text);
-    if result.entries.is_empty() && result.subcommands.is_empty() && result.positionals.is_empty() {
-        return;
-    }
-
-    // self-listing detection for sub-probes: if the leaf token shows up in
-    // the result's subcommand list, the binary probably echoed the parent
-    // help (didn't recognize the token). discard.
-    if let Some(leaf) = job.sub_args.last()
-        && result
-            .subcommands
-            .iter()
-            .any(|sc| sc.name.eq_ignore_ascii_case(leaf))
-    {
-        return;
-    }
-
-    let _ = write_result(&ctx.cache_dir, &full_cmd, "help", &result);
-    ctx.indexed.lock().insert(full_cmd);
-    enqueue_subcommands(&job, &result.subcommands, submit);
 }
 
 fn cmd_index(
@@ -2036,31 +1878,6 @@ fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str
     any
 }
 
-/// is there at least one descendant manpage (`cmd-*.N`) for this command?
-/// a cheap existence probe — used to decide whether the manpage route can
-/// supply a group's children before reaching for `--help`.
-fn has_sibling_manpages(mandirs: &[PathBuf], hyphenated: &str) -> bool {
-    let prefix = format!("{hyphenated}-");
-    for mandir in mandirs {
-        for section in COMMAND_SECTIONS {
-            let secdir = mandir.join(format!("man{section}"));
-            let Ok(entries) = fs::read_dir(&secdir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                if entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|f| f.starts_with(&prefix))
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 /// scrape a group command's children from `--help` (subcommands only).
 fn group_subcommands_from_help(
     path: &Path,
@@ -2213,23 +2030,88 @@ fn supplement_result_from_help_command(
 /// surfaces); fall back to `--help` only when no sibling pages exist. used
 /// by the on-the-fly resolver, which (unlike `index`) doesn't otherwise
 /// walk the sibling pages.
-fn supplement_group_subcommands(
-    result: &mut ManpageResult,
-    user_dir: &Path,
-    mandirs: &[PathBuf],
-    hyphenated: &str,
-    path: &Path,
-    sub_args: &[String],
+/// Filesystem/subprocess-backed [`Probe`] for one binary. Bound to a single
+/// binary path; the resolver core drives it per node. This is the one place
+/// the manpage⊕help supplement and group-recovery I/O lives, shared by the
+/// runtime driver below and the indexer's pool driver.
+struct RealProbe<'a> {
+    path: &'a Path,
+    mandirs: &'a [PathBuf],
+    user_dir: &'a Path,
     timeout_ms: u64,
-) -> bool {
-    if index_sibling_manpages(user_dir, mandirs, hyphenated) {
-        return false;
+    deadline: Instant,
+    /// the indexer's `--help-only` list forces some commands past the manpage
+    /// source straight to `--help`; runtime resolution never sets this.
+    skip_manpage: bool,
+}
+
+impl RealProbe<'_> {
+    fn step_timeout(&self) -> u64 {
+        self.timeout_ms.min(remaining_ms(self.deadline))
     }
-    if let Some(subs) = group_subcommands_from_help(path, sub_args, timeout_ms) {
-        result.subcommands = subs;
-        return true;
+}
+
+impl Probe for RealProbe<'_> {
+    fn classify(&self) -> NodeClass {
+        match classify_binary(self.path, self.path) {
+            Classify::TryHelp => NodeClass::TryHelp,
+            Classify::HasNativeCompletions => NodeClass::HasNativeCompletions,
+            Classify::Skip => NodeClass::Skip,
+        }
     }
-    false
+
+    fn native_completions(&self) -> Option<String> {
+        try_native_completion(self.path, self.timeout_ms)
+    }
+
+    fn manpage(&self, hyphenated: &str) -> Option<String> {
+        if self.skip_manpage {
+            return None;
+        }
+        let mp_path = find_manpage_path(self.mandirs, hyphenated)?;
+        read_manpage_file(&mp_path).ok()
+    }
+
+    fn help_text(&self, sub_args: &[String]) -> Option<String> {
+        if sub_args.is_empty() {
+            try_help(self.path, self.step_timeout())
+        } else {
+            let bin_s = self.path.to_string_lossy().to_string();
+            try_help_args(&bin_s, sub_args, self.step_timeout())
+        }
+    }
+
+    fn supplement_from_help(&self, result: &mut ManpageResult, sub_args: &[String]) -> bool {
+        supplement_result_from_help_command(result, self.path, sub_args, self.step_timeout())
+    }
+
+    fn group_children(
+        &self,
+        hyphenated: &str,
+        sub_args: &[String],
+    ) -> Option<Vec<ManpageSubcommand>> {
+        // prefer the manpage route: index the sibling `cmd-sub.N` pages, which
+        // a later `subcommands_of` lookup surfaces (so return None — nothing to
+        // graft inline). only fall back to --help when no sibling pages exist.
+        if index_sibling_manpages(self.user_dir, self.mandirs, hyphenated) {
+            return None;
+        }
+        group_subcommands_from_help(self.path, sub_args, self.step_timeout())
+    }
+}
+
+/// the parser/strip/group-detection callbacks the resolver core needs,
+/// gathered once so the two call sites stay identical.
+fn resolve_one(probe: &RealProbe, base_cmd: &str, sub_args: &[String]) -> Outcome {
+    resolve_node(
+        probe,
+        base_cmd,
+        sub_args,
+        &parse_manpage_string,
+        &parse_help_text,
+        &strip_subcmd_prefix,
+        &looks_like_unenumerated_group,
+    )
 }
 
 fn resolve_command_path_and_cache(
@@ -2242,114 +2124,79 @@ fn resolve_command_path_and_cache(
 ) -> Option<ManpageResult> {
     let deadline =
         Instant::now() + Duration::from_millis(timeout_ms.saturating_mul(RESOLVE_BUDGET_MULTIPLE));
-    let full_cmd = if sub_args.is_empty() {
-        base_cmd.to_string()
-    } else {
-        format!("{base_cmd} {}", sub_args.join(" "))
+    let probe = RealProbe {
+        path,
+        mandirs,
+        user_dir,
+        timeout_ms,
+        deadline,
+        skip_manpage: false,
     };
-    let hyphenated = if sub_args.is_empty() {
-        base_cmd.to_string()
-    } else {
-        format!("{base_cmd}-{}", sub_args.join("-"))
-    };
-
-    // 1. native completions
-    if matches!(classify_binary(path, path), Classify::HasNativeCompletions)
-        && let Some(nu) = try_native_completion(path, timeout_ms)
-    {
-        let _ = write_native(user_dir, base_cmd, &nu);
-        return Some(parse_nu_completions(&full_cmd, &nu));
-    }
-    // 2. manpage as primary content source.
-    if let Some(mp_path) = find_manpage_path(mandirs, &hyphenated)
-        && let Ok(contents) = read_manpage_file(&mp_path)
-    {
-        let mut result = parse_manpage_string(&contents);
-        if !result.entries.is_empty() || !result.subcommands.is_empty() {
-            strip_subcmd_prefix(&mut result, &hyphenated);
-            let mut source = "manpage";
-            if supplement_result_from_help_command(
-                &mut result,
-                path,
-                sub_args,
-                timeout_ms.min(remaining_ms(deadline)),
-            ) {
-                source = "manpage+help";
+    let full = resolver::full_cmd(base_cmd, sub_args);
+    match resolve_one(&probe, base_cmd, sub_args) {
+        Outcome::Native { nu } => {
+            let _ = write_native(user_dir, base_cmd, &nu);
+            Some(parse_nu_completions(&full, &nu))
+        }
+        Outcome::Empty => None,
+        Outcome::Content {
+            result,
+            source,
+            children,
+        } => {
+            let _ = write_result(user_dir, &full, source, &result);
+            // only the --help branch eagerly populates the subtree; manpage
+            // children are found on demand via their own sibling pages.
+            if source == "help" {
+                resolve_subtree(&probe, base_cmd, sub_args, children, deadline);
             }
-            // a group command whose manpage body listed no children: recover
-            // them from sibling pages or --help instead of returning a result
-            // that completes to nothing.
-            if looks_like_unenumerated_group(&result)
-                && supplement_group_subcommands(
-                    &mut result,
-                    user_dir,
-                    mandirs,
-                    &hyphenated,
-                    path,
-                    sub_args,
-                    timeout_ms.min(remaining_ms(deadline)),
-                )
-            {
-                source = "manpage+help";
-            }
-            let _ = write_result(user_dir, &full_cmd, source, &result);
-            return Some(result);
+            Some(result)
         }
     }
-    // 3. fallback: scrape --help text.
-    let text = if sub_args.is_empty() {
-        try_help(path, timeout_ms.min(remaining_ms(deadline)))
-    } else {
-        let bin_s = path.to_string_lossy().to_string();
-        try_help_args(&bin_s, sub_args, timeout_ms.min(remaining_ms(deadline)))
-    }?;
-    let parsed = parse_help_text(&text);
-    if parsed.entries.is_empty() && parsed.subcommands.is_empty() && parsed.positionals.is_empty() {
-        return None;
-    }
-    if let Some(leaf) = sub_args.last()
-        && parsed
-            .subcommands
-            .iter()
-            .any(|sc| sc.name.eq_ignore_ascii_case(leaf))
-    {
-        return None;
-    }
+}
 
-    let _ = write_result(user_dir, &full_cmd, "help", &parsed);
-    if sub_args.is_empty() {
-        let mut sub_acc: Vec<(String, ManpageResult)> = Vec::new();
-        help_resolve(path, base_cmd, 1, timeout_ms, deadline, &mut sub_acc);
-        for (cmd, r) in sub_acc.into_iter().skip(1) {
-            let _ = write_result(user_dir, &cmd, "help", &r);
+/// Breadth-first resolve+cache of the subtree under a node, bounded by the
+/// result cap and the shared deadline. Replaces the old
+/// `help_resolve`/`recurse_subcommand` pair, which expressed this same shape.
+fn resolve_subtree(
+    probe: &RealProbe,
+    base_cmd: &str,
+    base_sub_args: &[String],
+    roots: Vec<String>,
+    deadline: Instant,
+) {
+    let mut queue: std::collections::VecDeque<Vec<String>> = roots
+        .into_iter()
+        .map(|c| {
+            let mut v = base_sub_args.to_vec();
+            v.push(c);
+            v
+        })
+        .collect();
+    let mut count = 0usize;
+    while let Some(sub) = queue.pop_front() {
+        if count >= MAX_RESOLVE_RESULTS || Instant::now() >= deadline {
+            break;
         }
-    } else {
-        let bin_s = path.to_string_lossy().to_string();
-        let inner_subs: Vec<String> = parsed
-            .subcommands
-            .iter()
-            .map(|sc| sc.name.clone())
-            .filter(|n| n.len() >= 2 && !n.starts_with('-') && n != "help")
-            .collect();
-        let mut sub_acc: Vec<(String, ManpageResult)> = Vec::new();
-        for sub in inner_subs {
-            let mut next = sub_args.to_vec();
-            next.push(sub);
-            recurse_subcommand(
-                &bin_s,
-                base_cmd,
-                &next,
-                sub_args.len() as u32 + 2,
-                timeout_ms,
-                deadline,
-                &mut sub_acc,
-            );
+        if (sub.len() - base_sub_args.len()) as u32 > MAX_RECURSE_DEPTH {
+            continue;
         }
-        for (cmd, r) in sub_acc {
-            let _ = write_result(user_dir, &cmd, "help", &r);
+        if let Outcome::Content {
+            result,
+            source,
+            children,
+        } = resolve_one(probe, base_cmd, &sub)
+        {
+            let full = resolver::full_cmd(base_cmd, &sub);
+            let _ = write_result(probe.user_dir, &full, source, &result);
+            count += 1;
+            for c in children {
+                let mut next = sub.clone();
+                next.push(c);
+                queue.push_back(next);
+            }
         }
     }
-    Some(parsed)
 }
 
 const ELEVATION_COMMANDS: &[&str] = &["sudo", "doas", "pkexec", "su", "run0"];
