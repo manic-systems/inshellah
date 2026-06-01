@@ -1,25 +1,22 @@
-//! BSD mdoc format support.
-//!
-//! mdoc is the bsd manpage macro package. it uses semantic macros rather than
-//! presentation macros:
+//! BSD mdoc format support. semantic macros rather than presentation:
 //!   .Fl v    -> flag: -v
 //!   .Ar file -> argument: file
 //!   .Op ...  -> optional: [...]
 //!   .Bl/.It/.El -> list begin/item/end
-//!   .Sh      -> section header (note lowercase 'h', vs groff's .SH)
+//!   .Sh      -> section header (lowercase 'h', vs groff's .SH)
 
 use crate::parsers::manpage::groff::{GroffLine, strip_groff_escapes};
 use crate::parsers::manpage::{ManpageEntry, ManpageResult, OwnedParam, OwnedSwitch};
 use crate::types::Positional;
 
-/// detect mdoc format by looking for any .Sh macro.
+/// mdoc is detected by any .Sh macro.
 pub fn is_mdoc(lines: &[GroffLine]) -> bool {
     lines
         .iter()
         .any(|l| matches!(l, GroffLine::Macro { name, .. } if name == "Sh"))
 }
 
-/// extract renderable text from an mdoc line, skipping structural macros.
+/// renderable text from an mdoc line, skipping structural macros.
 fn mdoc_text_of(line: &GroffLine) -> Option<String> {
     match line {
         GroffLine::Text(t) => Some(strip_groff_escapes(t)),
@@ -39,9 +36,8 @@ fn mdoc_text_of(line: &GroffLine) -> Option<String> {
     }
 }
 
-/// parse an mdoc .It (list item) line that contains flag definitions.
-/// mdoc .It lines look like: ".It Fl v Ar file"
-/// where Fl = flag, Ar = argument.
+/// parse an .It (list item) flag definition, e.g. ".It Fl v Ar file"
+/// (Fl = flag, Ar = argument).
 fn parse_mdoc_it(args: &str) -> Option<ManpageEntry> {
     let words: Vec<&str> = args
         .split(' ')
@@ -68,7 +64,7 @@ fn parse_mdoc_it(args: &str) -> Option<ManpageEntry> {
     }
 }
 
-/// extract a positional argument from an mdoc line (.Ar or .Op Ar).
+/// positional argument from an mdoc line (.Ar or .Op Ar).
 fn positional_of_mdoc_line(args: &str) -> Option<(String, bool)> {
     let words: Vec<&str> = args.split(' ').filter(|w| !w.is_empty()).collect();
     let variadic = words.contains(&"...");
@@ -78,12 +74,9 @@ fn positional_of_mdoc_line(args: &str) -> Option<(String, bool)> {
     }
 }
 
-/// parse an entire mdoc-format manpage.
-/// walks through all classified lines looking for:
-///   1. .Bl/.It/.El list blocks containing flag definitions
-///   2. .Sh SYNOPSIS sections containing positional arguments (.Ar, .Op Ar)
+/// parse a full mdoc manpage: .Bl/.It/.El list blocks for flag definitions,
+/// .Sh SYNOPSIS for positional arguments (.Ar, .Op Ar).
 pub fn parse_mdoc_lines(lines: &[GroffLine]) -> ManpageResult {
-    // collect description for an entry — until next structural macro
     fn desc_of(lines: &[GroffLine], start: usize) -> (String, usize) {
         let mut acc: Vec<String> = Vec::new();
         let mut i = start;
@@ -114,7 +107,6 @@ pub fn parse_mdoc_lines(lines: &[GroffLine]) -> ManpageResult {
         i
     }
 
-    /// parse a single .It entry: extract flag, collect description.
     fn parse_it(
         args: &str,
         lines: &[GroffLine],
@@ -129,7 +121,6 @@ pub fn parse_mdoc_lines(lines: &[GroffLine]) -> ManpageResult {
         new_start
     }
 
-    /// parse all .It entries within a .Bl/.El option list.
     fn parse_option_list(
         entries: &mut Vec<ManpageEntry>,
         lines: &[GroffLine],
@@ -183,7 +174,7 @@ pub fn parse_mdoc_lines(lines: &[GroffLine]) -> ManpageResult {
     let mut positionals: Vec<(String, bool, bool)> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        // .Bl + .It header sequence — peek at first .It to decide if this is a flag list
+        // peek at the first .It to decide if this .Bl is a flag list
         if let GroffLine::Macro { name: n1, .. } = &lines[i]
             && n1 == "Bl"
         {
@@ -218,7 +209,7 @@ pub fn parse_mdoc_lines(lines: &[GroffLine]) -> ManpageResult {
         i += 1;
     }
 
-    // deduplicate positionals by name, preserving first-seen order
+    // dedup by name, keeping first-seen order
     let mut seen: Vec<String> = Vec::new();
     let mut deduped: Vec<(String, Positional)> = Vec::new();
     for (name, optional, variadic) in positionals {

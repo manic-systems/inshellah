@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! adb device-serial and package-name value completions. unlike the other
-//! providers this preempts static flag completion (see providers::value_completions):
-//! `adb -s <tab>` must offer live serials, not adb's own flags.
+//! adb device-serial and package-name value completions. preempts static flag
+//! completion (providers::value_completions) so `adb -s <tab>` offers live
+//! serials, not adb's own flags.
 
 use std::path::{Path, PathBuf};
 
@@ -27,8 +27,8 @@ enum AdbDeviceCompletion<'a> {
     },
 }
 
-/// preempt entry point: value completions for adb selectors and package args,
-/// or None to let static flag completion answer. `spans[0]` is the command.
+/// value completions for adb selectors and package args, or None to let static
+/// flag completion answer. `spans[0]` is the command.
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let rest = &spans[1..];
     let path = resolve_adb(ctx)?;
@@ -210,8 +210,8 @@ fn adb_device_candidates(
     scored.into_iter().map(|(_, c)| c).collect()
 }
 
-/// adb-specific prefix match: exact serial wins, then case-insensitive prefix.
-/// not the dynamic fuzzy_score (serials aren't subcommands).
+/// exact serial wins, then case-insensitive prefix. not fuzzy_score, serials
+/// aren't subcommands.
 fn prefix_score(prefix: &str, value: &str) -> i32 {
     if prefix.is_empty() {
         return 1;

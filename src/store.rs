@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! filesystem store for parsed completion data.
-//!
-//! write side: serialize ManpageResult to JSON, derive reversible safe
-//! filenames from command names ("git add" → v1%git%20add.json).
-//!
-//! read side: look up a command by name across the user cache + system
-//! dirs, deserialize JSON or parse a .nu extern blob back into a result.
+//! filesystem store for parsed completion data. filenames are reversible
+//! ("git add" -> v1%git%20add.json). lookups span the user cache + system dirs.
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,8 +15,6 @@ use crate::parsers::manpage::{
 };
 use crate::types::Positional;
 
-/// default cache directory: $XDG_CACHE_HOME/inshellah, falling back to
-/// $HOME/.cache/inshellah.
 pub fn default_store_path() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
         && !xdg.is_empty()
@@ -34,18 +27,14 @@ pub fn default_store_path() -> PathBuf {
     PathBuf::from(".cache/inshellah")
 }
 
-/// create directory and all parents.
 pub fn ensure_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
 const ENCODED_FILENAME_PREFIX: &str = "v1%";
 
-/// derive a safe, reversible filename from a command name.
-///
-/// older cache files used "_" for both spaces and literal underscores,
-/// so "foo bar" and "foo_bar" collided. new files carry a version marker
-/// and percent-encode every byte except a small portable filename subset.
+/// percent-encode every byte outside a portable filename subset. legacy "_"
+/// encoded both space and underscore, colliding "foo bar" with "foo_bar".
 pub fn filename_of_command(cmd: &str) -> String {
     let mut out = String::from(ENCODED_FILENAME_PREFIX);
     for b in cmd.as_bytes() {
@@ -104,9 +93,8 @@ fn decode_encoded_filename(encoded: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// reverse a cache filename stem into its command name. versioned names
-/// decode exactly; legacy underscore names keep their historical display
-/// behavior for compatibility.
+/// versioned names decode exactly; legacy underscore names fall back to
+/// "_" -> " ".
 pub fn command_of_filename(base: &str) -> String {
     if let Some(encoded) = base.strip_prefix(ENCODED_FILENAME_PREFIX) {
         decode_encoded_filename(encoded).unwrap_or_else(|| base.replace('_', " "))
@@ -201,9 +189,6 @@ fn json_list<T, F: Fn(&T) -> String>(items: &[T], f: F) -> String {
     format!("[{}]", parts.join(","))
 }
 
-/// serialize a ManpageResult to JSON:
-///   {"source":..., "description":..., "entries":[...],
-///    "subcommands":[...], "positional_choices":[...], "positionals":[...]}
 pub fn json_of_result(source: &str, result: &ManpageResult) -> String {
     let entries = json_list(&result.entries, json_entry);
     let subcommands = json_list(&result.subcommands, json_subcommand);
@@ -225,7 +210,7 @@ pub fn json_of_result(source: &str, result: &ManpageResult) -> String {
     )
 }
 
-/// write via same-dir temp file then rename
+/// atomic: same-dir temp file then rename.
 pub fn write_file(path: &Path, contents: &str) -> io::Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => {
@@ -251,7 +236,6 @@ pub fn write_file(path: &Path, contents: &str) -> io::Result<()> {
     }
 }
 
-/// write the parsed result for `command` into `dir` as JSON.
 pub fn write_result(
     dir: &Path,
     command: &str,
@@ -262,13 +246,11 @@ pub fn write_result(
     write_file(&path, &json_of_result(source, result))
 }
 
-/// write a native-nushell completion blob (the binary supplied its own).
+/// store a native-nushell completion blob the binary supplied itself.
 pub fn write_native(dir: &Path, command: &str, data: &str) -> io::Result<()> {
     let path = dir.join(format!("{}.nu", filename_of_command(command)));
     write_file(&path, data)
 }
-
-// --- read side ---
 
 fn read_file(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
@@ -361,7 +343,6 @@ fn positional_from_json(v: &Value) -> Option<(String, Positional)> {
     Some((name, Positional { optional, variadic }))
 }
 
-/// deserialize a JSON cache entry into ManpageResult.
 pub fn result_from_json(v: &Value) -> ManpageResult {
     let description = v
         .get("description")
@@ -397,11 +378,7 @@ pub fn result_from_json(v: &Value) -> ManpageResult {
     }
 }
 
-/// parse nushell `export extern` blocks out of a .nu source file.
-///
-/// returns the help_result that matches `target_cmd` — its entries,
-/// positionals, and any other extern blocks under it (`cmd sub`) are
-/// folded into the subcommands list.
+/// immediate child blocks (`cmd sub`) fold into `target_cmd`'s subcommands.
 pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
     let mut blocks: Vec<NuBlock> = Vec::new();
     let mut current_desc = String::new();
@@ -440,12 +417,10 @@ pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
         blocks.push(block);
     }
 
-    // find the block matching target_cmd
     let Some(matched) = blocks.iter().find(|b| b.cmd == target_cmd) else {
         return ManpageResult::default();
     };
 
-    // collect immediate subcommands from other blocks ("target sub" pattern)
     let prefix = format!("{target_cmd} ");
     let mut subcommands: Vec<ManpageSubcommand> = Vec::new();
     for b in &blocks {
@@ -492,7 +467,6 @@ fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
         return;
     }
     if let Some(after) = param_part.strip_prefix("--") {
-        // long flag: --name(-c): type or --name: type or --name
         let (name, rest) = split_at_non_name_char(after);
         if name.is_empty() {
             return;
@@ -517,7 +491,6 @@ fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
             desc: desc.to_string(),
         });
     } else if param_part.starts_with('-') {
-        // short flag: -c
         if let Some(c) = param_part.chars().nth(1)
             && c.is_ascii_alphanumeric()
         {
@@ -528,7 +501,6 @@ fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
             });
         }
     } else {
-        // positional: name: type or name?: type or ...name: type
         let variadic = param_part.starts_with("...");
         let after_prefix = if variadic {
             &param_part[3..]
@@ -567,8 +539,8 @@ fn split_at_non_name_char(s: &str) -> (&str, &str) {
     (&s[..end], &s[end..])
 }
 
-/// parse a `: type` suffix into an OwnedParam (always Mandatory since the
-/// nushell extern syntax doesn't distinguish optional-with-default).
+/// always Mandatory: nushell extern syntax has no optional-with-default to
+/// distinguish.
 fn parse_type_suffix(s: &str) -> Option<OwnedParam> {
     let s = s.trim_start();
     let s = s.strip_prefix(':')?;
@@ -591,10 +563,9 @@ struct NuBlock {
     description: String,
 }
 
-/// look up a command's parsed result. source priority is native nushell,
-/// then manpage JSON, then help JSON. parent .nu files are searched for
-/// subcommand lookups because clap-generated .nu files contain all extern
-/// blocks in a single file.
+/// source priority: native nushell, then manpage JSON, then help JSON. parent
+/// .nu files are scanned for subcommand lookups since clap-generated .nu files
+/// hold all extern blocks in one file.
 pub fn lookup(dirs: &[PathBuf], command: &str) -> Option<ManpageResult> {
     for directory in dirs {
         for base_name in filename_candidates(command) {
@@ -634,7 +605,6 @@ pub fn lookup(dirs: &[PathBuf], command: &str) -> Option<ManpageResult> {
     None
 }
 
-/// look up a command's raw stored data (JSON or .nu source).
 pub fn lookup_raw(dirs: &[PathBuf], command: &str) -> Option<String> {
     for directory in dirs {
         for base_name in filename_candidates(command) {
@@ -669,8 +639,6 @@ fn chop_extension(filename: &str) -> Option<&str> {
         .or_else(|| filename.strip_suffix(".nu"))
 }
 
-/// list all indexed commands across all store directories.
-/// returns a sorted, deduplicated list of command names.
 pub fn all_commands(dirs: &[PathBuf]) -> Vec<String> {
     let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for directory in dirs {
@@ -688,11 +656,8 @@ pub fn all_commands(dirs: &[PathBuf]) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// remove every inshellah cache file (`.json` / `.nu`) from a single store
-/// directory. only those extensions are touched, so even a misaimed dir
-/// won't wipe unrelated files, and the directory itself is left in place.
-/// a missing directory is treated as already empty. returns how many files
-/// were removed.
+/// only `.json`/`.nu` are removed so a misaimed dir won't wipe unrelated files.
+/// missing dir counts as already empty.
 pub fn purge_dir(dir: &Path) -> io::Result<usize> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -715,7 +680,6 @@ pub fn purge_dir(dir: &Path) -> io::Result<usize> {
     Ok(removed)
 }
 
-/// discover subcommands of a command by scanning filenames in the store.
 pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand> {
     let mut seen: HashMap<String, ManpageSubcommand> = HashMap::new();
     let command_prefix = format!("{command} ");
@@ -768,8 +732,7 @@ pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand>
     out
 }
 
-/// determine how a command was indexed: "help", "manpage", "native", etc.
-/// for JSON files, returns the "source" field. for .nu files, returns "native".
+/// the JSON "source" field, or "native" for a .nu blob.
 pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
     for directory in dirs {
         for base in filename_candidates(command) {

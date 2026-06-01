@@ -1,8 +1,5 @@
-//! COMMANDS section subcommand extraction.
-//!
-//! some manpages (notably systemctl) have a dedicated COMMANDS section
-//! listing subcommands with descriptions. these use .PP + bold name +
-//! .RS/.RE blocks:
+//! COMMANDS section subcommand extraction. some manpages (systemctl) list
+//! subcommands as .PP + bold name + .RS/.RE description blocks:
 //!   .PP
 //!   \fBstart\fR \fIUNIT\fR...
 //!   .RS 4
@@ -13,8 +10,6 @@ use crate::parsers::manpage::ManpageSubcommand;
 use crate::parsers::manpage::desc;
 use crate::parsers::manpage::groff::{GroffLine, strip_groff_escapes, strip_inline_macro_args};
 
-/// validate that the extracted name looks like a subcommand: lowercase,
-/// at least 2 chars, no leading dash.
 fn is_valid_subcmd(name: &str) -> bool {
     name.len() >= 2
         && !name.starts_with('-')
@@ -23,13 +18,12 @@ fn is_valid_subcmd(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-/// extract subcommand name from a bold groff text like
+/// subcommand name from bold groff text:
 ///   "\fBlist\-units\fR [\fIPATTERN\fR...]" -> "list-units"
 fn extract_bold_command_name(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.len() >= 4 && trimmed.starts_with("\\fB") {
-        // look for \fB...\fR at the start: find the next '\\' and take
-        // the segment between \fB and there.
+        // segment between leading \fB and the next \
         let after = &trimmed[3..];
         let segment_end = after.find('\\').unwrap_or(after.len());
         let name_part = &after[..segment_end];
@@ -40,7 +34,6 @@ fn extract_bold_command_name(text: &str) -> Option<String> {
         }
         return None;
     }
-    // fallback: take the first whitespace-delimited word of the stripped text
     let stripped = strip_groff_escapes(trimmed);
     let first_word = stripped.split_whitespace().next().unwrap_or("");
     let name = normalize_command_token(first_word);
@@ -77,15 +70,13 @@ fn extract_command_name_from_line(line: &GroffLine) -> Option<String> {
     }
 }
 
-/// walk through commands section lines, extracting subcommand name+description
-/// pairs. handles two tagged-list layouts: `.PP` + bold name + `.RS/.RE`
-/// (systemctl, git) and `.TP` + `.B name` + body (the help2man tagged-list
-/// shape, e.g. widget's `.SH COMMANDS`).
+/// extract subcommand name+description pairs. handles two tagged-list layouts:
+/// `.PP` + bold name + `.RS/.RE` (systemctl, git) and `.TP` + `.B name` + body
+/// (help2man).
 ///
-/// only top-level entries are mined: `.PP`/`.TP` tags nested inside an `.RS`
-/// block are a command's own option/value sublists (e.g. bash's per-builtin
-/// `complete` flags), not sibling commands. tracking `.RS` depth keeps those
-/// out of the subcommand list.
+/// only top-level entries are mined: `.PP`/`.TP` tags nested in an `.RS` block
+/// are a command's own option/value sublists, not sibling commands; `.RS` depth
+/// keeps those out.
 pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -120,14 +111,13 @@ pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubc
             _ => i += 1,
         }
     }
-    // a tool may document the same command name across several `.TP` tags
-    // (bash repeats `bind`/`history` once per flag of that builtin). dedup at
-    // the parser layer so the cache holds the canonical, single-entry shape.
+    // a tool may repeat a command name across `.TP` tags (bash repeats `bind`
+    // once per builtin flag); dedup so the cache holds one entry.
     dedup_by_name(out)
 }
 
-/// keep one entry per case-insensitive name, preferring the longest
-/// description; preserves first-seen order.
+/// one entry per case-insensitive name, longest description wins, first-seen
+/// order preserved.
 fn dedup_by_name(raw: Vec<ManpageSubcommand>) -> Vec<ManpageSubcommand> {
     use std::collections::HashMap;
     let mut best: HashMap<String, usize> = HashMap::new();
@@ -149,13 +139,11 @@ fn dedup_by_name(raw: Vec<ManpageSubcommand>) -> Vec<ManpageSubcommand> {
     out
 }
 
-/// jj/clap group manpages list children in a `.SH SUBCOMMANDS` section as
-/// `.TP` cross-references: a term line like `jj\-bookmark\-advance(1)`
-/// followed by a description line. each child name is the xref with the
-/// shared parent prefix (derived from all the xrefs) and the `(N)` section
-/// suffix stripped, so multi-word names like `set-url` survive intact.
+/// jj/clap group manpages list children in `.SH SUBCOMMANDS` as `.TP`
+/// cross-references: a term line like `jj\-bookmark\-advance(1)` plus a
+/// description. child name = xref with the shared parent prefix and the `(N)`
+/// suffix stripped, so `set-url` survives intact.
 pub fn extract_subcommand_xrefs(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
-    // pass 1: collect the raw xref tokens and their descriptions.
     let mut raw: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -171,8 +159,8 @@ pub fn extract_subcommand_xrefs(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
             continue;
         };
         i += 1;
-        // require a manpage cross-reference shape, "...(N)", so this can't
-        // misfire on other tools' `.SH SUBCOMMAND` layouts.
+        // require the "...(N)" xref shape so this can't misfire on other tools'
+        // `.SH SUBCOMMAND` layouts.
         let term = strip_groff_escapes(term);
         let term = term.trim();
         let Some(token) = term.strip_suffix(')').and_then(|t| t.rsplit_once('(')) else {
@@ -190,7 +178,7 @@ pub fn extract_subcommand_xrefs(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
         i = new_i;
         raw.push((token.to_string(), first_sentence(&desc)));
     }
-    // pass 2: strip the prefix shared by every xref (e.g. "jj-bookmark-").
+    // strip the shared prefix (e.g. "jj-bookmark-").
     let prefix = shared_dash_prefix(raw.iter().map(|(t, _)| t.as_str()));
     raw.into_iter()
         .filter_map(|(token, desc)| {
@@ -203,8 +191,8 @@ pub fn extract_subcommand_xrefs(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
         .collect()
 }
 
-/// longest common prefix of the tokens, truncated to the last `-` so the
-/// remainder is a whole subcommand name. empty for fewer than two tokens.
+/// longest common prefix truncated to the last `-`, so the remainder is a
+/// whole subcommand name. empty for fewer than two tokens.
 fn shared_dash_prefix<'a>(tokens: impl Iterator<Item = &'a str>) -> String {
     let tokens: Vec<&str> = tokens.collect();
     let Some((first, rest)) = tokens.split_first() else {
@@ -229,9 +217,8 @@ fn shared_dash_prefix<'a>(tokens: impl Iterator<Item = &'a str>) -> String {
     }
 }
 
-/// collect an xref entry's description: text lines until the next
-/// .TP/.SH/.SS boundary. Text is already groff-stripped at classify time,
-/// so no inline-macro rendering is needed here.
+/// xref description: text lines until the next .TP/.SH/.SS. Text is already
+/// groff-stripped at classify time, so no inline-macro rendering here.
 fn collect_xref_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
     desc::collect(
         lines,
@@ -245,8 +232,8 @@ fn collect_xref_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
     )
 }
 
-/// collect the description for a subcommand entry. handles .RS/.RE blocks
-/// and stops at the next .PP/.SH/.SS boundary.
+/// subcommand description: handles .RS/.RE blocks, stops at the next
+/// .PP/.SH/.SS.
 fn collect_subcmd_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
     let mut acc: Vec<String> = Vec::new();
     let mut i = start;
@@ -254,7 +241,6 @@ fn collect_subcmd_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
         match &lines[i] {
             GroffLine::Macro { name, .. } if name == "RS" => {
                 i += 1;
-                // inside .RS — collect until .RE or boundary
                 while i < lines.len() {
                     match &lines[i] {
                         GroffLine::Macro { name, .. } if name == "RE" => {
@@ -284,7 +270,6 @@ fn collect_subcmd_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
     (acc.join(" "), i)
 }
 
-/// take the first sentence (up to '.') as the description.
 fn first_sentence(s: &str) -> String {
     let s = s.trim();
     match s.find('.') {

@@ -124,10 +124,9 @@ fn coredumpctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candida
         return None;
     }
     let last = spans.last().map(String::as_str).unwrap_or("");
-    // systemd units are valid only as the value of `-u`/`--unit`; the bare
-    // MATCH positional takes a PID, COMM, or executable path. only offer units
-    // when completing the `-u` value, so they don't leak into the positional
-    // (where they can never match a recorded coredump).
+    // units are valid only as the `-u`/`--unit` value; the bare MATCH positional
+    // takes a PID, COMM, or exe path. only offer units for `-u` so they don't
+    // leak into the positional where they can never match a recorded coredump.
     let prev = spans.get(spans.len() - 2).map(String::as_str).unwrap_or("");
     if prev == "-u" || prev == "--unit" {
         return unit_candidates(&[], last, ctx);

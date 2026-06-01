@@ -1,20 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! BFS-queue worker pool for parallel subprocess scraping.
+//! bfs-queue worker pool for parallel subprocess scraping. workers pull jobs
+//! from a shared queue and call a handler that can push child jobs back via a
+//! `Submitter`; when in-flight hits zero the pool shuts down and `wait` returns.
 //!
-//! workers pull jobs from a shared queue and call a user-supplied
-//! handler; the handler gets a `Submitter` to push newly-discovered
-//! child jobs back onto the same queue. when the in-flight count
-//! reaches zero the pool shuts down and `wait` returns.
-//!
-//! the queue-back design is deliberate: command-help trees are uneven
-//! (one binary has 30 subs, another has 1). queue-back keeps every
-//! worker fed; spawn-in-place would leave cores idle on lopsided trees.
-//!
-//! synchronization: `parking_lot::Condvar` parks workers when the queue is
-//! empty. the queue, in-flight count, and close state live under one mutex so
-//! the condvar predicate cannot miss a wakeup.
-//! parking_lot gives no-poison locks (no `Result` noise on every
-//! `lock()`) and a single-syscall fast path in the uncontended case.
+//! queue-back (not spawn-in-place) keeps workers fed on lopsided help trees
+//! (one binary has 30 subs, another 1). a parking_lot condvar parks idle
+//! workers; queue + in-flight + close state share one mutex so a wakeup can't
+//! be missed.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -25,17 +17,15 @@ use parking_lot::{Condvar, Mutex};
 
 struct State<J> {
     queue: VecDeque<J>,
-    /// jobs created but not yet completed. counts both queued and
-    /// in-progress jobs. workers can exit once wait() has closed the pool
-    /// and this reaches 0.
+    /// queued + in-progress jobs. workers exit once wait() closed the pool and
+    /// this hits 0.
     in_flight: usize,
-    /// set by wait(), which is also the point where top-level submission is
-    /// done. workers must not exit on transient empty periods before this.
+    /// set by wait(), once top-level submission is done. workers must not exit
+    /// on transient empties before this.
     closed: bool,
 }
 
-/// shared state held behind an `Arc` by every worker and by the
-/// submitter handles handed to the per-job handler.
+/// shared state behind an `Arc`, held by every worker and submitter.
 struct Inner<J> {
     state: Mutex<State<J>>,
     notify: Condvar,
@@ -66,15 +56,13 @@ impl<J> Inner<J> {
         let mut state = self.state.lock();
         state.in_flight -= 1;
         if state.closed && state.in_flight == 0 {
-            // we were the last in-flight job after wait() closed top-level
-            // submission, so parked workers can wake and exit.
+            // last in-flight after wait() closed submission; wake workers to exit.
             self.notify.notify_all();
         }
     }
 }
 
-/// cheap-to-clone handle that lets a job handler enqueue further jobs.
-/// passed by reference to the handler closure.
+/// cheap-to-clone handle for a handler to enqueue more jobs.
 pub struct Submitter<J> {
     inner: Arc<Inner<J>>,
 }
@@ -93,19 +81,14 @@ impl<J> Submitter<J> {
     }
 }
 
-/// BFS-queue worker pool. each worker pulls a job, calls the handler
-/// (which may submit further jobs via the passed `Submitter`), then marks
-/// the job complete. when in-flight reaches zero the pool shuts down and
-/// `wait` returns.
 pub struct ScrapePool<J> {
     inner: Arc<Inner<J>>,
     workers: Vec<JoinHandle<()>>,
 }
 
 impl<J: Send + 'static> ScrapePool<J> {
-    /// spawn `num_workers` threads that run `handler` on each job pulled
-    /// from the queue. the handler receives the job by value and a
-    /// `&Submitter` for enqueuing children.
+    /// spawn `num_workers` running `handler` on each job; the handler gets the
+    /// job by value and a `&Submitter` for children.
     pub fn new<F>(num_workers: usize, handler: F) -> Self
     where
         F: Fn(J, &Submitter<J>) + Send + Sync + 'static,
@@ -128,7 +111,7 @@ impl<J: Send + 'static> ScrapePool<J> {
                         inner: inner.clone(),
                     };
                     while let Some(job) = inner.next() {
-                        // keep panics from stranding in_flight
+                        // panics must not strand in_flight
                         let _ = catch_unwind(AssertUnwindSafe(|| handler(job, &submitter)));
                         inner.complete();
                     }
@@ -138,21 +121,18 @@ impl<J: Send + 'static> ScrapePool<J> {
         ScrapePool { inner, workers }
     }
 
-    /// submit a top-level job. typically called by the orchestrating
-    /// thread before `wait`; handlers should use `Submitter::submit`.
+    /// submit a top-level job (before `wait`); handlers use `Submitter::submit`.
     pub fn submit(&self, job: J) {
         self.inner.submit(job);
     }
 
-    /// block until all jobs (initial + transitively discovered) have
-    /// completed, then join every worker thread.
+    /// block until all jobs complete, then join workers.
     pub fn wait(self) {
         {
             let mut state = self.inner.state.lock();
             state.closed = true;
-            // Wake workers so they can either drain queued work or exit if
-            // the pool was empty. The close flag is guarded by this same lock,
-            // so this cannot race with a worker entering the condvar wait.
+            // wake workers to drain or exit; the close flag shares this lock,
+            // so it can't race a worker entering the wait.
             self.inner.notify.notify_all();
         }
         for w in self.workers {
@@ -187,7 +167,6 @@ mod tests {
 
     #[test]
     fn discovered_children_processed_to_completion() {
-        // BFS expansion: every odd number under 10 spawns its successor.
         let collected: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let pool = ScrapePool::new(2, {
             let collected = collected.clone();
@@ -247,7 +226,6 @@ mod tests {
             }
         });
 
-        // keep test output quiet
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         pool.submit(0);

@@ -26,10 +26,6 @@ type EntryParts<'a> = (
     (&'a str, Vec<&'a str>),
 );
 
-// parse a single flag entry: indent + switch + optional param + description.
-// switch_parser/param_parser already emit the owned model; the multi-line
-// description is trimmed and joined here (formerly the job of
-// From<&OptionEntry>).
 make_parser!(entry -> ManpageEntry,
     (
         space0,
@@ -52,8 +48,7 @@ make_parser!(entry -> ManpageEntry,
     }
 );
 
-/// dedup raw subcommands by case-insensitive name, keeping the entry with
-/// the longest description. preserves first-seen ordering.
+/// dedup by case-insensitive name, longest desc wins, first-seen order.
 fn dedup_subcommands(raw: Vec<ManpageSubcommand>) -> Vec<ManpageSubcommand> {
     let mut by_name: HashMap<String, ManpageSubcommand> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -136,9 +131,8 @@ fn parser_made_progress(original: &str, rem: &str) -> bool {
     rem.len() < original.len()
 }
 
-/// build the final HelpResult by scanning help text with lightweight section
-/// awareness. options are accepted in option-like sections and before a
-/// section is known; subcommands are accepted only in command-like sections.
+/// options match in option-like sections and before any section is known,
+/// subcommands only in command-like sections.
 fn build_help_result(original: &str) -> ManpageResult {
     let mut entries: Vec<ManpageEntry> = Vec::new();
     let mut raw_subcommands: Vec<ManpageSubcommand> = Vec::new();
@@ -174,9 +168,7 @@ fn build_help_result(original: &str) -> ManpageResult {
         rem = consume_line(rem);
     }
 
-    // subcommand names are lowercased here (formerly From<&Subcommand>): file
-    // naming stays consistent and recursive --help probes use the lowercase
-    // form, which is what most CLIs dispatch on.
+    // recursive --help probes dispatch on the lowercase name.
     let subcommands = dedup_subcommands(raw_subcommands)
         .into_iter()
         .map(|sc| ManpageSubcommand {
@@ -184,9 +176,8 @@ fn build_help_result(original: &str) -> ManpageResult {
             desc: sc.desc,
         })
         .collect();
-    // cli11 positional section takes priority over the usage-line scan
-    // when both are present — cli11 carries types and optionality. names are
-    // lowercased for stable output across the extraction sites.
+    // cli11 positional section carries types and optionality, prefer it over
+    // the usage-line scan.
     let positionals_raw = match extract_cli11_positionals(original) {
         Ok((_, p)) if !p.is_empty() => p,
         _ => extract_usage_positionals(original)
@@ -208,8 +199,6 @@ fn build_help_result(original: &str) -> ManpageResult {
     result
 }
 
-/// top-level help parser. Emits the owned `ManpageResult` directly, so callers
-/// no longer convert a separate borrowed `HelpResult`.
 pub fn help_parser(s: &str) -> IResult<&str, ManpageResult> {
     Ok(("", build_help_result(s)))
 }

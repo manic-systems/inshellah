@@ -1,8 +1,5 @@
-//! strategy-based entry extraction.
-//!
-//! rather than a single monolithic parser, we use multiple "strategies" that
-//! each target a specific groff formatting pattern. this is necessary because
-//! manpage authors use very different macro combinations for the same purpose.
+//! one strategy per groff formatting pattern, since authors use different macro
+//! combinations for the same purpose.
 
 use nom::{Parser, combinator::opt};
 
@@ -14,8 +11,6 @@ use crate::parsers::manpage::groff::{
 };
 use crate::parsers::manpage::{ManpageEntry, OwnedParam, OwnedSwitch};
 
-/// collect consecutive text lines, joining them with spaces.
-/// returns (collected, remaining).
 fn collect_text_lines(lines: &[GroffLine]) -> (String, &[GroffLine]) {
     let mut acc: Vec<&str> = Vec::new();
     let mut i = 0;
@@ -30,10 +25,7 @@ fn collect_text_lines(lines: &[GroffLine]) -> (String, &[GroffLine]) {
 }
 
 fn collect_description_lines(lines: &[GroffLine], start: usize) -> (String, usize) {
-    // a blank line ends the description, but only after some text was
-    // collected — leading blanks between the tag and the first body line
-    // are skipped. this caps clap-style "summary\n\nexpanded body" entries
-    // (jj, etc.) at the summary, which is what completion tooltips want.
+    // stop_on_blank caps clap-style "summary\n\nbody" entries at the summary
     desc::collect(
         lines,
         start,
@@ -46,9 +38,8 @@ fn collect_description_lines(lines: &[GroffLine], start: usize) -> (String, usiz
     )
 }
 
-/// attempt to parse a tag string (e.g. "-v, --verbose FILE") into an entry.
-/// uses the nom switch_parser + param_parser from the help module.
-/// returns None if the tag doesn't look like a flag definition.
+/// parse a tag string (e.g. "-v, --verbose FILE") into an entry, None if it
+/// isn't a flag definition.
 pub fn parse_tag_to_entry(tag: &str, desc: String) -> Option<ManpageEntry> {
     let tag = strip_groff_escapes(tag);
     let tag = tag.trim();
@@ -60,9 +51,8 @@ pub fn parse_tag_to_entry(tag: &str, desc: String) -> Option<ManpageEntry> {
     }
 }
 
-/// extract tag text from a macro line.
-/// .B and .I preserve spaces (single argument); .BI, .BR, .IR alternate
-/// fonts and concatenate arguments.
+/// .B and .I preserve spaces (single argument); .BI, .BR, .IR alternate fonts
+/// and concatenate arguments.
 pub fn tag_of_macro(name: &str, args: &str) -> String {
     match name {
         "B" | "I" => strip_space_macro_args(args),
@@ -72,10 +62,8 @@ pub fn tag_of_macro(name: &str, args: &str) -> String {
     }
 }
 
-// strategy a: .TP style (most common — gnu coreutils, help2man).
-// .TP introduces a tagged paragraph: the next line is the "tag" (flag name)
-// and subsequent text lines are the description. the tag can be plain text
-// or wrapped in a formatting macro (.B, .BI, etc.).
+// .TP style (gnu coreutils, help2man). line after .TP is the tag (plain or
+// wrapped in .B/.BI/...), then description text lines.
 pub fn strategy_tp(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -169,14 +157,9 @@ fn combine_short_long_alternates(
     }
 }
 
-// strategy b: .IP style (curl, hand-written manpages).
-// .IP takes an inline tag argument: .IP "-v, --verbose"
-// the description follows as text lines.
-//
-// .RS/.RE depth-aware: man pages frequently nest .IP inside .RS blocks to
-// list example values (e.g. bat's `.IP "caret"` under `--nonprintable-notation`).
-// those nested tags look like flag definitions and confuse the parser, so we
-// only treat `.IP` at outer scope as a flag entry.
+// .IP style (curl, hand-written manpages). inline tag arg `.IP "-v, --verbose"`.
+// nested .IP inside .RS lists example values that look like flags, so only
+// outer-scope .IP counts.
 pub fn strategy_ip(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -212,11 +195,8 @@ pub fn strategy_ip(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     out
 }
 
-// strategy b': .HP style (bat, help2man with hanging paragraphs).
-// .HP introduces a hanging-indent paragraph: the next text line is the tag,
-// followed by an empty `.IP` macro that starts the description body. example
-// value listings are wrapped in `.RS/.RE` and skipped during description
-// collection.
+// .HP hanging-indent (bat, help2man). next text line is the tag, then an empty
+// `.IP` opens the description body. `.RS/.RE` listings skipped.
 //
 //   .HP
 //   \fB\-A\fR, \fB\-\-show\-all\fR
@@ -257,10 +237,8 @@ pub fn strategy_hp(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     out
 }
 
-/// description collector for `.HP` entries. stops at the next flag-boundary
-/// macro (`.HP`, `.TP`, `.PP`, `.SH`, `.SS`) and skips entire `.RS/.RE`
-/// example blocks — those are sub-value listings, not part of the flag's
-/// own description text.
+/// `.HP` description collector. `.RS/.RE` blocks are sub-value listings, not
+/// the flag's own description.
 fn collect_hp_description(lines: &[GroffLine], start: usize) -> (String, usize) {
     desc::collect(
         lines,
@@ -274,26 +252,20 @@ fn collect_hp_description(lines: &[GroffLine], start: usize) -> (String, usize) 
     )
 }
 
-// strategy b'': bare Text tag immediately followed by `.RS/.RE` (ripgrep,
-// some help2man variants). like the `.PP+.RS` shape, but with no `.PP`
-// anchor between flag entries — flags sit directly under `.SS` headers
-// separated only by `.sp`:
+// bare Text tag immediately followed by `.RS/.RE` (ripgrep, some help2man
+// variants). like `.PP+.RS` but with no `.PP` anchor; flags sit directly under
+// `.SS` headers separated only by `.sp`:
 //
 //   .SS INPUT OPTIONS
 //   \fB\-e\fP \fIPATTERN\fP, \fB\-\-regexp\fP=\fIPATTERN\fP
 //   .RS 4
 //   A pattern to search for ...
 //   .RE
-//   .sp
-//   \fB\-f\fP \fIPATTERNFILE\fP, \fB\-\-file\fP=\fIPATTERNFILE\fP
-//   .RS 4
-//   ...
 //
-// we only treat a top-level Text line as a tag when an `.RS` immediately
-// follows (skipping blanks/comments) and the text starts with `-`. nested
-// Text lines inside an existing `.RS` block are skipped via depth tracking
-// so description paragraphs that happen to begin with a flag reference
-// don't get mis-recognized.
+// a top-level Text line is a tag only when an `.RS` immediately follows
+// (skipping blanks/comments) and it starts with `-`. depth tracking skips
+// nested Text so a description paragraph starting with a flag isn't taken as a
+// tag.
 pub fn strategy_text_rs(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let mut out = Vec::new();
     let mut rs_depth: u32 = 0;
@@ -332,10 +304,8 @@ pub fn strategy_text_rs(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     out
 }
 
-// strategy c: .PP + .RS/.RE style (git, docbook-generated manpages).
-// flag entries are introduced by .PP (paragraph), with the flag name as
-// plain text, followed by a .RS (indent) block containing the description,
-// closed by .RE (de-indent).
+// .PP + plain-text flag name + .RS description block + .RE (git,
+// docbook-generated manpages).
 make_macro_walker!(pub strategy_pp_rs -> Vec<ManpageEntry>, on macro "PP" =>
     |lines, i, _args| {
         if i + 1 >= lines.len() { return None; }
@@ -351,14 +321,11 @@ make_macro_walker!(pub strategy_pp_rs -> Vec<ManpageEntry>, on macro "PP" =>
 fn collect_pp_rs_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
     let mut acc: Vec<String> = Vec::new();
     let mut i = start;
-    // outer: look for .RS marker or text
     while i < lines.len() {
         match &lines[i] {
             GroffLine::Macro { name, .. } if name == "RS" => {
-                // depth-tracked .RS walk. some manpages nest a sub-value
-                // .RS/.RE inside the flag's main .RS block — without
-                // tracking depth here, the inner `.RE` would end the
-                // description early and leave the outer block half-parsed.
+                // depth-tracked so a nested sub-value `.RE` doesn't end the
+                // description early.
                 let mut depth: u32 = 1;
                 i += 1;
                 while i < lines.len() && depth > 0 {
@@ -372,8 +339,7 @@ fn collect_pp_rs_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
                             i += 1;
                         }
                         GroffLine::Text(t) => {
-                            // skip Text inside nested .RS blocks (sub-value
-                            // listings, not part of the flag's own desc).
+                            // deeper .RS Text is a sub-value listing, not desc.
                             if depth == 1 {
                                 acc.push(t.clone());
                             }
@@ -382,9 +348,7 @@ fn collect_pp_rs_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
                         GroffLine::Macro { name, .. }
                             if name == "PP" || name == "SH" || name == "SS" =>
                         {
-                            // section/paragraph boundary — abort even with
-                            // an unclosed .RS (malformed manpage) so we
-                            // don't run off to EOF.
+                            // abort even on an unclosed .RS so this can't run to EOF.
                             return (acc.join(" "), i);
                         }
                         _ => i += 1,
@@ -402,8 +366,7 @@ fn collect_pp_rs_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
     (acc.join(" "), i)
 }
 
-/// strategy d: deroff fallback — strip all groff markup, then feed the
-/// resulting plain text through the help parser.
+/// deroff fallback. strip all groff markup, feed plain text to the help parser.
 pub fn strategy_deroff(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let mut buffer = String::with_capacity(256);
     for line in lines {
@@ -424,7 +387,6 @@ pub fn strategy_deroff(lines: &[GroffLine]) -> Vec<ManpageEntry> {
         }
     }
     match help_parser(&buffer) {
-        // help_parser already emits owned ManpageEntry with a joined desc.
         Ok((_, result)) => result.entries,
         Err(_) => Vec::new(),
     }
@@ -434,14 +396,11 @@ fn is_bullet_ip(args: &str) -> bool {
     !args.trim().is_empty()
 }
 
-// strategy e: nix3-style bullet .IP with .UR/.UE hyperlinks.
-// nix's manpages use .IP with bullet markers for flag entries, interleaved
-// with .UR/.UE hyperlink macros. the flag tag is in text lines after the
-// bullet .IP, and the description follows a non-bullet .IP marker.
+// nix3-style bullet .IP with .UR/.UE hyperlinks. tag is the text after a bullet
+// .IP (interleaved with .UR/.UE); description follows a non-bullet .IP marker.
 make_macro_walker!(pub strategy_nix -> Vec<ManpageEntry>, on macro "IP" =>
     |lines, i, args| {
         if !is_bullet_ip(args) { return None; }
-        // collect tag: skip .UR/.UE macros, gather Text lines
         let mut tag_idx = i + 1;
         let mut tag_parts: Vec<String> = Vec::new();
         while tag_idx < lines.len() {
@@ -467,7 +426,7 @@ fn collect_nix_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
         return (String::new(), start);
     }
     let mut i = start;
-    // require non-bullet .IP marker for description
+    // a non-bullet .IP marker opens the description body
     if let GroffLine::Macro { name, args } = &lines[i]
         && name == "IP"
         && args.trim().is_empty()
@@ -485,10 +444,9 @@ fn collect_nix_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
             }
             GroffLine::Macro { name, args } if name == "IP" => {
                 if !args.trim().is_empty() {
-                    // next bullet entry — stop
+                    // bullet = next entry; non-bullet = continuation paragraph
                     return (parts.join(" "), i);
                 }
-                // non-bullet .IP = continuation paragraph
                 i += 1;
             }
             GroffLine::Macro { name, .. } if name == "SS" || name == "SH" => {
@@ -526,7 +484,6 @@ fn skip_rs(lines: &[GroffLine], start: usize, mut depth: usize) -> usize {
     i
 }
 
-/// count occurrences of a specific macro in the section.
 fn count_macro(name: &str, lines: &[GroffLine]) -> usize {
     lines
         .iter()
@@ -567,12 +524,8 @@ fn specialized_candidates(lines: &[GroffLine]) -> Vec<(&'static str, Vec<Manpage
         .collect()
 }
 
-/// tie-break priority for a strategy, higher wins. when two strategies
-/// extract the same number of entries, this explicit ranking decides — so
-/// editing or reordering the candidate list can no longer silently change
-/// which strategy wins (the old code resolved ties by `>=` push order, an
-/// invisible coupling). the values preserve that historical order: the
-/// later a strategy was pushed, the higher it ranked on a tie.
+/// tie-break priority, higher wins on equal entry counts. explicit so
+/// reordering the candidate list can't silently change the winner.
 fn strategy_priority(tag: &str) -> u8 {
     match tag {
         "TP" => 0,
@@ -585,8 +538,7 @@ fn strategy_priority(tag: &str) -> u8 {
     }
 }
 
-/// pick the strongest candidate: most entries first, then the deterministic
-/// `strategy_priority` tie-break.
+/// most entries first, then the `strategy_priority` tie-break.
 fn best_entries(candidates: Vec<(&'static str, Vec<ManpageEntry>)>) -> Option<Vec<ManpageEntry>> {
     candidates
         .into_iter()
@@ -618,14 +570,12 @@ fn entry_sections(lines: &[GroffLine]) -> Vec<&[GroffLine]> {
 
 /// auto-detect and try strategies.
 ///
-/// Manpages can mix option layouts by subsection (for example, a `.TP`
-/// "global options" section followed by a ripgrep-style Text+RS section).
-/// Running the strategies once globally and picking the largest result loses
-/// the smaller subsection. Instead, once any structured strategy works for
-/// the full input, split at `.SH`/`.SS` boundaries and keep the best
-/// structured result per local section. The broad deroff fallback is still
-/// used only when no structured strategy works anywhere, which keeps it from
-/// mining unrelated prose subsections for false positives.
+/// manpages can mix option layouts by subsection (a `.TP` global-options
+/// section then a ripgrep-style Text+RS one). picking the single largest global
+/// result loses the smaller subsection, so once any structured strategy works,
+/// split at `.SH`/`.SS` and keep the best per section. the deroff fallback runs
+/// only when nothing structured works anywhere, so it can't mine prose for
+/// false positives.
 pub fn extract_entries(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let whole_candidates = specialized_candidates(lines);
     if whole_candidates.is_empty() {

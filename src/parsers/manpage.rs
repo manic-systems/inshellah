@@ -1,26 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! parse unix manpages (groff/mdoc format) into a structured result.
-//!
-//! manpages are written in roff/groff markup — a decades-old typesetting language
-//! used by man(1). this module strips the formatting and extracts structured data
-//! (flags, subcommands, positionals) from the raw groff source.
-//!
-//! there are two major manpage macro packages:
-//!   - man (groff) — used by gnu/linux tools. uses macros like .SH, .TP, .IP, .PP
-//!   - mdoc (bsd) — used by bsd tools. uses .Sh, .Fl, .Ar, .Op, .It, .Bl/.El
-//!
-//! this module handles both, auto-detecting the format by checking for .Sh macros.
-//!
-//! for groff manpages, flag extraction uses multiple "strategies" that target
-//! different common formatting patterns:
-//!   - strategy_tp: .TP tagged paragraphs (gnu coreutils, help2man)
-//!   - strategy_ip: .IP indented paragraphs (curl, hand-written)
-//!   - strategy_pp_rs: .PP + .RS/.RE blocks (git, docbook)
-//!   - strategy_nix: nix3-style bullet .IP with .UR/.UE hyperlinks
-//!   - strategy_deroff: fallback — strip all groff, feed to help text parser
-//!
-//! the module tries all applicable strategies and picks the one that extracts
-//! the most flag entries, on the theory that more results = better match.
+//! parse unix manpages (groff/mdoc) into a structured result.
 
 mod commands;
 mod desc;
@@ -67,23 +46,16 @@ pub struct ManpageSubcommand {
 pub struct ManpageResult {
     pub entries: Vec<ManpageEntry>,
     pub subcommands: Vec<ManpageSubcommand>,
-    /// values for a positional argument, mined from prose (getent's database
-    /// names under DESCRIPTION). kept distinct from `subcommands` so they
-    /// never flow into the real-child paths (recursion, supplement, prefix
-    /// stripping) — they're completion choices for an argument slot, not
-    /// commands. surfaced at the completion/extern layer.
+    /// prose-mined positional-slot values, kept out of `subcommands` so they never
+    /// flow into real-child paths (recursion, supplement, prefix stripping).
     pub positional_choices: Vec<ManpageSubcommand>,
     pub positionals: Vec<(String, Positional)>,
     pub description: String,
 }
 
 impl ManpageResult {
-    /// canonicalize the entry list before persistence: fold non-adjacent
-    /// Short/Long pairs into `Both`, then dedup by key, and clamp every
-    /// description to a tooltip length. always called once at the end of a
-    /// parse path so the JSON cache holds the canonical shape and downstream
-    /// consumers (runtime completer, static `extern` generation) don't have
-    /// to repeat the work.
+    /// canonicalise so the cache holds one shape. runs once at the end of every
+    /// parse path.
     pub fn normalize(&mut self) {
         let entries = std::mem::take(&mut self.entries);
         self.entries = dedup_entries(merge_short_long_pairs(entries));
@@ -97,15 +69,11 @@ impl ManpageResult {
     }
 }
 
-/// soft cap on a description before it becomes a completion tooltip. past
-/// this we break on the next word boundary: even an ultrawide terminal rarely
-/// shows more than this horizontally, and nushell truncates the menu anyway.
+/// soft cap on a tooltip description; nushell truncates the menu anyway.
 const MAX_DESC_LEN: usize = 256;
 
-/// clamp a description in place to `MAX_DESC_LEN`, breaking on the first space
-/// at or after the cap so a word is never split, and marking the cut with `…`.
-/// an unbroken token past the cap is hard-cut at the cap. shorter descriptions
-/// are left untouched.
+/// break on the first space at or after the cap so a word is never split; an
+/// unbroken token is hard-cut.
 pub(crate) fn clamp_description(desc: &mut String) {
     let Some((cut, _)) = desc.char_indices().nth(MAX_DESC_LEN) else {
         return;
@@ -141,24 +109,13 @@ fn entry_score(e: &ManpageEntry) -> i32 {
 type ShortAliasCandidate = (usize, char, Option<OwnedParam>);
 type LongAliasCandidate<'a> = (usize, &'a str);
 
-/// collapse duplicate flag entries that refer to the same flag.
+/// collapse duplicate entries for the same flag. manpages emit dups: clap lists
+/// inherited globals, btrfs documents a flag as both a deprecated alias and a
+/// global option, example blocks restate flags.
 ///
-/// real-world manpages emit duplicates for several reasons:
-///   - clap subcommand pages list inherited global flags alongside the
-///     subcommand's own (e.g. every `homectl <verb>.1` mentions `--json`)
-///   - tools like btrfs document a flag once as a "deprecated alias" and
-///     once under the "Global options" group
-///   - help text occasionally restates a flag in an example block that the
-///     parser also picks up
-///
-/// for each key (the canonical `-c` / `--long` form), we keep the highest
-/// scoring entry: `Both` outranks bare Short/Long, param-bearing outranks
-/// param-less, longer description outranks shorter. after that we strip
-/// standalone Short entries whose char is already covered by a `Both`,
-/// since they're now redundant with the merged form.
-///
-/// preserves original ordering: the surviving entry sits where the first
-/// occurrence of its key appeared.
+/// per key keep the highest-scoring entry, then strip standalone Shorts whose
+/// char a surviving `Both` already covers. survivor sits at its key's first
+/// occurrence so order is stable.
 pub fn dedup_entries(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -204,27 +161,21 @@ pub fn dedup_entries(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
     out
 }
 
-/// merge non-adjacent Short/Long entries into a single `Both` entry only when
-/// the match is low-risk. some manpage styles emit `-h` and `--help` as
-/// independent .TP / .IP blocks rather than as the comma-joined `-h, --help`
-/// form that `combine_short_long_alternates` already handles.
+/// merge non-adjacent Short/Long entries into a single `Both`. some styles emit
+/// `-h` and `--help` as independent .TP/.IP blocks, not the comma-joined form
+/// `combine_short_long_alternates` handles.
 ///
-/// pairing rule (deliberately conservative): a Short and a Long pair up only
-/// when they are the only entries with that exact non-empty description, the
-/// short character looks like an abbreviation for the long name, and the
-/// description has enough substance to identify the option. tiny generic
-/// descriptions are allowed only for common obvious aliases such as help and
-/// version. wrong aliases are worse than missing synthesized aliases.
+/// conservative since a wrong alias is worse than a missing one: the two must be
+/// the only entries sharing that exact non-empty description, the short must
+/// abbreviate the long, and tiny generic descriptions pair only for obvious
+/// aliases.
 pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
     use std::collections::HashMap;
     use std::collections::HashSet;
 
-    // index `Both` pairs already present so we never synthesize a duplicate.
-    // some manpages re-state a flag in multiple sections (an OPTIONS body
-    // line `-h, --help` plus a SYNOPSIS-only stub) and the entry list ends
-    // up with all three forms — Both, standalone Short, standalone Long —
-    // for the same flag. without this check, pairing the standalone pair
-    // would emit a second Both with the same (c, l).
+    // a flag restated across sections can yield all three forms (Both, standalone
+    // Short, standalone Long); index existing Both so pairing doesn't emit a
+    // second Both with the same (c, l).
     let mut existing_both: HashSet<(char, &str)> = HashSet::new();
     for e in entries.iter() {
         if let OwnedSwitch::Both(c, l) = &e.switch {
@@ -268,9 +219,7 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
         {
             let (s_idx, c, s_param) = &shorts[0];
             if existing_both.contains(&(*c, l.as_str())) {
-                // a Both(c, l) with the same chars already exists, so the
-                // standalone Short+Long pair is redundant — drop both rather
-                // than emit a duplicate Both.
+                // matching Both already present; drop the redundant standalone pair.
                 to_drop.insert(*s_idx);
                 to_drop.insert(i);
                 out.push(e.clone());
@@ -322,9 +271,6 @@ fn is_common_obvious_alias(short: char, long: &str) -> bool {
     )
 }
 
-/// parse a manpage from its classified lines.
-/// auto-detects mdoc vs groff format. for groff, runs the multi-strategy
-/// extraction pipeline.
 pub fn parse_manpage_lines(lines: &[GroffLine]) -> ManpageResult {
     let mut result = parse_manpage_lines_raw(lines);
     result.normalize();
@@ -337,10 +283,8 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
     } else {
         let options_section = sections::extract_options_section(lines);
         let mut entries = strategies::extract_entries(&options_section);
-        // merge SYNOPSIS-only flags (nix-env's `[{--profile | -p} path]`
-        // pattern, where the flag is declared in the synopsis but never
-        // listed as an entry in the OPTIONS body). body entries take
-        // precedence on duplicate names — they carry the descriptions.
+        // flags declared only in the synopsis, never in OPTIONS. body wins on dup
+        // names since it carries the description.
         let synopsis_flags = sections::extract_synopsis_flags(lines);
         if !synopsis_flags.is_empty() {
             let have_long: std::collections::HashSet<String> = entries
@@ -374,17 +318,16 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
         let commands_section = sections::extract_commands_section(lines);
         let mut subcommands = commands::extract_subcommands_from_commands(&commands_section);
         if subcommands.is_empty() {
-            // jj/clap group pages list children as `.SH SUBCOMMANDS` xref
-            // entries instead of an inline COMMANDS layout.
+            // jj/clap group pages list children as `.SH SUBCOMMANDS` xref entries
+            // instead of an inline COMMANDS layout.
             let xref_section = sections::extract_subcommand_list_section(lines);
             if !xref_section.is_empty() {
                 subcommands = commands::extract_subcommand_xrefs(&xref_section);
             }
         }
         if !subcommands.is_empty() {
-            // drop the synopsis's `<subcommands>` placeholder so it can't
-            // fall through to file completion when a typed prefix matches
-            // no child.
+            // drop the synopsis `<subcommands>` placeholder so it can't fall
+            // through to file completion when a prefix matches no child.
             positionals.retain(|(name, _)| {
                 !matches!(
                     name.to_ascii_lowercase().as_str(),
@@ -392,9 +335,8 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
                 )
             });
         }
-        // prose-mined positional value choices (getent's database names) go
-        // to their own channel, never `subcommands` — they're argument values,
-        // not real children. skip any that collide with a real subcommand name.
+        // prose-mined choices go to their own channel; skip collisions with a real
+        // subcommand name.
         let positional_choices = sections::extract_description_positionals(lines)
             .into_iter()
             .filter(|choice| {
@@ -413,8 +355,6 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
     }
 }
 
-/// parse a manpage from its raw string contents.
-/// splits into lines, parses, then extracts the NAME section description.
 pub fn parse_manpage_string(contents: &str) -> ManpageResult {
     let lines: Vec<GroffLine> = contents.split('\n').map(classify_line).collect();
     let mut result = parse_manpage_lines(&lines);
@@ -424,13 +364,9 @@ pub fn parse_manpage_string(contents: &str) -> ManpageResult {
     result
 }
 
-/// parse a manpage and also pull out clap-style `.SH SUBCOMMAND` sections
-/// as separate per-subcommand results. each subcommand section in a
-/// clap-generated manpage is its own command with its own flags; the
-/// parent's subcommand list is populated from their names.
-///
-/// returns (main_result, sub_results) where each sub_result has
-/// name=full_command ("nh os"), desc, and its own ManpageResult.
+/// also pull clap-style `.SH SUBCOMMAND` sections out as separate per-subcommand
+/// results; the parent's subcommand list comes from their names. each sub keyed
+/// by full command ("nh os").
 pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, ManpageResult)>) {
     let lines: Vec<GroffLine> = contents.split('\n').map(classify_line).collect();
     let mut result = parse_manpage_lines(&lines);
@@ -439,8 +375,7 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
     }
     let sub_sections = sections::extract_subcommand_sections(&lines);
     if !sub_sections.is_empty() {
-        // overwrite subcommands with the SUBCOMMAND-section names —
-        // these are the authoritative list for clap-generated manpages.
+        // SUBCOMMAND-section names are authoritative for clap manpages.
         result.subcommands = sub_sections
             .iter()
             .map(|(name, desc, _)| {
@@ -453,11 +388,9 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
             })
             .collect();
     }
-    // each SUBCOMMAND section body is parsed via the same strategy-picker
-    // as the top-level OPTIONS section — clap puts flag definitions
-    // directly under the .SH SUBCOMMAND header with no inner .SH wrapping,
-    // so parse_manpage_lines (which looks for a child OPTIONS section)
-    // would come back empty.
+    // clap puts flags directly under the .SH SUBCOMMAND header with no inner .SH,
+    // so parse_manpage_lines (which wants a child OPTIONS) comes back empty; parse
+    // each body with the same strategy-picker as top-level OPTIONS.
     let subs: Vec<(String, ManpageResult)> = sub_sections
         .into_iter()
         .map(|(name, desc, lines)| {
@@ -479,8 +412,7 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
     (result, subs)
 }
 
-/// read a manpage file from disk. handles .gz compressed files (the common
-/// case — most installed manpages are gzipped). plain text files are read directly.
+/// decompresses .gz (most installed manpages).
 pub fn read_manpage_file<P: AsRef<Path>>(path: P) -> io::Result<String> {
     let path = path.as_ref();
     let bytes = std::fs::read(path)?;
@@ -494,7 +426,6 @@ pub fn read_manpage_file<P: AsRef<Path>>(path: P) -> io::Result<String> {
     }
 }
 
-/// read + parse a manpage file in one step.
 pub fn parse_manpage_file<P: AsRef<Path>>(path: P) -> io::Result<ManpageResult> {
     let contents = read_manpage_file(path)?;
     Ok(parse_manpage_string(&contents))
@@ -517,7 +448,6 @@ mod tests {
         let word = "lorem ipsum ";
         let mut d = word.repeat(40); // ~480 chars
         clamp_description(&mut d);
-        // cut at the first space at or after the cap, never mid-word.
         assert!(d.ends_with('…'));
         assert!(d.chars().count() <= MAX_DESC_LEN + 16);
         let body = d.trim_end_matches('…');
@@ -529,14 +459,13 @@ mod tests {
     fn clamp_hard_cuts_an_unbroken_token_with_no_trailing_space() {
         let mut d = "x".repeat(400);
         clamp_description(&mut d);
-        // no whitespace past the cap → hard cut at the cap, still marked.
         assert_eq!(d.chars().count(), MAX_DESC_LEN + 1);
         assert!(d.ends_with('…'));
     }
 
     #[test]
     fn clamp_respects_utf8_char_boundaries() {
-        // multibyte chars straddling the cap must not panic or split a code point.
+        // multibyte chars straddling the cap must not split a code point.
         let mut d = "é".repeat(400);
         clamp_description(&mut d);
         assert!(d.ends_with('…'));
@@ -589,9 +518,8 @@ Set the language.
 
     #[test]
     fn hp_strategy_extracts_flags_and_skips_rs_example_values() {
-        // bat's manpage uses .HP for flag tags and nests example values in
-        // .RS/.RE — the parser should pick up the three real flags and
-        // ignore the inner .IP "caret" / .IP "unicode" example tags.
+        // bat uses .HP for flag tags and nests example values in .RS/.RE; the inner
+        // .IP "caret"/"unicode" tags are not flags.
         let r = parse_manpage_string(HP_MANPAGE);
         let names: Vec<String> = r
             .entries
@@ -646,12 +574,9 @@ Second flag desc.
 
     #[test]
     fn text_rs_strategy_handles_nested_rs_in_description() {
-        // when a flag's `.RS` body contains a nested `.RS/.RE` (sub-value
-        // listing), depth tracking in `collect_pp_rs_desc` must keep the
-        // outer block intact instead of ending early at the inner `.RE`.
-        // without it, the second flag's tag (`-y, --bar`) would be
-        // mis-recognized as new top-level text and parsed twice / out of
-        // order, or the first desc would be truncated.
+        // a flag's `.RS` body nesting another `.RS/.RE` must not end early at the
+        // inner `.RE`, else the next flag's tag is misread as top-level text or the
+        // first desc is truncated.
         let r = parse_manpage_string(TEXT_RS_NESTED_MANPAGE);
         assert_eq!(
             r.entries.len(),
@@ -708,9 +633,8 @@ Only show matches surrounded by line boundaries.
 
     #[test]
     fn text_rs_strategy_extracts_ripgrep_style_flags() {
-        // rg's manpage layout: bare Text tag immediately followed by `.RS/.RE`,
-        // separated by `.sp` — no `.PP` to anchor on. covers both the
-        // `-s PARAM, --long=PARAM` form and the simpler `-s, --long` form.
+        // rg's layout: bare Text tag immediately followed by `.RS/.RE`, separated
+        // by `.sp`, no `.PP` to anchor on.
         let r = parse_manpage_string(TEXT_RS_MANPAGE);
         assert_eq!(
             r.entries.len(),
@@ -718,7 +642,7 @@ Only show matches surrounded by line boundaries.
             "expected 3 entries, got {}",
             r.entries.len()
         );
-        // -e, --regexp with PARAM between short and comma
+        // PARAM between short and comma
         assert!(matches!(
             r.entries[0].switch,
             OwnedSwitch::Both('e', ref l) if l == "regexp"
@@ -728,12 +652,11 @@ Only show matches surrounded by line boundaries.
             Some(OwnedParam::Mandatory(ref p)) if p == "PATTERN"
         ));
         assert!(r.entries[0].desc.starts_with("A pattern to search for"));
-        // -f, --file with PARAM
         assert!(matches!(
             r.entries[1].switch,
             OwnedSwitch::Both('f', ref l) if l == "file"
         ));
-        // -x, --line-regexp without PARAM (plain comma form)
+        // plain comma form, no PARAM
         assert!(matches!(
             r.entries[2].switch,
             OwnedSwitch::Both('x', ref l) if l == "line-regexp"
@@ -756,10 +679,9 @@ Print help
 
     #[test]
     fn tp_strategy_stops_description_at_blank_line() {
-        // clap-generated manpages emit "summary\n\nexpanded body" — we want
-        // just the summary for completion tooltips, not the multi-paragraph
-        // wall of text. leading blanks (between tag and first body line)
-        // are still skipped, blanks only terminate once we've collected text.
+        // clap emits "summary\n\nexpanded body"; keep just the summary. leading
+        // blanks (tag to first body line) skip; blanks only terminate once text is
+        // collected.
         let r = parse_manpage_string(TP_CLAP_DUAL_PARAGRAPH);
         let at_op = r
             .entries
@@ -771,8 +693,7 @@ Print help
             "expected only the summary line, got: {:?}",
             at_op.desc
         );
-        // sanity: the second .TP block still parses (we didn't accidentally
-        // swallow the next entry).
+        // the second .TP block still parses (next entry not swallowed).
         assert!(r.entries.iter().any(|e| matches!(
             &e.switch,
             OwnedSwitch::Both('h', l) if l == "help"
@@ -800,9 +721,8 @@ Print help
         assert!(r.entries[0].desc.contains("verbosity"));
     }
 
-    // jj/clap group pages enumerate children as `.SH SUBCOMMANDS` xref
-    // entries (`jj\-bookmark\-advance(1)` + desc), not an inline COMMANDS
-    // layout. the parser must populate `subcommands` from these.
+    // jj/clap group pages enumerate children as `.SH SUBCOMMANDS` xref entries
+    // (`jj\-bookmark\-advance(1)` + desc), not an inline COMMANDS layout.
     const JJ_XREF_MANPAGE: &str = r#".TH "JJ-BOOKMARK" "1"
 .SH NAME
 jj\-bookmark \- Manage bookmarks
@@ -997,8 +917,8 @@ Limit history depth.
 
     #[test]
     fn merge_rejects_ambiguous_repeated_descriptions() {
-        // two longs share a description with a single short, so description
-        // equality alone is not enough evidence to synthesize either alias.
+        // two longs share a description with one short, so description equality
+        // alone is not enough to synthesize either alias.
         let entries = vec![
             entry(OwnedSwitch::Short('h'), "show help"),
             entry(OwnedSwitch::Long("help".to_string()), "show help"),
@@ -1043,8 +963,8 @@ Limit history depth.
     #[test]
     fn merge_still_pairs_when_existing_both_has_different_long() {
         // a Both('v', "verbose") is in scope, but the standalone pair is
-        // ('v', "version") — different long, so the pair should merge into
-        // Both('v', "version") rather than being dropped as redundant.
+        // ('v', "version"), a different long, so it should merge into
+        // Both('v', "version") rather than drop as redundant.
         let entries = vec![
             ManpageEntry {
                 switch: OwnedSwitch::Both('v', "verbose".to_string()),

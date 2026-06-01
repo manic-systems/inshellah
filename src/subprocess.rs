@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! subprocess runner. unix-only.
-//!
-//! child is its own pgid leader: on timeout we killpg the whole tree so
-//! wrapper scripts and forked grandchildren go too. without that, wrapped
-//! `--help` invocations leak. pipes are non-blocking so poll-then-read can
-//! drain without ever blocking on the next chunk.
+//! subprocess runner, unix-only. the child is its own pgid leader; on timeout
+//! killpg takes the whole tree so wrapped `--help` and forked grandchildren go
+//! too. pipes are non-blocking so poll-then-read never blocks on the next chunk.
 
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -12,9 +9,8 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// drops DISPLAY-family vars so gui tools don't pop windows during
-/// `--help` scrapes. cached: `vars_os` is per-call O(env) and we spawn
-/// thousands of times during indexing.
+/// drop DISPLAY-family vars so gui tools don't pop windows during `--help`.
+/// cached: indexing spawns thousands of times.
 pub fn safe_env_vars() -> &'static [(std::ffi::OsString, std::ffi::OsString)] {
     static CACHE: std::sync::OnceLock<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
         std::sync::OnceLock::new();
@@ -33,8 +29,7 @@ pub fn safe_env_vars() -> &'static [(std::ffi::OsString, std::ffi::OsString)] {
 
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
-/// scrape-path runner: stdout+stderr merged, cwd forced to /tmp so
-/// `--help` invocations can't read repo state.
+/// scrape runner: stdout+stderr merged, cwd /tmp so `--help` can't read repo state.
 pub fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
     run_cmd_inner(args, timeout_ms, false, false, |_| {})
 }
@@ -47,8 +42,8 @@ pub fn run_cmd_with(
     run_cmd_inner(args, timeout_ms, false, false, customize)
 }
 
-/// dynamic-completer runner: stderr dropped (parsers want clean stdout
-/// lines), cwd inherited so `git remote` / `jj log` see the user's repo.
+/// dynamic runner: stderr dropped (parsers want clean stdout), cwd inherited
+/// so `git remote`/`jj log` see the user's repo.
 pub fn run_quiet(args: &[String], timeout_ms: u64) -> Option<String> {
     run_cmd_inner(args, timeout_ms, true, true, |_| {})
 }

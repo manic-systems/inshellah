@@ -68,8 +68,8 @@ fn just_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
         ctx,
     )?;
     let mut candidates = Vec::new();
-    // first line is the "Available recipes:" header. recipe lines look
-    // like `name [args]   # description`; only ASCII names accepted.
+    // skip the "Available recipes:" header. lines are `name [args]  # desc`,
+    // ASCII names only.
     for line in out.lines().skip(1) {
         let trimmed = line.trim_start();
         let mut iter = trimmed.split_whitespace();

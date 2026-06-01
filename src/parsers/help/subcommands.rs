@@ -20,10 +20,8 @@ fn is_placeholder(c: char) -> bool {
     }
 }
 
-/// chars allowed inside a bare (unbracketed) placeholder token, e.g.
-/// "FILE", "PATTERN...", "A|B". excludes lowercase letters so mixed-case
-/// description words like "NixOS" or "Home-manager" don't get swallowed
-/// as placeholders.
+/// chars in a bare placeholder token. excludes lowercase so mixed-case words
+/// like "NixOS" aren't swallowed.
 fn is_bare_placeholder_char(c: char) -> bool {
     matches!(c, 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | '|' | ',')
 }
@@ -33,19 +31,11 @@ make_parser!(
     value(
         (),
         many0(preceded(
-            // peek ahead one char (don't consume) so the per-branch parser can
-            // see the full token. needed because the bare ALL_CAPS branch must
-            // verify the *entire* token before deciding to consume.
             char(' '),
             alt((
-                // <...> bracketed placeholder
                 delimited(char('<'), take_while1(is_placeholder), char('>')),
-                // [...] optional bracketed placeholder
                 delimited(char('['), take_while1(is_placeholder), char(']')),
-                // bare ALL_CAPS placeholder — first char must be uppercase or
-                // a digit (allows e.g. "N", "M2"), and the whole token must
-                // be uppercase-friendly. rejects "NixOS"-style mixed-case so
-                // descriptions don't get swallowed.
+                // first char uppercase or digit rejects "NixOS"-style mixed-case.
                 verify(
                     take_while1(is_bare_placeholder_char),
                     |s: &str| {
@@ -58,11 +48,9 @@ make_parser!(
     )
 );
 
-// some help formats list a subcommand with comma-separated aliases before
-// the description gap, e.g. cargo's `build, b` / `check, c`. consume and
-// discard the aliases so the entry parses and the canonical (first) name is
-// kept; without this the comma fails the two-space check and the whole line
-// — every aliased subcommand — is dropped.
+// comma-separated aliases before the desc gap, e.g. cargo's `build, b`.
+// discard to keep the canonical first name, else the comma fails the
+// two-space check and the whole line is dropped.
 make_parser!(
     skip_subcommand_aliases -> (),
     value(
@@ -71,10 +59,6 @@ make_parser!(
     )
 );
 
-// parse a subcommand entry: leading whitespace, then a name (2+ option
-// chars, not starting with '-'), optional comma-separated aliases, optional
-// argument placeholders, exactly two spaces, optional padding, then the
-// description text and eol.
 make_parser!(pub subcommand_entry -> ManpageSubcommand,
     (
         preceded(
@@ -90,11 +74,9 @@ make_parser!(pub subcommand_entry -> ManpageSubcommand,
         space0,
         terminated(take_till(|c: char| c.is_newline()), eol),
     ) => |(name, _, _, _, _, desc): (&'a str, _, _, _, _, &'a str)| {
-        // some help formats prefix desc with "- " (manpage-style); strip it.
         let d = desc.trim_start();
         let desc = d.strip_prefix("- ").map(|s| s.trim_start()).unwrap_or(d);
-        // name kept as-parsed here; build_help_result lowercases at assembly
-        // (matching the former From<&HelpResult> behavior).
+        // name kept as-parsed, build_help_result lowercases at assembly.
         ManpageSubcommand { name: name.to_string(), desc: desc.to_string() }
     }
 );
@@ -117,8 +99,8 @@ mod tests {
 
     #[test]
     fn comma_alias_keeps_canonical_name() {
-        // cargo lists `build, b` — the alias is consumed and discarded so the
-        // canonical first name survives and the two-space gap still parses.
+        // cargo's `build, b`: alias discarded, canonical name survives,
+        // two-space gap still parses.
         let (name, desc) = parse("    build, b    Compile the current package\n");
         assert_eq!(name, "build");
         assert_eq!(desc, "Compile the current package");
@@ -128,7 +110,6 @@ mod tests {
 
     #[test]
     fn dash_prefixed_description_is_stripped() {
-        // manpage-style help prefixes the desc with "- ".
         let (name, desc) = parse("  clone  - Clone a repository\n");
         assert_eq!(name, "clone");
         assert_eq!(desc, "Clone a repository");
@@ -136,8 +117,7 @@ mod tests {
 
     #[test]
     fn arg_placeholders_are_skipped() {
-        // `<url>` and `[DIR]` are argument placeholders, not part of the name
-        // or the two-space-delimited description.
+        // `<url>` and `[DIR]` are placeholders, not name or desc.
         let (name, desc) = parse("    add <url> [DIR]    Add a dependency\n");
         assert_eq!(name, "add");
         assert_eq!(desc, "Add a dependency");
@@ -145,13 +125,11 @@ mod tests {
 
     #[test]
     fn flag_line_is_rejected() {
-        // a line whose token starts with '-' is a flag, not a subcommand.
         assert!(subcommand_entry("    --verbose    be loud\n").is_err());
     }
 
     #[test]
     fn single_char_name_is_rejected() {
-        // names must be at least two option chars.
         assert!(subcommand_entry("    x    too short\n").is_err());
     }
 }

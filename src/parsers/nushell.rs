@@ -1,17 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! generate nushell `extern` definitions from parsed help data.
-//!
-//! this module is the code generation backend. it takes a [`ManpageResult`]
-//! (from the help or manpage parsers) and produces nushell source that defines
-//! `extern` declarations — nushell's mechanism for teaching the shell about
-//! external commands' flags and subcommands so it can offer completions.
-//!
-//! key responsibilities:
-//!   - deduplicating flag entries (same flag from multiple help sources)
-//!   - mapping parameter names to nushell types (path, int, string)
-//!   - formatting flags in nushell syntax: --flag(-f): type  # description
-//!   - handling positional arguments with nushell's ordering constraints
-//!   - escaping special characters for nushell string literals
+//! generate nushell `extern` definitions from a [`ManpageResult`].
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -20,9 +8,7 @@ use std::sync::OnceLock;
 use crate::parsers::manpage::{ManpageEntry, ManpageResult, OwnedParam, OwnedSwitch};
 use crate::types::Positional;
 
-/// nushell built-in commands and keywords — we must never generate `extern`
-/// definitions for these because it would shadow nushell's own implementations.
-/// maintained manually and should be updated with new nushell releases.
+/// emitting `extern` for these shadows nushell builtins. update on new releases.
 pub const NUSHELL_BUILTINS: &[&str] = &[
     "alias",
     "all",
@@ -208,15 +194,10 @@ fn builtin_set() -> &'static HashSet<&'static str> {
     SET.get_or_init(|| NUSHELL_BUILTINS.iter().copied().collect())
 }
 
-/// returns true if the given command name collides with a nushell built-in.
 pub fn is_nushell_builtin(cmd: &str) -> bool {
     builtin_set().contains(cmd)
 }
 
-/// map parameter names to nushell types.
-/// nushell's `extern` declarations use typed parameters, so we infer the type
-/// from the parameter name. file/path-related names become "path" (enables
-/// path completion), numeric names become "int", everything else is "string".
 pub fn nushell_type_of_param(name: &str) -> &'static str {
     match name {
         "FILE" | "file" | "PATH" | "path" | "DIR" | "dir" | "DIRECTORY" | "FILENAME"
@@ -227,7 +208,6 @@ pub fn nushell_type_of_param(name: &str) -> &'static str {
     }
 }
 
-/// escape for nushell strings and trailing comments
 pub fn escape_nu(s: &str) -> Cow<'_, str> {
     if !s
         .bytes()
@@ -250,7 +230,6 @@ pub fn escape_nu(s: &str) -> Cow<'_, str> {
     }
 }
 
-/// strip control chars from bare extern tokens
 fn sanitize_token(s: &str) -> Cow<'_, str> {
     if s.chars().any(char::is_control) {
         Cow::Owned(s.chars().filter(|c| !c.is_control()).collect())
@@ -259,13 +238,7 @@ fn sanitize_token(s: &str) -> Cow<'_, str> {
     }
 }
 
-/// format a single flag entry as a nushell `extern` parameter line.
-/// output examples:
-///   "    --verbose(-v)                       # increase verbosity"
-///   "    --output(-o): path                  # write output to file"
-///   "    -n: int                             # number of results"
-///
-/// the description is right-padded to column 40 with a "# " comment prefix.
+/// desc is right-padded to column 40 with a "# " prefix.
 pub fn format_flag(entry: &ManpageEntry) -> String {
     let name = match &entry.switch {
         OwnedSwitch::Both(c, l) => format!("--{l}(-{c})"),
@@ -288,10 +261,7 @@ pub fn format_flag(entry: &ManpageEntry) -> String {
     }
 }
 
-/// format a positional argument as a nushell `extern` parameter line.
-/// nushell syntax: "...name: type" for variadic, "name?: type" for optional.
-/// hyphens in names are converted to underscores since nushell identifiers
-/// cannot contain hyphens.
+/// hyphens become underscores, nushell identifiers can't contain hyphens.
 pub fn format_positional(name: &str, p: &Positional) -> String {
     let name_underscored: String = sanitize_token(name)
         .chars()
@@ -305,12 +275,8 @@ pub fn format_positional(name: &str, p: &Positional) -> String {
     format!("    {prefix}{name_underscored}{suffix}: {typ}")
 }
 
-/// enforce nushell's positional argument ordering rules:
-///   1. no required positional may follow an optional one
-///   2. at most one variadic ("rest") parameter is allowed
-///
-/// if a required positional appears after an optional one, it is silently
-/// promoted to optional. duplicate variadic params are dropped.
+/// nushell forbids required-after-optional (promote to optional) and more than
+/// one variadic (drop extras).
 pub fn fixup_positionals(positionals: Vec<(String, Positional)>) -> Vec<(String, Positional)> {
     let mut seen_optional = false;
     let mut seen_variadic = false;
@@ -334,8 +300,6 @@ pub fn fixup_positionals(positionals: Vec<(String, Positional)>) -> Vec<(String,
     out
 }
 
-/// derive a nushell `module` name from a command name.
-/// replaces non-alphanumeric characters with hyphens and appends "-completions".
 pub fn module_name_of(cmd_name: &str) -> String {
     let mut s: String = cmd_name
         .chars()
@@ -351,23 +315,9 @@ pub fn module_name_of(cmd_name: &str) -> String {
     s
 }
 
-/// generate the full nushell `extern` block for a command.
-///
-/// produces output like:
-///   export extern "git add" [
-///     ...pathspec?: path
-///     --verbose(-v)              # be verbose
-///     --dry-run(-n)              # dry run
-///   ]
-///
-/// subcommands that weren't resolved into their own full definitions get
-/// stub `extern` blocks with just a comment containing their description:
-///   export extern "git stash" [  # stash changes
-///   ]
+/// unresolved subcommands get a stub block whose only content is a `# desc`
+/// comment.
 pub fn generate_extern(cmd_name: &str, result: &ManpageResult) -> String {
-    // entries arrive deduped from the parser pipeline (`parse_manpage_lines`
-    // and `From<&HelpResult>` both run `manpage::dedup_entries`), so we can
-    // emit them directly here.
     let escaped_name = escape_nu(cmd_name);
     let positionals = fixup_positionals(result.positionals.clone());
 
@@ -394,9 +344,7 @@ pub fn generate_extern(cmd_name: &str, result: &ManpageResult) -> String {
     out
 }
 
-/// generate a complete nushell `module` wrapping the `extern`.
-/// output: "module git-completions { ... }\n\nuse git-completions *\n"
-/// the `use` at the end makes the `extern` immediately available in scope.
+/// trailing `use` brings the module's externs into scope.
 pub fn generate_module(cmd_name: &str, result: &ManpageResult) -> String {
     let mod_name = module_name_of(cmd_name);
     format!(

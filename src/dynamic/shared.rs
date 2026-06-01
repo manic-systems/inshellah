@@ -66,15 +66,13 @@ pub(crate) fn run(args: &[String], ctx: &DynCtx) -> Option<String> {
     subprocess::run_quiet(args, ctx.ms_left())
 }
 
-/// scrape-path runner (cwd /tmp, stderr captured) for providers that read a
-/// tool's own machine output rather than repo state. adb's `devices`/`pm list`
-/// don't need the user's cwd and must not inherit it.
+/// scrape runner (cwd /tmp) for providers reading tool output, not repo state.
+/// adb's `devices`/`pm list` must not inherit the user's cwd.
 pub(crate) fn run_scrape(args: &[String], ctx: &DynCtx) -> Option<String> {
     subprocess::run_cmd(args, ctx.ms_left())
 }
 
-/// resolve a bare command name through PATH. providers that shell out via an
-/// absolute path (adb) use this when no explicit path was supplied.
+/// resolve a bare name through PATH (adb, when no explicit path was given).
 pub(crate) fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
     let path_var = std::env::var("PATH").ok()?;
     for dir in path_var.split(':') {
@@ -101,8 +99,8 @@ pub(crate) fn run_with(
     subprocess::run_quiet_with(args, ctx.ms_left(), customize)
 }
 
-/// drops exact-match subcommand/external candidates so a typed-out word
-/// doesn't get echoed back and mask downstream completers.
+/// drop exact-match subcommand/external candidates so a typed-out word isn't
+/// echoed back, masking downstream completers.
 pub(crate) fn filter_candidates(items: Vec<Candidate>, prefix: &str) -> Option<Vec<Candidate>> {
     if items.is_empty() {
         return None;

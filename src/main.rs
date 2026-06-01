@@ -1,15 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! inshellah CLI.
-//!
-//! subcommands:
-//!   index PREFIX...     scan PREFIX/bin and PREFIX/share/man, write JSON cache
-//!   manpage FILE        parse a single manpage, emit nushell extern
-//!   manpage-dir DIR     batch-process manpages under DIR
-//!   complete CMD ARG... nushell external completer; reads the cache,
-//!                       falls back to on-the-fly --help if uncached
-//!   query CMD           print stored data for CMD
-//!   dump                list indexed commands
-//!   completions         emit nushell completion definitions for inshellah itself
 
 use std::collections::HashSet;
 use std::fs;
@@ -56,7 +46,7 @@ Usage:
       --timeout-ms N    per-subprocess timeout in milliseconds (default 200)
       --workers N       parallel scrape workers (default: cpu count)
       (env INSHELLAH_MAX_INDEX_NODES caps subcommand nodes per root command;
-       default 10000 — bounds runaway recursion on pathological trees)
+       default 10000, bounds runaway recursion on pathological trees)
   inshellah complete CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
       Nushell custom completer. Outputs JSON completion candidates.
       Falls back to --help resolution if command is not indexed.
@@ -86,8 +76,6 @@ Configuration (environment, read by `complete`):
     );
 }
 
-// --- file classification ---
-
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path)
@@ -109,7 +97,6 @@ fn is_script(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// skip filenames that aren't real commands (e.g. doc/locale paths).
 fn skip_name(name: &str) -> bool {
     name.starts_with('.')
         || name.ends_with(".so")
@@ -118,29 +105,19 @@ fn skip_name(name: &str) -> bool {
         || name.contains('/')
 }
 
-// --- executable image scanning ---
-
-/// is `magic` the leading 4 bytes of an executable image we know how to
-/// string-scan on *this* platform? the scan itself is byte-oriented and
-/// format-agnostic; this gate just keeps us from slurping data files that
-/// happen to carry the executable bit.
-///
-/// recognition is strictly per-platform: a macOS build honours only Mach-O
-/// (thin 32/64-bit either endianness, plus fat/universal), every other
-/// (ELF) target honours only ELF. keeping them mutually exclusive means a
-/// Linux build never treats `CA FE BA BE` as an image — that's FAT_MAGIC to
-/// Mach-O but also a Java class file, which a Linux box can plausibly carry.
+// macOS honours Mach-O, others ELF, so linux never treats `CA FE BA BE`
+// (also a java class) as an image.
 fn is_scannable_magic(magic: &[u8; 4]) -> bool {
     #[cfg(target_os = "macos")]
     {
         matches!(
             magic,
-            [0xce, 0xfa, 0xed, 0xfe]   // MH_MAGIC    (thin 32-bit, little-endian)
-                | [0xcf, 0xfa, 0xed, 0xfe] // MH_MAGIC_64 (thin 64-bit, little-endian)
-                | [0xfe, 0xed, 0xfa, 0xce] // MH_MAGIC    (thin 32-bit, big-endian)
-                | [0xfe, 0xed, 0xfa, 0xcf] // MH_MAGIC_64 (thin 64-bit, big-endian)
-                | [0xca, 0xfe, 0xba, 0xbe] // FAT_MAGIC   (universal)
-                | [0xca, 0xfe, 0xba, 0xbf] // FAT_MAGIC_64
+            [0xce, 0xfa, 0xed, 0xfe]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xce]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xca, 0xfe, 0xba, 0xbf]
         )
     }
     #[cfg(not(target_os = "macos"))]
@@ -149,9 +126,8 @@ fn is_scannable_magic(magic: &[u8; 4]) -> bool {
     }
 }
 
-/// scan an executable image (ELF on Linux, Mach-O on macOS) for string needles.
-/// returns the set of needles that appeared. on read failure all needles are
-/// reported found (conservative — we'd rather try --help than skip).
+// read failure reports all needles so the caller falls back to --help rather
+// than skipping.
 fn image_scan(path: &Path, needles: &[&str]) -> HashSet<String> {
     let mut found: HashSet<String> = HashSet::new();
     let real = match fs::canonicalize(path) {
@@ -174,7 +150,7 @@ fn image_scan(path: &Path, needles: &[&str]) -> HashSet<String> {
         return found;
     }
     if !is_scannable_magic(&magic) {
-        // not a recognised executable image — return empty so caller decides
+        // empty lets the caller decide
         return found;
     }
     let max_needle = needles.iter().map(|s| s.len()).max().unwrap_or(0);
@@ -213,8 +189,6 @@ fn image_scan(path: &Path, needles: &[&str]) -> HashSet<String> {
     found
 }
 
-// --- nix wrapper detection ---
-
 fn read_to_string_capped(path: &Path, cap: usize) -> Option<String> {
     let real = fs::canonicalize(path).ok()?;
     let md = fs::metadata(&real).ok()?;
@@ -224,17 +198,14 @@ fn read_to_string_capped(path: &Path, cap: usize) -> Option<String> {
     fs::read_to_string(&real).ok()
 }
 
-/// detect nix-generated c wrappers; return the real binary path.
 fn nix_wrapper_target(path: &Path) -> Option<PathBuf> {
     let contents = read_to_string_capped(path, 65536)?;
     if !contents.contains("makeCWrapper") {
         return None;
     }
-    // pattern: /nix/store/<hash>-<name>/bin/<exe>
     extract_nix_bin_path(&contents)
 }
 
-/// detect nix-generated bash/sh wrappers.
 fn nix_script_wrapper_target(path: &Path) -> Option<PathBuf> {
     let contents = read_to_string_capped(path, 4096)?;
     if !contents.starts_with("#!") {
@@ -255,7 +226,7 @@ fn extract_nix_bin_path(contents: &str) -> Option<PathBuf> {
     let mut idx = 0;
     while let Some(rel) = contents[idx..].find(needle) {
         let start = idx + rel;
-        // find end of the path (whitespace, quote, or null)
+        // path ends at whitespace, quote, or null
         let mut end = start + needle.len();
         while end < bytes.len() {
             let b = bytes[end];
@@ -283,19 +254,13 @@ fn extract_nix_bin_path(contents: &str) -> Option<PathBuf> {
     None
 }
 
-// --- binary classification ---
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Classify {
-    /// can try --help
     TryHelp,
-    /// the tool likely speaks the "nushell" completion subcommand
     HasNativeCompletions,
-    /// skip — doesn't look like a CLI we can extract from
     Skip,
 }
 
-/// classify an executable image by scanning for help/completion needles.
 fn classify_image(path: &Path) -> Classify {
     let found = image_scan(path, &["-h", "--help", "complet"]);
     if found.contains("complet") {
@@ -307,8 +272,6 @@ fn classify_image(path: &Path) -> Classify {
     }
 }
 
-/// classify a binary by its actual nature: script, native image, or nix
-/// wrapper. native images are ELF on Linux and Mach-O on macOS.
 fn classify_binary(_bindir: &Path, full: &Path) -> Classify {
     if is_script(full) {
         return Classify::TryHelp;
@@ -322,13 +285,8 @@ fn classify_binary(_bindir: &Path, full: &Path) -> Classify {
     classify_image(full)
 }
 
-// --- help text extraction ---
-
-/// try `--help`, then `-h`, returning the first non-empty output (with
-/// ANSI escapes stripped). each attempt gets the same per-call timeout.
-/// we deliberately skip the third historical `help`-subcommand variant:
-/// if neither flag yielded usable text, a positional `help` is unlikely
-/// to do anything different and the extra spawn dominates indexing cost.
+// skips the positional `help` variant: unlikely to differ, extra spawn
+// dominates.
 fn try_help_until(bin: &Path, timeout_ms: u64, deadline: Instant) -> Option<String> {
     let bin_s = bin.to_string_lossy().to_string();
     for variant in [&["--help"][..], &["-h"][..]] {
@@ -363,8 +321,6 @@ fn is_nushell_source(text: &str) -> bool {
             || (text.contains("module ") && text.contains("export")))
 }
 
-/// look for words that contain a known needle within the text (used to
-/// find subcommand names that might be a native-completion command).
 fn extract_matching_words(text: &str, needles: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -384,11 +340,9 @@ fn extract_matching_words(text: &str, needles: &[&str]) -> Vec<String> {
     out
 }
 
-/// try to get native nushell completions from a binary that supports them.
 fn try_native_completion(bin: &Path, timeout_ms: u64) -> Option<String> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let help_text = try_help_until(bin, timeout_ms, deadline)?;
-    // look for words like "completion", "completions" — typical subcommand
     let candidates = extract_matching_words(&help_text, &["complet"]);
     let bin_s = bin.to_string_lossy().to_string();
     for sub in &candidates {
@@ -417,19 +371,12 @@ fn try_native_completion(bin: &Path, timeout_ms: u64) -> Option<String> {
     None
 }
 
-// --- subcommand recursion ---
-
 const MAX_RESOLVE_RESULTS: usize = 500;
 const MAX_RECURSE_DEPTH: u32 = 10;
 const RESOLVE_BUDGET_MULTIPLE: u64 = 8;
 
-/// default per-root cap on indexed subcommand nodes, overridable via
-/// `INSHELLAH_MAX_INDEX_NODES`. real CLIs — even giants like gcloud/aws/
-/// kubectl — top out in the low thousands of total subcommands, so 10k is
-/// already beyond belief; it still bounds a pathological tree (one that emits
-/// fresh subcommand names at every level, so `self_listed` never fires) to a
-/// fixed amount of work instead of breadth^depth runaway. see
-/// `enqueue_child_jobs`.
+// env INSHELLAH_MAX_INDEX_NODES. bounds a pathological tree where fresh names
+// every level dodge `self_listed`.
 const DEFAULT_MAX_NODES_PER_ROOT: usize = 10_000;
 
 fn remaining_ms(deadline: Instant) -> u64 {
@@ -447,8 +394,7 @@ fn parse_help_text(text: &str) -> ManpageResult {
     }
 }
 
-/// try `bin sub_path... --help` first, then `... -h` if --help came back
-/// empty or "No manual entry…". used by deep subcommand recursion.
+// falls back to `-h` when --help is empty or "No manual entry".
 fn try_help_args(bin_s: &str, sub_args: &[String], timeout_ms: u64) -> Option<String> {
     let mut primary_args: Vec<String> = vec![bin_s.to_string()];
     primary_args.extend(sub_args.iter().cloned());
@@ -481,8 +427,6 @@ fn try_help_args(bin_s: &str, sub_args: &[String], timeout_ms: u64) -> Option<St
     primary_text
 }
 
-// --- manpage handling ---
-
 fn cmd_name_of_manpage(path: &Path) -> String {
     let mut base = path
         .file_name()
@@ -492,7 +436,7 @@ fn cmd_name_of_manpage(path: &Path) -> String {
     if base.ends_with(".gz") {
         base.truncate(base.len() - 3);
     }
-    // strip section suffix: "ls.1" -> "ls"
+    // strip section suffix, "ls.1" -> "ls"
     if let Some(dot) = base.rfind('.') {
         base.truncate(dot);
     }
@@ -514,13 +458,9 @@ fn find_manpage_path(mandirs: &[PathBuf], hyphenated: &str) -> Option<PathBuf> {
     None
 }
 
-/// derive the command name a manpage documents. the SYNOPSIS section
-/// is authoritative because manpage filenames are ambiguous —
-/// "btrfs-check.8" could mean either a standalone binary `btrfs-check`
-/// or the subcommand `btrfs check`. we clamp to the number of
-/// hyphen-separated parts in the filename to prevent synopsis lines
-/// like "btrfs check [options] <device>" from absorbing the device
-/// placeholder into the command name.
+// synopsis wins because filenames are ambiguous: "btrfs-check.8" could be
+// `btrfs-check` or `btrfs check`. clamp to the filename's hyphen-part count so
+// the synopsis can't absorb a placeholder.
 fn resolve_manpage_cmd_name(file: &Path, contents: &str) -> String {
     let fallback = cmd_name_of_manpage(file);
     let max_words = fallback.matches('-').count() + 1;
@@ -540,9 +480,7 @@ fn resolve_manpage_cmd_name(file: &Path, contents: &str) -> String {
 type NamedManpageResult = (String, ManpageResult);
 type ProcessedManpage = (String, ManpageResult, Vec<NamedManpageResult>);
 
-/// process a manpage and return (cmd_name, main_result, per-subcommand results).
-/// the sub_results come from clap-style `.SH SUBCOMMAND` sections — each is
-/// a self-contained command with its own flags.
+// subs come from clap-style `.SH SUBCOMMAND` sections.
 fn process_manpage(file: &Path) -> Option<ProcessedManpage> {
     let contents = read_manpage_file(file).ok()?;
     let (mut result, sub_sections) = parse_manpage_with_subs(&contents);
@@ -558,8 +496,7 @@ fn process_manpage(file: &Path) -> Option<ProcessedManpage> {
         return None;
     }
     strip_manpage_subcmd_prefixes(&mut result, file, &name);
-    // namespace the sub-section names under the resolved cmd name:
-    // e.g. nh's SUBCOMMAND "os" becomes the stored command "nh os".
+    // namespace sub-sections under the cmd name: nh "os" -> "nh os"
     let subs: Vec<(String, ManpageResult)> = sub_sections
         .into_iter()
         .map(|(sub_name, sub_result)| (format!("{name} {sub_name}"), sub_result))
@@ -581,8 +518,6 @@ fn list_manpages(mandirs: &[PathBuf]) -> Vec<PathBuf> {
     }
     out
 }
-
-// --- index command ---
 
 fn load_ignorelist(path: &Path) -> HashSet<String> {
     let mut out = HashSet::new();
@@ -660,12 +595,8 @@ mod main_tests {
         ));
     }
 
-    // fuzzy_score / completion_json ranking + escaping are covered by the
-    // canonical module's own tests (src/complete.rs).
-
     #[test]
     fn completion_dir_mandir_resolves_to_prefix_share_man() {
-        // <prefix>/share/inshellah -> <prefix>/share/man, no doubled "share".
         assert_eq!(
             mandir_for_completion_dir(Path::new("/run/current-system/sw/share/inshellah")),
             Some(PathBuf::from("/run/current-system/sw/share/man"))
@@ -686,7 +617,6 @@ mod main_tests {
             "/d".to_string(),
         ];
         let parsed = parse_index_args(&args);
-        // positional first, then each --prefix segment, in order.
         assert_eq!(
             parsed.prefixes,
             vec![
@@ -700,22 +630,16 @@ mod main_tests {
 
     #[test]
     fn non_executable_magic_is_never_scannable() {
-        // a PNG header, a shebang, plain text — none are images on any platform.
         assert!(!is_scannable_magic(&[0x89, b'P', b'N', b'G']));
         assert!(!is_scannable_magic(b"#!/b"));
         assert!(!is_scannable_magic(b"text"));
     }
 
-    // recognition is strictly per-platform: each build honours only its
-    // native container and rejects the other.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_scans_mach_o_only() {
-        // thin 64-bit little-endian — the common arm64/x86_64 layout.
         assert!(is_scannable_magic(&[0xcf, 0xfa, 0xed, 0xfe]));
-        // fat/universal.
         assert!(is_scannable_magic(&[0xca, 0xfe, 0xba, 0xbe]));
-        // ELF is not a native macOS image.
         assert!(!is_scannable_magic(b"\x7fELF"));
     }
 
@@ -723,7 +647,6 @@ mod main_tests {
     #[test]
     fn elf_targets_scan_elf_only() {
         assert!(is_scannable_magic(b"\x7fELF"));
-        // Mach-O magics are rejected; FAT_MAGIC also collides with java class.
         assert!(!is_scannable_magic(&[0xca, 0xfe, 0xba, 0xbe]));
         assert!(!is_scannable_magic(&[0xcf, 0xfa, 0xed, 0xfe]));
     }
@@ -781,31 +704,23 @@ sleep 1
     }
 }
 
-/// shared state passed to every pool worker. nothing inside mutates
-/// except `indexed`, which is wrapped in a parking_lot::Mutex.
 struct ScrapeCtx {
     cache_dir: PathBuf,
     mandirs: Vec<PathBuf>,
     help_only: HashSet<String>,
     indexed: Mutex<HashSet<String>>,
     timeout_ms: u64,
-    /// per-root fan-out budget and its bookkeeping (see `enqueue_child_jobs`).
-    /// `node_counts` tallies enqueued children per root command; `truncated`
-    /// records roots already warned about so the message fires once.
     node_budget: usize,
     node_counts: Mutex<std::collections::HashMap<String, usize>>,
+    // roots already warned about, so the budget warning fires once each
     truncated: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug)]
 struct PoolJob {
     bin_path: PathBuf,
-    /// the binary's basename — e.g. "git". stays constant across the
-    /// whole recursion tree for this binary.
     base_cmd: String,
-    /// chain of subcommand tokens past the base. empty for the
-    /// top-level scrape, ["clone"] for `git clone`, ["stash","apply"]
-    /// for `git stash apply`.
+    // tokens past the base: ["stash","apply"] for `git stash apply`
     sub_args: Vec<String>,
     depth: u32,
 }
@@ -820,11 +735,8 @@ impl PoolJob {
     }
 }
 
-/// some manpages list subcommands with the parent's name as a prefix —
-/// git.1 has \fBgit-add\fR(1), \fBgit-remote-ext\fR(1), etc. downstream
-/// expects bare subcommand names ("add", "remote-ext") so they dispatch
-/// as `git add` / `git remote-ext`. strips a leading "{base}-" wherever
-/// present; a no-op when the manpage already uses bare names.
+// some manpages prefix subcommands with the parent name (git.1 lists git-add);
+// strip the leading "{base}-" so they dispatch as `git add`.
 fn strip_subcmd_prefix(result: &mut ManpageResult, base: &str) {
     let prefix = format!("{base}-");
     for sc in &mut result.subcommands {
@@ -845,30 +757,20 @@ fn strip_manpage_subcmd_prefixes(result: &mut ManpageResult, file: &Path, cmd_na
     }
 }
 
-/// enqueue one child job per discovered subcommand token. tokens are already
-/// filtered by the resolver core (`child_tokens`: len >= 2, not a flag, not
-/// `help`).
-///
-/// two bounds keep a pathological tree from exploding into breadth^depth work.
-/// `MAX_RECURSE_DEPTH` caps how deep we descend; the per-root node budget caps
-/// the total subcommands indexed under a single root. the depth cap alone is
-/// not enough — `self_listed` in the resolver only drops a child that echoes
-/// its parent's menu, so a tool that invents fresh names at every level walks
-/// straight past it, and depth^breadth is still enormous at depth 10.
+// depth and node budget bound a breadth^depth blowup; `self_listed` only
+// catches a child echoing its parent, so fresh names every level slip past.
 fn enqueue_child_jobs(
     ctx: &ScrapeCtx,
     job: &PoolJob,
     children: &[String],
     submit: &Submitter<PoolJob>,
 ) {
-    // depth check is `> MAX`, not `>=`, so the last discovered layer is still
-    // indexed rather than cut off — deep clap/kubectl/gcloud trees go far.
+    // `>` not `>=`, so the last discovered layer is still indexed
     if job.depth > MAX_RECURSE_DEPTH {
         return;
     }
-    // per-root fan-out budget. base_cmd is constant down the whole tree, so a
-    // single command's subtree is bounded without touching the breadth of a
-    // full system scan: every top-level binary gets its own allowance.
+    // per-root allowance keyed on base_cmd, so a full system scan stays
+    // unbounded in breadth
     let mut counts = ctx.node_counts.lock();
     let tally = counts.entry(job.base_cmd.clone()).or_insert(0);
     for name in children {
@@ -893,11 +795,6 @@ fn enqueue_child_jobs(
     }
 }
 
-/// per-job handler called by every worker. populates the cache + enqueues
-/// child jobs (one per discovered subcommand) onto the same pool. shares the
-/// resolver core with the runtime path; the only index-specific concerns are
-/// the `Skip` classification (don't index non-CLIs), the `--help-only` list
-/// (skip the manpage source), and persisting before marking a command indexed.
 fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) {
     let full_cmd = job.full_cmd();
     if ctx.indexed.lock().contains(&full_cmd) {
@@ -908,14 +805,13 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         mandirs: &ctx.mandirs,
         user_dir: &ctx.cache_dir,
         timeout_ms: ctx.timeout_ms,
-        // the pool bounds total work and each subprocess is timeout-capped;
-        // there is no per-job wall-clock budget, so leave the deadline open.
+        // pool bounds total work + per-subprocess timeouts, so no per-job budget
         deadline: Instant::now() + Duration::from_secs(86_400),
         skip_manpage: ctx.help_only.contains(&job.base_cmd)
             || ctx.help_only.contains(&full_cmd),
     };
 
-    // non-CLIs are skipped entirely (top-level classification only).
+    // classify only at top level
     if job.sub_args.is_empty() && probe.classify() == NodeClass::Skip {
         return;
     }
@@ -932,8 +828,6 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
             source,
             children,
         } => {
-            // mark indexed only after a successful write, so a failed persist
-            // doesn't leave a command falsely recorded as done.
             if write_result(&ctx.cache_dir, &full_cmd, source, &result).is_ok() {
                 ctx.indexed.lock().insert(full_cmd);
                 enqueue_child_jobs(ctx, &job, &children, submit);
@@ -964,17 +858,13 @@ fn cmd_index(
         .cloned()
         .collect();
 
-    // phase 1: parallel scrape of every eligible binary via the BFS pool.
-    // shared state lives in an Arc<ScrapeCtx>; the `indexed` set is the
-    // one mutable bit and uses parking_lot::Mutex.
     let ctx = Arc::new(ScrapeCtx {
         cache_dir: dir.to_path_buf(),
         mandirs: mandirs.to_vec(),
         help_only: help_only.clone(),
         indexed: Mutex::new(HashSet::new()),
         timeout_ms,
-        // 0 / unparseable falls back to the default; we never honour an
-        // unbounded budget here — that is the runaway this guards against.
+        // 0/unparseable -> default; never unbounded
         node_budget: std::env::var("INSHELLAH_MAX_INDEX_NODES")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -1001,16 +891,14 @@ fn cmd_index(
         });
     }
     pool.wait();
-    // unwrap the indexed set back out for phase 2 — by this point no
-    // workers are alive so the Arc has only one strong reference.
+    // no workers alive, so the Arc has a single strong ref
     let mut indexed: HashSet<String> = Arc::try_unwrap(ctx)
         .ok()
         .map(|c| c.indexed.into_inner())
         .unwrap_or_default();
 
-    // process manpages for commands not yet indexed (unless they're in help-only).
-    // shorter filenames sort first so parent manpages (e.g. nix-env.1) are
-    // processed before subpage manpages (nix-env-install.1).
+    // shorter filenames sort first so parents precede subpages (nix-env.1
+    // before nix-env-install.1)
     let mut manpages = list_manpages(mandirs);
     manpages.sort_by(|a, b| {
         let alen = a.file_name().map(|s| s.len()).unwrap_or(0);
@@ -1051,9 +939,6 @@ fn cmd_index(
         {
             source = "manpage+help";
         }
-        // clap-style SUBCOMMAND sections produce real, fully-populated
-        // sub-files (each with its own flags + positionals); they take
-        // priority over COMMANDS-section leaf stubs.
         write_result(dir, &name, source, &result)?;
         indexed.insert(name.clone());
         for (sub_cmd, sub_result) in &sub_sections {
@@ -1071,11 +956,9 @@ fn cmd_index(
             write_result(dir, sub_cmd, sub_source, &sub_result)?;
             indexed.insert(sub_cmd.clone());
         }
-        // for COMMANDS-section subcommands that aren't already covered by
-        // a SUBCOMMAND section (or a per-subcommand manpage), write a
-        // description-only stub so the completer treats them as leaves.
-        // a real per-subcommand manpage processed later will overwrite the
-        // stub since we deliberately don't add it to `indexed`.
+        // COMMANDS-section subcommands lacking a SUBCOMMAND section or own
+        // manpage get a desc-only stub so the completer treats them as leaves.
+        // left out of `indexed` so a real per-subcommand manpage overwrites it.
         if sub_sections.is_empty() {
             for sc in &result.subcommands {
                 let sub_cmd = format!("{name} {}", sc.name);
@@ -1097,8 +980,6 @@ fn cmd_index(
     println!("indexed {} commands into {}", indexed.len(), dir.display());
     Ok(())
 }
-
-// --- manpage subcommand ---
 
 fn cmd_manpage(file: &Path) -> std::io::Result<()> {
     if let Some((name, result, sub_sections)) = process_manpage(file) {
@@ -1129,8 +1010,6 @@ fn cmd_manpage_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-// --- query / dump / complete ---
-
 fn cmd_query(cmd: &str, dirs: &[PathBuf]) -> std::io::Result<()> {
     match lookup_raw(dirs, cmd) {
         Some(data) => {
@@ -1144,8 +1023,6 @@ fn cmd_query(cmd: &str, dirs: &[PathBuf]) -> std::io::Result<()> {
     }
 }
 
-/// derive man directories to search for a binary: the install prefix
-/// colocated with `<prefix>/bin/<name>`, plus common system locations.
 fn mandirs_for_bin(bin: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(prefix) = bin.parent().and_then(|p| p.parent()) {
@@ -1161,8 +1038,8 @@ fn mandirs_for_bin(bin: &Path) -> Vec<PathBuf> {
     out.into_iter().filter(|p| p.is_dir()).collect()
 }
 
-/// canonical identity for a flag, keyed on the long name when present so
-/// `-v`/`--verbose` (manpage) and `--verbose` (help) compare equal.
+// keyed on the long name when present so `-v`/`--verbose` (manpage) and
+// `--verbose` (help) compare equal.
 fn switch_key(e: &ManpageEntry) -> String {
     match &e.switch {
         OwnedSwitch::Both(_, l) | OwnedSwitch::Long(l) => format!("--{l}"),
@@ -1189,11 +1066,9 @@ fn diff_sets(label: &str, man: &[String], help: &[String]) {
     }
 }
 
-/// dev-time source-divergence audit: parse a command's manpage and its
-/// `--help` independently and report where they disagree, so parser gaps
-/// (structure one source captures and the other drops) surface instead of
-/// being silently masked by the manpage>help fallback. `cmd_args` is the
-/// full command path, e.g. ["jj", "bookmark"].
+// dev tool: parse manpage and `--help` independently and report where they
+// disagree, so parser gaps aren't masked by the manpage>help fallback.
+// `cmd_args` is the full path, e.g. ["jj", "bookmark"].
 fn cmd_diff(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
     let Some((base, sub_args)) = cmd_args.split_first() else {
         eprintln!("error: diff requires a CMD argument");
@@ -1253,10 +1128,8 @@ fn cmd_diff(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
     diff_sets("subcommands", &man_subs, &help_subs);
     diff_sets("flags", &flags(&man), &flags(&help));
 
-    // the jj-class gap: the manpage body enumerates no children but help
-    // does. note whether sibling `cmd-sub.1` pages cover them (the manpage
-    // route is intact, just not in the parent body) or not (help is the
-    // only source).
+    // manpage body enumerates no children but help does. note whether sibling
+    // `cmd-sub.1` pages cover them, or help is the only source.
     if man_subs.is_empty() && !help_subs.is_empty() {
         let covered = help_subs
             .iter()
@@ -1270,9 +1143,8 @@ fn cmd_diff(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
     }
 }
 
-/// does this result look like a group command whose children we failed to
-/// enumerate — a leftover `<command>`/`<subcommands>` synopsis placeholder
-/// with no subcommands populated?
+// group command with a leftover `<command>`/`<subcommands>` placeholder and no
+// subcommands populated.
 fn looks_like_unenumerated_group(r: &ManpageResult) -> bool {
     r.subcommands.is_empty()
         && r.positionals.iter().any(|(n, _)| {
@@ -1283,10 +1155,9 @@ fn looks_like_unenumerated_group(r: &ManpageResult) -> bool {
         })
 }
 
-/// scan a prefix's man1 pages for group commands whose manpage body
-/// enumerates no children, then probe `--help` to see whether the children
-/// are recoverable there. reports parser gaps (body should enumerate but
-/// doesn't) and help-only gaps (no sibling page; help is the only source).
+// dev tool: scan a prefix for group commands whose body enumerates no children,
+// probe `--help`, and report parser gaps (body should enumerate but doesn't) vs
+// help-only gaps (no sibling page).
 fn cmd_diff_scan(prefix: &Path, timeout_ms: u64) {
     let mandirs = vec![prefix.join("share/man")];
     let mut suspects = 0u32;
@@ -1361,8 +1232,6 @@ fn cmd_dump(dirs: &[PathBuf]) {
     }
 }
 
-/// purge the on-the-fly user cache. only the writable user dir is cleared;
-/// read-only system overlays are never touched.
 fn cmd_purge(user_dir: &Path) {
     match purge_dir(user_dir) {
         Ok(n) => println!("purged {n} cached entries from {}", user_dir.display()),
@@ -1373,7 +1242,6 @@ fn cmd_purge(user_dir: &Path) {
     }
 }
 
-/// look up a command's path in $PATH.
 fn find_in_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var("PATH").ok()?;
     for dir in path_var.split(':') {
@@ -1400,13 +1268,7 @@ fn command_name_for_path(path: &Path) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// compute completion match quality. zero means no match.
-///
-/// scoring tiers:
-/// - exact match: 1000
-/// - prefix match: 900 + length bonus
-/// - subsequence match: per-character score with bonuses for word boundaries
-///   and consecutive matches
+// `null` is nushell's no-match form.
 fn print_completion_candidates(candidates: &[String]) {
     if candidates.is_empty() {
         println!("null");
@@ -1424,9 +1286,6 @@ fn print_completion_candidates(candidates: &[String]) {
     }
 }
 
-/// dynamically scrape --help for a command not in the cache, write the result
-/// into the user store, and return its parsed form. discovered subcommands
-/// are also written.
 fn resolve_and_cache(
     user_dir: &Path,
     mandirs: &[PathBuf],
@@ -1437,10 +1296,8 @@ fn resolve_and_cache(
     resolve_command_path_and_cache(user_dir, mandirs, cmd_name, &[], path, timeout_ms)
 }
 
-/// index every descendant manpage of a group command (`cmd-*.N`) into the
-/// user cache, resolving each page's real space-separated name from its
-/// own content. returns whether anything was indexed. lets `subcommands_of`
-/// surface a group's children when its parent page didn't enumerate them.
+// resolves each `cmd-*.N` page's real space-separated name from its content, so
+// `subcommands_of` can surface children the parent page didn't enumerate.
 fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str) -> bool {
     let prefix = format!("{hyphenated}-");
     let mut any = false;
@@ -1472,7 +1329,6 @@ fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str
     any
 }
 
-/// scrape a group command's children from `--help` (subcommands only).
 fn group_subcommands_from_help(
     path: &Path,
     sub_args: &[String],
@@ -1618,24 +1474,17 @@ fn supplement_result_from_help_command(
         .is_some_and(|help| supplement_result_from_help(result, help))
 }
 
-/// a manpage resolved to a group command whose body enumerated no children.
-/// recover them without discarding the manpage's flags: prefer the manpage
-/// route (index the sibling `cmd-sub.N` pages, which `subcommands_of` then
-/// surfaces); fall back to `--help` only when no sibling pages exist. used
-/// by the on-the-fly resolver, which (unlike `index`) doesn't otherwise
-/// walk the sibling pages.
-/// Filesystem/subprocess-backed [`Probe`] for one binary. Bound to a single
-/// binary path; the resolver core drives it per node. This is the one place
-/// the manpage⊕help supplement and group-recovery I/O lives, shared by the
-/// runtime driver below and the indexer's pool driver.
+// filesystem/subprocess-backed `Probe` for one binary. the one place the
+// manpage+help supplement and group-recovery I/O lives, shared by runtime and
+// pool drivers.
 struct RealProbe<'a> {
     path: &'a Path,
     mandirs: &'a [PathBuf],
     user_dir: &'a Path,
     timeout_ms: u64,
     deadline: Instant,
-    /// the indexer's `--help-only` list forces some commands past the manpage
-    /// source straight to `--help`; runtime resolution never sets this.
+    // indexer's `--help-only` list forces straight to `--help`; runtime
+    // resolution never sets this.
     skip_manpage: bool,
 }
 
@@ -1684,9 +1533,9 @@ impl Probe for RealProbe<'_> {
         hyphenated: &str,
         sub_args: &[String],
     ) -> Option<Vec<ManpageSubcommand>> {
-        // prefer the manpage route: index the sibling `cmd-sub.N` pages, which
-        // a later `subcommands_of` lookup surfaces (so return None — nothing to
-        // graft inline). only fall back to --help when no sibling pages exist.
+        // prefer the manpage route: index sibling `cmd-sub.N` pages, which a
+        // later `subcommands_of` surfaces, so return None with nothing to graft.
+        // fall back to --help only when no sibling pages exist.
         if index_sibling_manpages(self.user_dir, self.mandirs, hyphenated) {
             return None;
         }
@@ -1694,8 +1543,7 @@ impl Probe for RealProbe<'_> {
     }
 }
 
-/// the parser/strip/group-detection callbacks the resolver core needs,
-/// gathered once so the two call sites stay identical.
+// resolver core wired with this crate's parser/strip/group-detection callbacks.
 fn resolve_one(probe: &RealProbe, base_cmd: &str, sub_args: &[String]) -> Outcome {
     resolve_node(
         probe,
@@ -1739,8 +1587,8 @@ fn resolve_command_path_and_cache(
             children,
         } => {
             let _ = write_result(user_dir, &full, source, &result);
-            // only the --help branch eagerly populates the subtree; manpage
-            // children are found on demand via their own sibling pages.
+            // only --help eagerly populates the subtree; manpage children are
+            // found on demand via sibling pages.
             if source == "help" {
                 resolve_subtree(&probe, base_cmd, sub_args, children, deadline);
             }
@@ -1749,9 +1597,7 @@ fn resolve_command_path_and_cache(
     }
 }
 
-/// Breadth-first resolve+cache of the subtree under a node, bounded by the
-/// result cap and the shared deadline. Replaces the old
-/// `help_resolve`/`recurse_subcommand` pair, which expressed this same shape.
+// bounded by the result cap and shared deadline.
 fn resolve_subtree(
     probe: &RealProbe,
     base_cmd: &str,
@@ -1874,7 +1720,7 @@ fn cmd_complete(
     dirs.push(user_dir.to_path_buf());
     dirs.extend(system_dirs.iter().cloned());
 
-    // skip past elevation wrappers (sudo, doas) to find the real command
+    // skip past elevation wrappers (sudo, doas) to the real command.
     let mut explicit_cmd_path: Option<PathBuf> = None;
     let mut spans: Vec<String> = match spans.first() {
         Some(first) if ELEVATION_COMMANDS.contains(&first.as_str()) => {
@@ -1958,7 +1804,7 @@ fn cmd_complete(
 
     let mut found = find_result(&lookup_tokens);
 
-    // dynamic resolve: if nothing matches or only a parent matched, try --help
+    // nothing matched or only a parent matched, so try --help
     let resolve_tokens: Vec<String> = lookup_tokens
         .iter()
         .filter(|t| !t.is_empty())
@@ -1975,7 +1821,7 @@ fn cmd_complete(
             .cloned()
             .or_else(|| find_in_path(&cmd_name))
     {
-        // build extended mandirs from the binary's own prefix as well
+        // also search the binary's own prefix for manpages
         let mut all_mandirs = mandirs.to_vec();
         if let Some(parent) = path.parent()
             && let Some(prefix) = parent.parent()
@@ -2007,9 +1853,6 @@ fn cmd_complete(
         }
     }
 
-    // flag completions are gated on a configurable trigger: by default a
-    // leading "-", but the user may add other characters or opt into
-    // surfacing flags on an empty token (right after a space).
     let typing_flag = cfg.triggers_flags(&last_token);
     let fallback_subcommands = match &found {
         Some((matched_name, r, _)) if r.subcommands.is_empty() => {
@@ -2017,8 +1860,8 @@ fn cmd_complete(
         }
         _ => Vec::new(),
     };
-    // positional value choices (getent databases) fill the same argument slot
-    // as subcommands, so they suppress the file/dynamic handoff the same way.
+    // positional value choices (getent databases) fill the same slot as
+    // subcommands, so they suppress the file/dynamic handoff too.
     let has_subs = match &found {
         Some((_, r, _)) => {
             !r.subcommands.is_empty()
@@ -2043,11 +1886,11 @@ fn cmd_complete(
         .collect(),
     };
     // hand off at non-flag leaf positions so file and dynamic completers can
-    // answer argument prefixes. when the token starts with "-", keep flags.
+    // answer argument prefixes. a leading "-" keeps flags.
     let want_files = !typing_flag && !has_subs && (last_token.is_empty() || candidates.is_empty());
     if want_files || candidates.is_empty() {
-        // spans are post-elevation, so `sudo nix ...` reaches the dynamic
-        // dispatch as `[nix, ...]` and hits the nix branch.
+        // spans are post-elevation, so `sudo nix ...` reaches this as
+        // `[nix, ...]` and hits the nix branch.
         if let Some(dyn_candidates) =
             dynamic_complete_with_path(&spans, explicit_cmd_path.as_deref(), cfg)
         {
@@ -2060,12 +1903,9 @@ fn cmd_complete(
     }
 }
 
-// --- completions self-emission ---
-
 fn cmd_completions() {
-    // Emit hand-maintained completions for the current CLI. The parser-driven
-    // generator is aimed at arbitrary commands; inshellah's own surface is
-    // small enough that explicit subcommand externs give better completions.
+    // inshellah's own surface is small enough that explicit externs beat the
+    // parser-driven generator aimed at arbitrary cmds.
     print!(
         r#"module inshellah-completions {{
 export extern "inshellah" [
@@ -2127,8 +1967,6 @@ use inshellah-completions *
     );
 }
 
-// --- argument parsing ---
-
 struct IndexArgs {
     prefixes: Vec<PathBuf>,
     dir: Option<PathBuf>,
@@ -2168,10 +2006,7 @@ fn parse_index_args(args: &[String]) -> IndexArgs {
                     out.help_only = Some(PathBuf::from(&args[i]));
                 }
             }
-            // additional scrape prefixes beyond the positional ones, as a
-            // colon-separated list. lets callers (notably the nix module's
-            // extraScrapePackages) roll up extra packages without relying on
-            // positional ordering.
+            // so callers (nix's extraScrapePackages) needn't rely on arg order.
             "--prefix" => {
                 i += 1;
                 if i < args.len() {
@@ -2208,7 +2043,6 @@ fn parse_index_args(args: &[String]) -> IndexArgs {
     out
 }
 
-/// best-effort thread count default: `available_parallelism` (1.59+), else 4.
 fn default_workers() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -2219,20 +2053,15 @@ fn man_dir_of_prefix(prefix: &Path) -> PathBuf {
     prefix.join("share/man")
 }
 
-/// derive the manpage dir colocated with a read-only system completion dir.
-/// the completer is pointed at `<prefix>/share/inshellah`, so the install
-/// prefix is two levels up and its manpages live at `<prefix>/share/man` —
-/// the same bin↔share/man colocation `index` and the binary-prefix walk
-/// assume. portable across Linux and macOS prefixes (nix profile, Homebrew,
-/// /usr, CommandLineTools).
+// completer is pointed at `<prefix>/share/inshellah`, so manpages sit two
+// levels up at `<prefix>/share/man`, the bin/share-man colocation `index`
+// assumes.
 fn mandir_for_completion_dir(dir: &Path) -> Option<PathBuf> {
     dir.parent().and_then(Path::parent).map(man_dir_of_prefix)
 }
 
-/// parse --dir PATH[:PATH...], optional --timeout-ms N, plus any
-/// positional args. when --dir isn't supplied, returns the default cache
-/// dir as the single entry. the timeout is `None` when `--timeout-ms`
-/// isn't passed, so the caller can fall back to the configured default.
+// timeout is `None` when unset so the caller can fall back to the configured
+// default.
 fn parse_dir_args(args: &[String]) -> (Vec<String>, Vec<PathBuf>, Option<u64>) {
     let mut positional = Vec::new();
     let mut dirs: Option<Vec<PathBuf>> = None;
@@ -2265,10 +2094,9 @@ fn parse_dir_args(args: &[String]) -> (Vec<String>, Vec<PathBuf>, Option<u64>) {
 }
 
 fn main() {
-    // restore default SIGPIPE handling so piping output into `head`, `grep -m`,
-    // or a completer that stops reading exits quietly instead of panicking on a
-    // broken-pipe write (rust ignores SIGPIPE by default, turning it into an
-    // `io::ErrorKind::BrokenPipe` that `println!` unwraps into a panic).
+    // rust ignores SIGPIPE, so a broken-pipe write becomes a BrokenPipe error
+    // that `println!` panics on. restore the default so piping into `head` exits
+    // quietly.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
@@ -2337,16 +2165,12 @@ fn main() {
         "complete" => {
             let cfg = Config::from_env();
             let (positional, dirs, timeout_override) = parse_dir_args(&args[2..]);
-            // explicit --timeout-ms wins; otherwise fall back to the
-            // configured default (INSHELLAH_TIMEOUT_MS or the compiled one).
             let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
             // first dir is the writable user cache; rest are read-only system dirs
             let (user_dir, system_dirs): (PathBuf, Vec<PathBuf>) = match dirs.split_first() {
                 Some((first, rest)) => (first.clone(), rest.to_vec()),
                 None => (default_store_path(), Vec::new()),
             };
-            // mandirs default to the share/man colocated with each system
-            // completion dir's install prefix (<prefix>/share/inshellah).
             let mandirs: Vec<PathBuf> = system_dirs
                 .iter()
                 .filter_map(|d| mandir_for_completion_dir(d))
@@ -2379,8 +2203,6 @@ fn main() {
         }
         "diff" => {
             let cfg = Config::from_env();
-            // `--scan PREFIX` sweeps a prefix for group commands with gaps;
-            // otherwise `diff CMD [SUB...]` audits one command.
             if let Some(pos) = args.iter().position(|a| a == "--scan") {
                 let Some(prefix) = args.get(pos + 1) else {
                     eprintln!("error: --scan requires a PREFIX path");
@@ -2402,8 +2224,7 @@ fn main() {
         }
         "purge" => {
             let (_, dirs, _timeout_ms) = parse_dir_args(&args[2..]);
-            // only the first (writable user) dir is purged; the rest are
-            // read-only system overlays we must never delete from.
+            // only the writable user dir is purged, never the system overlays
             let user_dir = dirs.first().cloned().unwrap_or_else(default_store_path);
             cmd_purge(&user_dir);
         }
@@ -2415,6 +2236,5 @@ fn main() {
             std::process::exit(1);
         }
     }
-    // make warning go away
     let _ = filename_of_command;
 }

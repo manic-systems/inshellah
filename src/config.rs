@@ -1,51 +1,28 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! runtime configuration for the `complete` path.
-//!
-//! the completer reads a handful of behavioural knobs from the
-//! environment. this matches the mechanism already used for live dynamic
-//! providers (`INSHELLAH_DYNAMIC_*`): the nixos module exports the
-//! variables via `environment.variables`, and users sourcing the snippet
-//! by hand can export them directly. every field has a compiled-in
-//! default that reproduces the historical behaviour, so an unconfigured
-//! install behaves exactly as before.
+//! complete-path knobs, read from INSHELLAH_* env (also set by the nixos module).
 
-/// per-subprocess timeout default for the dynamic `--help` resolve path
-/// and the current `adb` value provider.
-/// when neither `--timeout-ms` nor `INSHELLAH_TIMEOUT_MS` is set.
 pub const DEFAULT_TIMEOUT_MS: u64 = 200;
 
-/// wall-clock budget (ms) for live dynamic providers. 0 disables.
+/// 0 disables the dynamic provider.
 pub const DEFAULT_DYNAMIC_TIMEOUT_MS: u64 = 5000;
 
-/// cap on rows live dynamic providers ask native list commands for
-/// (e.g. `git for-each-ref --count N`). 0 omits the flag.
+/// row cap for native list commands (git for-each-ref --count N), 0 omits the flag.
 pub const DEFAULT_DYNAMIC_LIMIT: usize = 200;
 
-/// the historical (and default) flag-trigger set: a partial token starting
-/// with `-` asks for flag completions.
 pub const DEFAULT_FLAG_TRIGGERS: &str = "-";
 
-/// behavioural configuration resolved once at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// characters that, when a partial token begins with one of them,
-    /// cause flag completions to be emitted. defaults to `['-']` — the
-    /// only trigger in the original behaviour.
+    /// chars that, as a token's first byte, surface flags.
     pub flag_triggers: Vec<char>,
-    /// also emit flags when the partial token is empty, i.e. right after a
-    /// space/tab with nothing typed yet. defaults to `false`.
+    /// surface flags on an empty token (after a space).
     pub flag_on_empty: bool,
-    /// upper bound on the number of completion candidates returned by the
-    /// static completer. `0` means no inshellah-imposed cap (nushell's own
-    /// `max_results` still applies).
+    /// cap on static candidates, 0 = no cap.
     pub max_completions: usize,
-    /// per-subprocess timeout (ms) for dynamic `--help` resolution and
-    /// the current `adb` value provider.
+    /// --help resolve + adb timeout (ms).
     pub timeout_ms: u64,
-    /// wall-clock budget shared across live dynamic provider subprocesses.
-    /// distinct from `timeout_ms`, which only governs `--help` resolution.
+    /// budget across dynamic provider subprocesses, distinct from timeout_ms.
     pub dynamic_timeout_ms: u64,
-    /// row cap live dynamic providers apply to native list commands.
     pub dynamic_limit: usize,
 }
 
@@ -63,22 +40,16 @@ impl Default for Config {
 }
 
 impl Config {
-    /// resolve configuration from the process environment, falling back to
-    /// the compiled-in defaults for anything unset or unparseable.
     pub fn from_env() -> Self {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
-    /// inner resolver, parameterised over the variable source so tests can
-    /// drive it without mutating the real (process-global) environment.
+    /// env source injected so tests don't touch the process env.
     pub fn from_lookup(mut get: impl FnMut(&str) -> Option<String>) -> Self {
         let mut cfg = Config::default();
         if let Some(raw) = get("INSHELLAH_FLAG_TRIGGERS") {
-            // tokens are split on whitespace before they reach us, so a
-            // whitespace character can never be the first byte of a partial
-            // token — drop any from the trigger set rather than letting it
-            // silently never match. an explicitly empty value disables
-            // prefix-triggered flags entirely (leaving only flag_on_empty).
+            // whitespace can't start a token so drop it. empty value disables
+            // prefix triggers, leaving only flag_on_empty.
             cfg.flag_triggers = raw.chars().filter(|c| !c.is_whitespace()).collect();
         }
         if let Some(raw) = get("INSHELLAH_FLAG_ON_EMPTY") {
@@ -94,8 +65,7 @@ impl Config {
         {
             cfg.timeout_ms = n;
         }
-        // i64 round-trip so "-1" parses (then gets rejected) instead of
-        // wrapping. negatives and garbage both fall back to the default.
+        // i64 so "-1" rejects instead of wrapping, negatives and garbage fall back.
         if let Some(raw) = get("INSHELLAH_DYNAMIC_TIMEOUT_MS")
             && let Ok(n) = raw.trim().parse::<i64>()
             && n >= 0
@@ -111,9 +81,6 @@ impl Config {
         cfg
     }
 
-    /// whether a partial token should surface flag completions. an empty
-    /// token is governed by [`Config::flag_on_empty`]; otherwise the first
-    /// character is matched against the trigger set.
     pub fn triggers_flags(&self, token: &str) -> bool {
         match token.chars().next() {
             None => self.flag_on_empty,
@@ -121,16 +88,8 @@ impl Config {
         }
     }
 
-    /// derive the needle used to score flag candidates for a triggering
-    /// token, plus whether that needle should match the *bare* flag name
-    /// (dashes stripped) rather than the canonical dashed form.
-    ///
-    /// the `-` trigger keeps the dashed form so long-vs-short ranking is
-    /// preserved exactly (`--ver` prefers `--verbose`, `-v` prefers `-v`).
-    /// any other trigger character has no dash semantics, so we strip the
-    /// single leading trigger char and match the remainder against the bare
-    /// name — letting `+ver` match `--verbose`. an empty token yields an
-    /// empty bare needle, which matches every flag.
+    /// dash keeps the dashed form so `--ver` prefers `--verbose`; any other
+    /// trigger strips its lead char and matches the bare name (`+ver` -> verbose).
     pub fn flag_needle<'a>(&self, token: &'a str) -> FlagNeedle<'a> {
         match token.chars().next() {
             None => FlagNeedle {
@@ -149,16 +108,13 @@ impl Config {
     }
 }
 
-/// the scoring needle for flag candidates: [`FlagNeedle::needle`] is matched
-/// against the bare flag name when [`FlagNeedle::bare`] is set, else against
-/// the dashed form.
+/// `bare` matches `needle` against the stripped flag name, else the dashed form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlagNeedle<'a> {
     pub needle: &'a str,
     pub bare: bool,
 }
 
-/// permissive truthy parse for boolean env vars.
 fn parse_bool(s: &str) -> bool {
     matches!(
         s.trim().to_ascii_lowercase().as_str(),
@@ -187,7 +143,6 @@ mod tests {
         assert_eq!(cfg.max_completions, 0);
         assert_eq!(cfg.timeout_ms, DEFAULT_TIMEOUT_MS);
 
-        // only "-" prefixes trigger; empty does not.
         assert!(cfg.triggers_flags("-"));
         assert!(cfg.triggers_flags("--verbose"));
         assert!(!cfg.triggers_flags(""));
@@ -199,7 +154,6 @@ mod tests {
         let cfg = cfg_from(&[("INSHELLAH_FLAG_ON_EMPTY", "true")]);
         assert!(cfg.flag_on_empty);
         assert!(cfg.triggers_flags(""));
-        // a bare word still does not trigger flags.
         assert!(!cfg.triggers_flags("sub"));
     }
 
@@ -253,7 +207,6 @@ mod tests {
         assert_eq!(cfg.dynamic_timeout_ms, 1000);
         assert_eq!(cfg.dynamic_limit, 50);
 
-        // explicit zero is the historical "disabled" sentinel for both knobs.
         let zeroed = cfg_from(&[
             ("INSHELLAH_DYNAMIC_TIMEOUT_MS", "0"),
             ("INSHELLAH_DYNAMIC_LIMIT", "0"),
@@ -261,7 +214,6 @@ mod tests {
         assert_eq!(zeroed.dynamic_timeout_ms, 0);
         assert_eq!(zeroed.dynamic_limit, 0);
 
-        // negatives and garbage leave the compiled defaults intact.
         let bad = cfg_from(&[
             ("INSHELLAH_DYNAMIC_TIMEOUT_MS", "-1"),
             ("INSHELLAH_DYNAMIC_LIMIT", "nope"),
@@ -279,7 +231,6 @@ mod tests {
         assert_eq!(cfg.max_completions, 50);
         assert_eq!(cfg.timeout_ms, 1000);
 
-        // garbage leaves the default intact.
         let bad = cfg_from(&[
             ("INSHELLAH_MAX_COMPLETIONS", "lots"),
             ("INSHELLAH_TIMEOUT_MS", "soon"),

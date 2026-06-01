@@ -46,8 +46,6 @@ make_parser!(braces -> PositionalParse<'a>,
     value(PositionalParse::Curly, delimited(char('{'), take_till1(|c| c == '}'), char('}')))
 );
 
-// FIXME should this be a take_while is_option_char?
-// why tf do we have a ']' condition
 make_parser!(flag -> PositionalParse<'a>,
     value(PositionalParse::Flag, preceded(char('-'), take_till1(|c: char| c.is_space() || c == ']')))
 );
@@ -57,10 +55,8 @@ fn check_positional(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    // reject names starting with '-' — these are flag tokens accidentally
-    // captured by the bracket parser, e.g. "[--at-operation]" in jj's
-    // synopsis. without this guard every `[--flag]` token would be
-    // recorded as a positional named "--flag".
+    // reject '-' leading names, else jj's "[--at-operation]" becomes a
+    // positional named "--flag".
     if s.starts_with('-') {
         return false;
     }
@@ -75,15 +71,7 @@ fn check_positional(s: &str) -> bool {
         .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
 }
 
-// recognize a balanced `[...]` block, tolerating ONE level of nested
-// brackets inside. expressed entirely via nom combinators:
-//
-//   `[` + many0(alt((nested_bracket_block, non_bracket_char))) + `]`
-//
-// nested_bracket_block is `[ chars_until_] ]`, which means we accept a
-// single inner `[...]` correctly but not arbitrarily-deep nesting —
-// manpages don't go deeper than two levels.
-// returns the inner content (everything between the outer brackets).
+// balanced `[...]` block, one level of nesting. returns the inner content.
 make_parser!(balanced_bracket_inner -> &'a str,
     recognize(delimited(
         char('['),
@@ -96,12 +84,10 @@ make_parser!(balanced_bracket_inner -> &'a str,
     => |whole: &'a str| &whole[1..whole.len() - 1]
 );
 
-/// extract a positional name from already-trimmed bracket-inner content.
-/// returns the name slice and a flag indicating whether the bracket inner
-/// carried a trailing `...` (in-bracket variadic marker).
+/// positional name from trimmed bracket-inner content. bool flags a trailing
+/// `...` variadic marker.
 fn parse_bracket_inner_name(inner: &str) -> Option<(&str, bool)> {
     let inner = inner.trim();
-    // strip trailing "..." for in-bracket variadic.
     let (rest, has_dots) = if let Some(stripped) = inner.strip_suffix("...") {
         (stripped.trim_end(), true)
     } else if let Some(stripped) = inner.strip_suffix('\u{2026}') {
@@ -128,7 +114,6 @@ fn parse_bracket_inner_name(inner: &str) -> Option<(&str, bool)> {
         return found;
     }
     let name = if let Some(after_lt) = rest.strip_prefix('<') {
-        // angle-bracket name: take everything up to the matching '>'
         let end = after_lt.find('>')?;
         let inner = after_lt[..end].trim();
         let (inner, inner_dots) = if let Some(stripped) = inner.strip_suffix("...") {
@@ -140,7 +125,6 @@ fn parse_bracket_inner_name(inner: &str) -> Option<(&str, bool)> {
         };
         return Some((inner, has_dots || inner_dots));
     } else {
-        // bare name: take leading word
         let end = rest
             .find(|c: char| c.is_whitespace() || c == '[' || c == ']')
             .unwrap_or(rest.len());
@@ -152,9 +136,7 @@ fn parse_bracket_inner_name(inner: &str) -> Option<(&str, bool)> {
     Some((name, has_dots))
 }
 
-// extract a balanced `[...]` block and decompose its inner content into
-// (name, has-inner-`...` flag). `map_opt` turns a `None` from
-// `parse_bracket_inner_name` into a nom parse error.
+// `map_opt` turns a `None` from parse_bracket_inner_name into a parse error.
 make_parser!(opt_bracket_name -> (&'a str, bool),
     nom::combinator::map_opt(balanced_bracket_inner, parse_bracket_inner_name)
 );
@@ -162,7 +144,6 @@ make_parser!(opt_bracket_name -> (&'a str, bool),
 make_parser!(
     opt_positional -> PositionalParse<'a>,
     verify(
-        // tuple parser: (name + in-bracket variadic, post-bracket ellipsis).
         // matches "[name]", "[name...]", "[name ...]", "[name] ...",
         // "[<name>]", and one-level nests like "[<program> [<arg>...]]".
         (opt_bracket_name, opt(ellipses)),
@@ -223,15 +204,11 @@ fn caseless_push<'a>(k: &'a str, v: Positional, acc: &mut Vec<(&'a str, Position
     }
 }
 
-// parse_usage_args runs on a single logical usage line. SKIP refuses to
-// cross a newline boundary so many0 stops at end-of-line — without this
-// the parser would happily wander into the OPTIONS section and treat
-// every `--flag <name>` angle-bracket parameter as a positional.
-//
-// the inner positional terminator uses peek(line_ending) instead of
-// consuming the newline, so the trailing `opt(line_ending)` in the
-// outer delimited eats it cleanly and we never advance past the usage
-// line.
+// single logical usage line. SKIP refuses to cross a newline so many0 stops
+// at end-of-line, else it wanders into OPTIONS and treats every `--flag
+// <name>` param as a positional. the inner terminator peeks line_ending
+// rather than consuming it, so the outer `opt(line_ending)` eats it and the
+// scan never advances past the usage line.
 make_parser!(pub parse_usage_args -> Vec<(&'a str, Positional)>,
     (delimited(
         space0,
@@ -254,8 +231,8 @@ make_parser!(pub parse_usage_args -> Vec<(&'a str, Positional)>,
                                 value("", peek(nom::combinator::eof)),
                             ))
                         ),
-                        // catch "[section] ..." patterns where the ellipsis is
-                        // on the *next* token, separated by whitespace.
+                        // "[section] ..." where the ellipsis is the next
+                        // whitespace-separated token.
                         opt(terminated(
                             alt((tag("..."), tag("\u{2026}"))),
                             alt((
@@ -276,9 +253,6 @@ make_parser!(pub parse_usage_args -> Vec<(&'a str, Positional)>,
                         }
                     }
                 ),
-                // SKIP must NOT consume a newline. without this, many0 keeps
-                // iterating past the usage line into OPTIONS-section flag
-                // syntax and over-extracts positionals.
                 value(PositionalParse::Skip, satisfy(|c: char| c != '\n' && c != '\r')),
             ))
         ),
@@ -330,10 +304,8 @@ make_parser!(find_usage_line -> (),
         space0,
         terminated(
             tag_no_case("usage"),
-            // accept any of:
-            //   "Usage:"              — inline form with colon
-            //   "Usage args"          — inline form, space follows the word
-            //   "USAGE\n  cmd args"   — clap-style header on its own line
+            // "Usage:" (inline+colon), "Usage args" (inline+space),
+            // "USAGE\n  cmd args" (clap header on its own line).
             alt(
                 (
                     value((), char(':')),
@@ -412,7 +384,6 @@ mod tests {
 
     #[test]
     fn mandatory_optional_and_allcaps() {
-        // `<src>` mandatory, `[dst]` optional, `FILE` bare all-caps mandatory.
         assert_eq!(
             args("<src> [dst] FILE"),
             vec![
@@ -425,7 +396,7 @@ mod tests {
 
     #[test]
     fn variadic_markers() {
-        // in-bracket `<files...>` and post-token `[paths] ...` both set variadic.
+        // in-bracket `<files...>` and post-token `[paths] ...` both set variadic
         assert_eq!(
             args("<files...>"),
             vec![("files".into(), false, true)]
@@ -438,8 +409,7 @@ mod tests {
 
     #[test]
     fn flags_and_braces_are_skipped() {
-        // `--flag` and `{a|b}` choice braces are not positionals; only the
-        // real positional `<name>` survives.
+        // `--flag` and `{a|b}` are not positionals, only `<name>` survives
         assert_eq!(
             args("--flag {a|b} <name>"),
             vec![("name".into(), false, false)]
@@ -448,7 +418,7 @@ mod tests {
 
     #[test]
     fn options_placeholder_is_not_a_positional() {
-        // a bare `OPTIONS` / `[OPTIONS]` token is a section marker, not an arg.
+        // `OPTIONS` / `[OPTIONS]` is a section marker, not an arg
         assert!(args("[OPTIONS] <cmd>")
             .iter()
             .all(|(n, _, _)| n != "OPTIONS"));
@@ -460,8 +430,8 @@ mod tests {
 
     #[test]
     fn parsing_stops_at_newline() {
-        // many0 must not wander past the usage line into a following OPTIONS
-        // block; the `--out <name>` on the next line must not be mined.
+        // many0 must not wander into a following OPTIONS block, the next-line
+        // `--out <name>` must not be mined.
         assert_eq!(
             args("<input>\n  --out <name>\n"),
             vec![("input".into(), false, false)]
@@ -470,7 +440,7 @@ mod tests {
 
     #[test]
     fn duplicate_names_collapse_case_insensitively() {
-        // caseless_push drops the second `FILE`/`file`.
+        // caseless_push drops the second `FILE`/`file`
         assert_eq!(
             args("<file> FILE"),
             vec![("file".into(), false, false)]

@@ -1,27 +1,13 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! Single source-priority resolver for one command node.
-//!
-//! Historically the same "native completions, else manpage (+help supplement),
-//! else --help" pipeline was written three times — the batch indexer
-//! (`process_pool_job`), the runtime on-the-fly resolver
-//! (`resolve_command_path_and_cache`), and the help-only recursion
-//! (`help_resolve`/`recurse_subcommand`) — and had drifted: the runtime path
-//! ran native completions even for subcommands (which have no payload of their
-//! own), returning a parent's completion payload for a child.
-//!
-//! This module owns that pipeline once. The side-effecting probes (subprocess
-//! `--help`, ELF classification, manpage lookup, the help-supplement merge) are
-//! injected through [`Probe`], so the priority logic here is pure and
-//! unit-testable; the binary supplies a filesystem/subprocess-backed impl and
-//! the two drivers (the worker pool for indexing, the sequential walk for
-//! runtime) keep only their executor and cache-write concerns.
+//! one source-priority resolver for a command node: native completions, else
+//! manpage (+help supplement), else --help. side effects go through [`Probe`]
+//! so the priority logic stays pure and testable; the index pool and the
+//! runtime walk supply their own executor and cache-write.
 
 use crate::parsers::manpage::{ManpageResult, ManpageSubcommand};
 
-/// What an injected probe thinks a binary is, mirroring the indexer's ELF
-/// classification. Only `Skip` is acted on by a driver (the index skips such
-/// binaries entirely); the resolver core uses `HasNativeCompletions` to decide
-/// whether the native-payload probe is worth attempting.
+/// what a probe thinks a binary is. only `Skip` drives behaviour (the index
+/// skips it); the core uses `HasNativeCompletions` to decide whether to probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeClass {
     TryHelp,
@@ -29,62 +15,46 @@ pub enum NodeClass {
     Skip,
 }
 
-/// The side effects a resolve needs, abstracted so the pipeline is pure. A
-/// `Probe` is bound to one binary (it already knows its path, base command,
-/// man directories and timeout); methods take only the per-node `sub_args`.
+/// side effects a resolve needs, abstracted so the pipeline stays pure. bound
+/// to one binary; methods take only the per-node `sub_args`.
 pub trait Probe {
-    /// ELF/script classification of the bound binary.
     fn classify(&self) -> NodeClass;
 
-    /// The native nushell completion payload, if the binary ships one. Only
-    /// ever called at top level (a subcommand has no payload of its own).
+    /// native nushell payload if the binary ships one. top level only.
     fn native_completions(&self) -> Option<String>;
 
-    /// Raw manpage contents for the hyphenated command name (`git-remote`),
-    /// or `None` if no page exists.
+    /// raw manpage for the hyphenated name (`git-remote`), or `None`.
     fn manpage(&self, hyphenated: &str) -> Option<String>;
 
-    /// `--help`/`-h` text for the node (`sub_args` past the base command),
-    /// ansi-stripped, or `None` on failure/timeout/empty output.
+    /// ansi-stripped `--help`/`-h` text, or `None` on failure/timeout/empty.
     fn help_text(&self, sub_args: &[String]) -> Option<String>;
 
-    /// Merge complementary `--help` data into a manpage-derived result
-    /// (descriptions, flag aliases, missing flags/subs/positionals). Returns
-    /// `true` if anything was added. This is the legacy supplement subsystem,
-    /// behavior-preserved and now called from exactly one place.
+    /// merge complementary `--help` data (descs, aliases, missing flags/subs/
+    /// positionals) into a manpage result. `true` if anything was added.
     fn supplement_from_help(&self, result: &mut ManpageResult, sub_args: &[String]) -> bool;
 
-    /// Recover children for a group command whose manpage enumerated none
-    /// (sibling `cmd-sub.N` pages and/or `--help`). `Some(children)` replaces
-    /// the empty list; `None` leaves it (e.g. when sibling pages were indexed
-    /// out-of-band and will be found by a later lookup).
+    /// recover children for a group command whose manpage enumerated none
+    /// (sibling `cmd-sub.N` pages and/or `--help`). `None` leaves the list.
     fn group_children(&self, hyphenated: &str, sub_args: &[String]) -> Option<Vec<ManpageSubcommand>>;
 }
 
-/// The outcome of resolving one node. The driver decides how to persist it
-/// (the core performs no I/O) and whether to recurse into `children`.
+/// outcome of resolving one node; the driver persists it and decides recursion.
 #[derive(Debug, Clone)]
 pub enum Outcome {
-    /// A native completion payload. The driver persists `nu` as the native
-    /// blob and (for callers that want candidates) parses it via the store's
-    /// `parse_nu_completions`. Native payloads describe the whole tool, so
-    /// there are no `children` to recurse and no JSON result to write.
+    /// native payload; describes the whole tool, so no children, no json.
     Native { nu: String },
-    /// Structured content from a manpage or `--help`. `source` is the cache
-    /// tag; `children` are the filtered subcommand tokens to recurse into.
+    /// structured manpage/`--help` content. `source` is the cache tag;
+    /// `children` are subcommand tokens to recurse.
     Content {
         result: ManpageResult,
         source: &'static str,
         children: Vec<String>,
     },
-    /// Nothing usable: an empty parse, or a sub-probe that just echoed the
-    /// parent (the leaf token appeared in its own subcommand list). Nothing to
-    /// cache.
+    /// nothing usable: empty parse, or a sub-probe that echoed its parent.
     Empty,
 }
 
-/// `base` and `sub_args` joined with spaces — the canonical command name
-/// (`git`, `git stash apply`).
+/// `base` + `sub_args` joined with spaces (`git stash apply`).
 pub fn full_cmd(base: &str, sub_args: &[String]) -> String {
     if sub_args.is_empty() {
         base.to_string()
@@ -93,8 +63,7 @@ pub fn full_cmd(base: &str, sub_args: &[String]) -> String {
     }
 }
 
-/// `base` and `sub_args` joined with hyphens — the manpage lookup name
-/// (`git`, `git-stash-apply`).
+/// `base` + `sub_args` joined with hyphens, the manpage name (`git-stash-apply`).
 pub fn hyphenated_cmd(base: &str, sub_args: &[String]) -> String {
     if sub_args.is_empty() {
         base.to_string()
@@ -103,8 +72,7 @@ pub fn hyphenated_cmd(base: &str, sub_args: &[String]) -> String {
     }
 }
 
-/// Subcommand tokens worth recursing into: at least two chars, not a flag, not
-/// the ubiquitous `help` pseudo-command.
+/// subcommand tokens worth recursing: >=2 chars, not a flag, not `help`.
 pub fn child_tokens(subcommands: &[ManpageSubcommand]) -> Vec<String> {
     subcommands
         .iter()
@@ -113,8 +81,8 @@ pub fn child_tokens(subcommands: &[ManpageSubcommand]) -> Vec<String> {
         .collect()
 }
 
-/// True when a sub-probe just echoed its parent: the leaf token appears in the
-/// result's own subcommand list, so the binary didn't recognize it.
+/// sub-probe echoed its parent: the leaf appears in its own sub list, so the
+/// binary didn't recognise it.
 fn self_listed(result: &ManpageResult, sub_args: &[String]) -> bool {
     sub_args.last().is_some_and(|leaf| {
         result
@@ -128,15 +96,9 @@ fn parse_is_empty(r: &ManpageResult) -> bool {
     r.entries.is_empty() && r.subcommands.is_empty() && r.positionals.is_empty()
 }
 
-/// Resolve a single command node, in source-priority order:
-/// 1. native completions (top level only — the drift fix),
-/// 2. manpage as primary content, supplemented by `--help` and with group
-///    children recovered when the page enumerated none,
-/// 3. `--help` text as a fallback.
-///
-/// `parse_help` and `parse_manpage` are passed in (they live in the parser
-/// layer / binary) so this module stays free of the parser wiring; in practice
-/// they are `parse_help_text` and `parse_manpage_string`.
+/// resolve one node in source priority: native (top level only), else manpage
+/// as primary (+help supplement, +recovered group children), else `--help`.
+/// parsers are injected so this stays free of parser wiring.
 pub fn resolve_node(
     probe: &dyn Probe,
     base: &str,
@@ -146,9 +108,8 @@ pub fn resolve_node(
     strip_subcmd_prefix: &dyn Fn(&mut ManpageResult, &str),
     looks_like_unenumerated_group: &dyn Fn(&ManpageResult) -> bool,
 ) -> Outcome {
-    // 1. native completions — top level only. Parsing the blob
-    // (`parse_nu_completions`) needs the full command name and lives in the
-    // store layer, so the driver does it; here we just surface the raw blob.
+    // native, top level only. parsing the blob needs the full name + store
+    // layer, so the driver does it; the raw blob is surfaced here.
     if sub_args.is_empty()
         && probe.classify() == NodeClass::HasNativeCompletions
         && let Some(nu) = probe.native_completions()
@@ -158,7 +119,6 @@ pub fn resolve_node(
 
     let hyphenated = hyphenated_cmd(base, sub_args);
 
-    // 2. manpage as primary content.
     if let Some(contents) = probe.manpage(&hyphenated) {
         let mut result = parse_manpage(&contents);
         if !result.entries.is_empty() || !result.subcommands.is_empty() {
@@ -182,7 +142,6 @@ pub fn resolve_node(
         }
     }
 
-    // 3. --help fallback.
     let Some(text) = probe.help_text(sub_args) else {
         return Outcome::Empty;
     };
@@ -235,8 +194,7 @@ mod tests {
         }
     }
 
-    /// Configurable fake probe; counts native-completion probes so we can
-    /// prove they don't fire for subcommands.
+    /// counts native probes, to prove they don't fire for subcommands.
     struct FakeProbe {
         class: NodeClass,
         native: Option<String>,
@@ -331,9 +289,8 @@ mod tests {
 
     #[test]
     fn native_completions_never_fire_for_subcommands() {
-        // the drift fix: a subcommand has no native payload of its own, so the
-        // probe must not be consulted — otherwise `foo bar` would resolve to
-        // foo's whole-tool completion payload.
+        // a subcommand has no native payload, so the probe must not fire, else
+        // `foo bar` resolves to foo's whole-tool payload.
         let probe = FakeProbe {
             class: NodeClass::HasNativeCompletions,
             native: Some("export extern foo []".into()),
@@ -405,7 +362,6 @@ mod tests {
             help: Some("HELP_SUBS".into()),
             ..Default::default()
         };
-        // HELP_SUBS yields alpha/beta; add a manpage path that yields help+sub
         match resolve(&probe, "foo", &[]) {
             Outcome::Content { children, .. } => {
                 assert!(!children.contains(&"help".to_string()));

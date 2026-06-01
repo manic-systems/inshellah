@@ -2,10 +2,8 @@ use crate::make_parser;
 use crate::parsers::help::helpers::is_option_char;
 use crate::parsers::manpage::{OwnedParam, OwnedSwitch};
 
-// Borrowed parse intermediates, private to the option parser. The public
-// `switch_parser` / `param_parser` / `parse_usage_flags` emit the owned model
-// (`OwnedSwitch` / `OwnedParam`) so the rest of the codebase has one type
-// hierarchy; these zero-copy forms only exist between nom combinators here.
+// zero-copy intermediates, live only between nom combinators here. public
+// parsers emit the owned model.
 enum Switch<'a> {
     Short(char),
     Long(&'a str),
@@ -49,11 +47,9 @@ use nom::{
 make_parser!(short_switch -> char,
     preceded(char('-'), satisfy(|c| c.is_alphanumeric())));
 
-// long flag name: first char must be alphanumeric to reject the
-// `------------` style separator lines that show up in `less --help`
-// (and therefore in zstdless/bzless help output, which wrap less).
-// without this guard, the parser happily eats the whole run of dashes
-// after `--` and produces a flag named `------…`.
+// first char must be alphanumeric to reject `----------` separator lines in
+// `less --help` (and zstdless/bzless wrappers), else the dash run becomes a
+// flag named `------…`.
 make_parser!(long_switch -> &'a str,
 preceded(tag("--"), verify(take_while1(is_option_char), |s: &str| {
     s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
@@ -74,10 +70,8 @@ make_parser!(eq_optional_angle_param -> Param<'a>,
 make_parser!(eq_mandatory_param -> Param<'a>,
     preceded(char('='), take_while1(is_option_char)) => Param::Mandatory);
 
-// take a wide alphanumeric/_/- token then verify the WHOLE thing looks
-// like an ALL_CAPS-style param name. taking only uppercase chars would
-// match just "N" of " Needs: ..." and leave "eeds:..." as desc, so we
-// widen, then reject anything that doesn't pass the all-caps check.
+// widen to a full token then verify all-caps. taking only uppercase chars
+// would match just "N" of " Needs:..." and leave "eeds:..." as desc.
 make_parser!(spaced_uppercase_param -> Param<'a>,
     preceded(
         char(' '),
@@ -104,11 +98,9 @@ make_parser!(spaced_opt_angle_param -> Param<'a>,
 make_parser!(spaced_angle_param_after_space -> Param<'a>,
     preceded(space1, delimited(char('<'), take_till1(|c| c == '>'), char('>'))) => Param::Mandatory);
 
-// take the full lowercase token then verify it's <=10 chars. a
-// take_while_m_n with a 10-char cap would leave a partial match — e.g.
-// "--foo nanoseconds" would extract param "nanosecond" and leave "s" as
-// the description. a word longer than 10 chars is almost certainly the
-// start of the description, not a type annotation.
+// full lowercase token then verify <=10 chars. a 10-char-capped
+// take_while_m_n leaves a partial match: "--foo nanoseconds" yields
+// "nanosecond" and "s" as desc. a word >10 chars is almost certainly desc.
 make_parser!(spaced_type_param -> Param<'a>,
     preceded(
         char(' '),
@@ -130,7 +122,6 @@ make_parser!(param_parser_borrowed -> Param<'a>, alt((
     spaced_type_param,
 )));
 
-// public param parser: the owned model at the module boundary.
 make_parser!(pub param_parser -> OwnedParam, param_parser_borrowed => own_param);
 
 macro_rules! switch_pair {
@@ -161,13 +152,10 @@ make_parser!(slash_sep -> (),
 switch_pair!(long_slash_short,
     long_switch, slash_sep, short_switch => |l, s| Switch::Both(s, l));
 
-// `-s PARAM, --long` form — ripgrep and other clap-via-roff manpages emit
-// the placeholder between the short and long forms:
-//   `\-e PATTERN, \-\-regexp=PATTERN`
-//   `\-f PATTERNFILE, \-\-file=PATTERNFILE`
-// the placeholder is matched conservatively (uppercase identifier or
-// `<angle>` form) so we don't eat normal description words. the trailing
-// `=PATTERN` / ` PATTERN` is left for `opt(param_parser)` to consume.
+// `-s PARAM, --long` form. ripgrep and other clap-via-roff manpages emit the
+// placeholder between short and long forms (`\-e PATTERN, \-\-regexp=PATTERN`).
+// matched conservatively (uppercase ident or `<angle>`) to avoid eating desc
+// words. trailing `=PATTERN` / ` PATTERN` left for opt(param_parser).
 make_parser!(placeholder_token -> &'a str,
     alt((
         delimited(char('<'), take_till1(|c: char| c == '>'), char('>')),
@@ -208,12 +196,10 @@ make_parser!(switch_parser_borrowed -> Switch<'a>,
     ))
 );
 
-// public switch parser: the owned model at the module boundary.
 make_parser!(pub switch_parser -> OwnedSwitch, switch_parser_borrowed => own_switch);
 
-// `{--long | -s}` — manpage SYNOPSIS-line switch pair. nix-env's
-// synopsis is the canonical case: `[{--file | -f} path] [{--profile |
-// -p} path]`. emits Switch::Both with the long name.
+// `{--long | -s}` SYNOPSIS-line switch pair, e.g. nix-env's
+// `[{--file | -f} path]`.
 make_parser!(brace_pipe_long_short -> Switch<'a>,
     separated_pair(long_switch, (space0, char('|'), space0), short_switch)
     => |(l, s): (&'a str, char)| Switch::Both(s, l)
@@ -236,12 +222,10 @@ make_parser!(usage_switch_parser -> Switch<'a>,
     alt((brace_pipe_switch, switch_parser_borrowed))
 );
 
-// consume any chars except `]`. used to swallow trailing tokens inside a
-// flag bracket — e.g. `[--option name value]` keeps switch=Long("option")
-// and param=Mandatory("name"), discarding ` value` before the closing `]`.
+// trailing tokens inside a flag bracket. `[--option name value]` keeps
+// switch=Long("option") param=Mandatory("name"), discards ` value`.
 make_parser!(take_till_bracket -> &'a str, take_till(|c: char| c == ']'));
 
-// `[<switch> [param] <junk>]` inside the SYNOPSIS line.
 make_parser!(flag_in_bracket -> (Switch<'a>, Option<Param<'a>>),
     delimited(
         (char('['), space0),
@@ -250,15 +234,13 @@ make_parser!(flag_in_bracket -> (Switch<'a>, Option<Param<'a>>),
     )
 );
 
-// walk the joined SYNOPSIS-line text, collecting every flag-bracketed
-// switch + its first param. non-flag tokens (positional brackets,
-// command name, ellipses) are skipped one char at a time. Emits the owned
-// model.
+// collect every flag-bracketed switch and its first param. non-flag tokens
+// (positional brackets, command name, ellipses) skipped one char at a time.
 make_parser!(pub parse_usage_flags -> Vec<(OwnedSwitch, Option<OwnedParam>)>,
     many0(alt((
         map(flag_in_bracket, Some),
-        // `value(None, ...)` requires `None: Clone` which forces Clone
-        // on Switch/Param; `map(..., |_| None)` doesn't.
+        // `value(None, ...)` forces Clone on Switch/Param, `map(..., |_| None)`
+        // doesn't.
         map(satisfy(|c| c != '\n' && c != '\r'), |_| None),
     )))
     => |v: Vec<Option<(Switch<'a>, Option<Param<'a>>)>>|

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! per-command dynamic completion: git refs, kubectl resources, systemctl
-//! units, etc. fires from `cmd_complete` when the static cache yields
-//! nothing. the nushell shim is now just JSON glue.
+//! per-command dynamic completion (git refs, systemctl units, ...). fires from
+//! `cmd_complete` when the static cache is empty.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -13,17 +12,14 @@ mod shared;
 
 use shared::{DynCtx, filter_candidates};
 
-/// candidates as JSON `{"value":..,"description":..}`, or None to hand
-/// off to nu's file completer.
+/// candidates as JSON, or None to hand off to nu's file completer.
 pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
     dynamic_complete_with_path(spans, None, cfg)
 }
 
-/// preempt path: value completions (adb device serials / package names) that
-/// override static flag completion. `Some` (even empty) suppresses static;
-/// `None` lets static answer. unlike the handoff path these candidates are
-/// already scored/ordered and carry their own replacement prefixes, so they
-/// bypass `filter_candidates`.
+/// preempt path: value completions (adb serials/packages) that override static
+/// flags. `Some` (even empty) suppresses static. already scored, so they skip
+/// `filter_candidates`.
 pub fn dynamic_value_completions(
     cmd_name: &str,
     rest: &[String],
@@ -48,8 +44,7 @@ pub fn dynamic_value_completions(
     Some(raw.into_iter().map(|c| c.into_json()).collect())
 }
 
-/// Like `dynamic_complete`, but subprocess-backed providers invoke
-/// `explicit_cmd_path` for the completed command instead of resolving
+/// like `dynamic_complete` but runs `explicit_cmd_path` instead of resolving
 /// `spans[0]` through PATH.
 pub fn dynamic_complete_with_path(
     spans: &[String],

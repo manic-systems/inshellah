@@ -22,9 +22,9 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
     if lines.is_empty() {
         return None;
     }
-    // nix's own completion can return the whole attribute set for a bare
-    // `nixpkgs#` (tens of thousands of entries); bound it like every other
-    // provider so we don't ship — and fuzzy-score — megabytes per keystroke.
+    // bare `nixpkgs#` makes nix return the whole attribute set (tens of
+    // thousands of entries), bound it like every other provider to avoid
+    // shipping and fuzzy-scoring megabytes per keystroke.
     if ctx.limit != 0 && lines.len() > ctx.limit {
         lines.truncate(ctx.limit);
     }

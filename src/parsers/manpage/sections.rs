@@ -1,7 +1,4 @@
-//! section extraction from manpages.
-//!
-//! manpages are divided into sections by .SH macros. we extract OPTIONS,
-//! NAME, SYNOPSIS, and COMMANDS sections for their specific content.
+//! slice .SH sections (OPTIONS, NAME, SYNOPSIS, COMMANDS) out of a manpage.
 
 use nom::{Parser, sequence::preceded};
 
@@ -21,17 +18,14 @@ fn is_options_section(name: &str) -> bool {
     upper == "OPTIONS" || upper.contains("OPTION")
 }
 
-/// is this line a section heading whose name passes `header`? `also_ss`
-/// extends matching to `.SS` subsection headings (synopsis uses this).
+/// `also_ss` extends matching to `.SS` subsections.
 fn section_heading(line: &GroffLine, also_ss: bool, header: impl Fn(&str) -> bool) -> bool {
     matches!(line, GroffLine::Macro { name, args }
         if (name == "SH" || (also_ss && name == "SS")) && header(args))
 }
 
-/// collect the body lines of the FIRST `.SH`/`.SS` section whose heading
-/// passes `header`. the body runs until the next `.SH` (and, when `also_ss`,
-/// the next `.SS`). this is the single shape behind the per-section slicers;
-/// the `header` predicate is the only thing that varies between them.
+/// body of the first `.SH`/`.SS` section whose heading passes `header`, up to the
+/// next `.SH` (and `.SS` when `also_ss`).
 fn first_section_body(
     lines: &[GroffLine],
     also_ss: bool,
@@ -48,10 +42,8 @@ fn first_section_body(
     Vec::new()
 }
 
-/// collect and concatenate the bodies of EVERY `.SH` section whose heading
-/// passes `header`. used where a tool splits the same logical section across
-/// several headings (git's multiple COMMANDS groups, nix's Options + Common
-/// Options).
+/// concatenate the bodies of every `.SH` section passing `header`, for tools that
+/// split one logical section across headings (git's COMMANDS groups).
 fn all_section_bodies(lines: &[GroffLine], header: impl Fn(&str) -> bool) -> Vec<GroffLine> {
     let mut acc: Vec<GroffLine> = Vec::new();
     let mut i = 0;
@@ -66,8 +58,8 @@ fn all_section_bodies(lines: &[GroffLine], header: impl Fn(&str) -> bool) -> Vec
     acc
 }
 
-/// from `*i` (just past a heading), clone lines until the next `.SH` (and,
-/// when `also_ss`, the next `.SS`), leaving `*i` on that boundary.
+/// from `*i` (just past a heading), clone lines until the next `.SH` (and `.SS`
+/// when `also_ss`), leaving `*i` on the boundary.
 fn take_until_boundary(lines: &[GroffLine], i: &mut usize, also_ss: bool) -> Vec<GroffLine> {
     let mut acc: Vec<GroffLine> = Vec::new();
     while *i < lines.len() {
@@ -82,14 +74,11 @@ fn take_until_boundary(lines: &[GroffLine], i: &mut usize, also_ss: bool) -> Vec
     acc
 }
 
-/// extract the lines from the OPTIONS section(s). collects from all
-/// option-like .SH sections and concatenates them (handles the nix pattern
-/// of "Options" and "Common Options" being separate sections).
-/// falls back to DESCRIPTION if no OPTIONS section exists.
+/// concatenate all option-like .SH sections (nix's "Options" + "Common
+/// Options"), falling back to DESCRIPTION when none exist.
 pub fn extract_options_section(lines: &[GroffLine]) -> Vec<GroffLine> {
-    // unlike all_section_bodies, the option sections need a synthetic empty
-    // .SH between them so the description collector (which stops on SH/SS)
-    // does not let one section's last description bleed into the next.
+    // synthetic empty .SH between sections so the description collector (which
+    // stops on SH/SS) can't bleed one section's last description into the next.
     let mut acc: Vec<GroffLine> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -109,7 +98,6 @@ pub fn extract_options_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     if !acc.is_empty() {
         return acc;
     }
-    // fallback: DESCRIPTION section
     extract_named_section(lines, "DESCRIPTION")
 }
 
@@ -119,9 +107,8 @@ fn extract_named_section(lines: &[GroffLine], section_name: &str) -> Vec<GroffLi
     })
 }
 
-/// the NAME section follows the convention "command \- short description".
-/// extract the part after "\-" as the command's description.
-/// handles both "\-" (groff) and " - " (plain text) separators.
+/// NAME reads "command \- short description"; return the part after the
+/// separator. handles `\-` (groff) and ` - ` (plain text).
 pub fn extract_name_description(lines: &[GroffLine]) -> Option<String> {
     let mut i = 0;
     while i < lines.len() {
@@ -174,10 +161,8 @@ pub fn extract_name_description(lines: &[GroffLine]) -> Option<String> {
     None
 }
 
-/// split a NAME line on either "\-" (groff) or " - " (plain).
-/// returns the part after the separator, trimmed.
+/// split on the earliest `\-` or ` - `, returning the trimmed part after it.
 fn split_name_separator(full: &str) -> Option<String> {
-    // search for either marker
     let groff_idx = find_padded(full, "\\-");
     let dash_idx = find_padded(full, " - ");
     let idx = match (groff_idx, dash_idx) {
@@ -186,7 +171,6 @@ fn split_name_separator(full: &str) -> Option<String> {
         (None, Some(b)) => Some(b),
         (None, None) => None,
     }?;
-    // skip past the matched separator
     let after = if full[idx..].starts_with("\\-") {
         &full[idx + 2..]
     } else {
@@ -196,28 +180,15 @@ fn split_name_separator(full: &str) -> Option<String> {
     if desc.is_empty() { None } else { Some(desc) }
 }
 
-/// find a marker preceded and followed by optional surrounding space.
-/// approximated by a simple substring search — accepts spaces on either
-/// side without enforcing how many.
 fn find_padded(s: &str, needle: &str) -> Option<usize> {
     s.find(needle)
 }
 
-/// extract the command name from the SYNOPSIS section.
-///
-/// the SYNOPSIS section shows how to invoke the command:
-///   .SH SYNOPSIS
-///   .B git add
-///   [\fIOPTIONS\fR] [\fB\-\-\fR] [\fI<pathspec>\fR...]
-///
-/// we extract the command name by taking consecutive "word" tokens until
-/// we hit something that looks like an argument (starts with [, <, -, etc.).
+/// command name from SYNOPSIS: leading word tokens until an argument-looking one
+/// (starts with [, <, -, etc.).
 pub fn extract_synopsis_command(contents: &str) -> Option<String> {
-    // pre-replace italic text (\fI...\fR) with angle-bracketed placeholders
-    // before classification strips the font info. italic in groff indicates
-    // a parameter/placeholder (e.g. \fIoperation\fR), not a command word.
-    // the angle brackets cause extract_cmd to stop at these tokens since
-    // '<' is in its stop set.
+    // italic marks a param, not a command word; rewrite \fI...\fR to angle brackets
+    // (in extract_cmd's stop set) before classification strips font info.
     let preprocessed: Vec<String> = contents
         .split('\n')
         .map(replace_italic_with_angles)
@@ -351,15 +322,12 @@ fn looks_like_synopsis_prose(line: &str, cmd: &str, reject_long_unmarked: bool) 
         && !line_has_invocation_marker
 }
 
-/// replace \fI...\f[RP] sequences with <...> so italic params are seen as
-/// non-word tokens by extract_cmd.
+/// replace \fI...\f[RP] with <...> so extract_cmd sees italic params as non-word
+/// tokens.
 ///
-/// exception: some manpages put the command name itself in italics (e.g.
-/// git-am.1's synopsis reads `\fIgit am\fR ...`). when the first italic
-/// block on the line appears at the very start (preceded only by
-/// whitespace) and its content looks like a command word, we strip the
-/// font markers but leave the content bare so extract_cmd treats it as
-/// the command name rather than a placeholder.
+/// exception: some synopses italicise the command name itself (git-am.1's
+/// `\fIgit am\fR`). when the first italic block sits at line start and looks like
+/// a command word, leave it bare so extract_cmd takes it as the command.
 fn replace_italic_with_angles(line: &str) -> String {
     let bytes = line.as_bytes();
     let len = bytes.len();
@@ -369,7 +337,7 @@ fn replace_italic_with_angles(line: &str) -> String {
     while i < len {
         // byte-compare to avoid panicking on non-ASCII char boundaries
         if i + 3 <= len && &bytes[i..i + 3] == b"\\fI" {
-            // find closing \fR or \fP — scan to next '\\'
+            // scan to the closing \fR or \fP
             let inner_start = i + 3;
             let mut j = inner_start;
             while j < len && bytes[j] != b'\\' {
@@ -401,9 +369,8 @@ fn replace_italic_with_angles(line: &str) -> String {
     out
 }
 
-/// is the italic content something that looks like a command name (rather
-/// than a placeholder)? lowercase letters, digits, hyphens, underscores,
-/// dots, and spaces only, after groff escapes (like `\-`) are resolved.
+/// italic content looks like a command name, not a placeholder: lowercase,
+/// digits, hyphens, underscores, dots, spaces only.
 fn italic_looks_like_command(inner: &str) -> bool {
     let stripped = strip_groff_escapes(inner);
     let trimmed = stripped.trim();
@@ -413,7 +380,6 @@ fn italic_looks_like_command(inner: &str) -> bool {
         })
 }
 
-/// extract the command name from a synopsis line by taking leading word tokens.
 fn extract_cmd(line: &str) -> Option<String> {
     let words: Vec<&str> = line.split(' ').filter(|w| !w.is_empty()).collect();
     let is_cmd_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
@@ -436,10 +402,9 @@ fn extract_cmd(line: &str) -> Option<String> {
     }
 }
 
-/// extract the lines that form the SYNOPSIS section. an `.SS SYNOPSIS`
-/// subsection ends at the next `.SS` too, but an `.SH SYNOPSIS` runs through
-/// any `.SS` until the next `.SH` — so the boundary follows the matched
-/// heading kind.
+/// the SYNOPSIS section lines. boundary follows the matched heading kind: `.SS
+/// SYNOPSIS` ends at the next `.SS`, `.SH SYNOPSIS` runs through any `.SS` until
+/// the next `.SH`.
 fn extract_synopsis_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     let mut i = 0;
     while i < lines.len() {
@@ -456,9 +421,6 @@ fn extract_synopsis_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     Vec::new()
 }
 
-/// extract positional arguments from the SYNOPSIS section.
-/// joins all text/formatting macro lines via `join_synopsis_text`, then
-/// skips the command name prefix and runs `parse_usage_args` on the rest.
 pub fn extract_synopsis_positionals(lines: &[GroffLine]) -> Vec<(String, Positional)> {
     let full = join_synopsis_text(lines);
     if full.is_empty() {
@@ -475,9 +437,8 @@ pub fn extract_synopsis_positionals(lines: &[GroffLine]) -> Vec<(String, Positio
     }
 }
 
-/// extract positional arguments from clap-style `Usage:` text embedded in a
-/// manpage section. this is mainly for `.SH SUBCOMMAND` bodies, which are
-/// parsed as standalone command fragments rather than full manpages.
+/// positionals from clap-style `Usage:` text embedded in a section, mainly `.SH
+/// SUBCOMMAND` bodies parsed as standalone fragments.
 pub fn extract_usage_positionals_from_lines(lines: &[GroffLine]) -> Vec<(String, Positional)> {
     let text = render_plain_text_lines(lines);
     if text.trim().is_empty() {
@@ -525,9 +486,9 @@ fn render_plain_text_lines(lines: &[GroffLine]) -> String {
     out
 }
 
-/// join the SYNOPSIS section into a single line of plain text, stripping
-/// groff escapes and inline font macros. shared by both the positional
-/// and flag extractors so they see identical input.
+/// join the SYNOPSIS section into one line of plain text, stripping groff escapes
+/// and inline font macros. shared by the positional and flag extractors so both
+/// see identical input.
 fn join_synopsis_text(lines: &[GroffLine]) -> String {
     let section = extract_synopsis_section(lines);
     let mut acc: Vec<String> = Vec::new();
@@ -601,13 +562,10 @@ fn render_leading_italic_arg(args: &str) -> String {
     }
 }
 
-/// extract flag-tagged entries from the SYNOPSIS line. some manpages
-/// (notably nix-env, sed) declare flags only in the synopsis and never
-/// repeat them as entries in the OPTIONS body, so the body-only pass
-/// misses them. we join the synopsis text the same way the positional
-/// extractor does, then run `parse_usage_flags` over every bracketed
-/// switch+param. callers merge with body entries; body wins on duplicate
-/// flag names since body descriptions are richer.
+/// flag-tagged entries from the SYNOPSIS line. some manpages (nix-env, sed)
+/// declare flags only in the synopsis, never in OPTIONS, so the body-only pass
+/// misses them. callers merge with body entries; body wins on dup names since its
+/// descriptions are richer.
 pub fn extract_synopsis_flags(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let full = join_synopsis_text(lines);
     if full.is_empty() {
@@ -628,13 +586,12 @@ pub fn extract_synopsis_flags(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     }
 }
 
-/// extract first-positional choices from prose lists in DESCRIPTION.
+/// first-positional choices from prose lists in DESCRIPTION, returned as
+/// subcommand-like candidates.
 ///
-/// getent(1) is the motivating shape: the synopsis has a `database`
-/// positional, while the actual database names are documented as a tagged
-/// list under DESCRIPTION rather than as subcommands or options. The
-/// completion model currently has no separate "positional choices" channel,
-/// so these are represented as subcommand-like candidates for completion.
+/// getent(1) is the motivating shape: a `database` positional in the synopsis,
+/// the database names documented as a tagged list under DESCRIPTION rather than
+/// as subcommands.
 pub fn extract_description_positionals(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
     let description = extract_named_section(lines, "DESCRIPTION");
     if description.is_empty() || !description_mentions_listed_database(&description) {
@@ -751,8 +708,8 @@ fn first_sentence(text: &str) -> String {
 
 fn is_commands_section(name: &str) -> bool {
     let trimmed = name.trim();
-    // strip a trailing parenthetical group so "HIGH-LEVEL COMMANDS (PORCELAIN)"
-    // (which is git.1's pattern) is treated as "HIGH-LEVEL COMMANDS".
+    // strip a trailing parenthetical so git.1's "HIGH-LEVEL COMMANDS (PORCELAIN)"
+    // is treated as "HIGH-LEVEL COMMANDS".
     let core = match (trimmed.rfind('('), trimmed.ends_with(')')) {
         (Some(open), true) => trimmed[..open].trim(),
         _ => trimmed,
@@ -761,21 +718,18 @@ fn is_commands_section(name: &str) -> bool {
     if upper == "COMMAND" || upper == "COMMANDS" {
         return true;
     }
-    // accept headings ending in " COMMANDS" — catches "GIT COMMANDS",
-    // "MAIN COMMANDS", "HIGH-LEVEL COMMANDS", "LOW-LEVEL COMMANDS". the
-    // leading space prevents matches against "COMMAND LINE OPTIONS" etc.
+    // headings ending in " COMMANDS" ("GIT COMMANDS", ...). the leading space
+    // rejects "COMMAND LINE OPTIONS".
     upper.ends_with(" COMMANDS")
 }
 
-/// find all COMMANDS/.COMMAND sections and collect their lines.
 pub fn extract_commands_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     all_section_bodies(lines, is_commands_section)
 }
 
-/// collect the body of a `.SH SUBCOMMAND(S)` section. jj/clap group
-/// manpages enumerate their children there as `.TP` manpage cross-references
-/// rather than the inline `*COMMANDS` layout `extract_commands_section`
-/// handles, so this is a separate, narrowly-scoped grab.
+/// body of a `.SH SUBCOMMAND(S)` section. jj/clap group manpages enumerate
+/// children there as `.TP` cross-references, not the inline `*COMMANDS` layout
+/// `extract_commands_section` handles.
 pub fn extract_subcommand_list_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     all_section_bodies(lines, |args| {
         matches!(
@@ -785,12 +739,10 @@ pub fn extract_subcommand_list_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     })
 }
 
-/// extract SUBCOMMAND-style sections (clap-generated manpages put each
-/// subcommand under its own .SH SUBCOMMAND header with a Usage: line).
-/// returns triples of (name, description, lines) so the caller can re-parse
-/// each section as its own help_result.
+/// SUBCOMMAND-style sections (clap-generated manpages put each subcommand under
+/// its own .SH SUBCOMMAND header with a Usage: line). (name, description, lines)
+/// triples so the caller can re-parse each as its own help_result.
 pub fn extract_subcommand_sections(lines: &[GroffLine]) -> Vec<(String, String, Vec<GroffLine>)> {
-    // split into sections at .SH boundaries, keeping only SUBCOMMAND(S) ones
     let mut sections: Vec<Vec<GroffLine>> = Vec::new();
     let mut current_name: Option<String> = None;
     let mut current: Vec<GroffLine> = Vec::new();
@@ -819,7 +771,6 @@ pub fn extract_subcommand_sections(lines: &[GroffLine]) -> Vec<(String, String, 
 
     let mut out = Vec::new();
     for section in sections {
-        // scan section lines for the Usage: line to get the subcommand name
         let mut subcmd_name: Option<String> = None;
         let mut desc_lines: Vec<String> = Vec::new();
         for line in &section {
@@ -851,8 +802,6 @@ pub fn extract_subcommand_sections(lines: &[GroffLine]) -> Vec<(String, String, 
     out
 }
 
-/// look for "Usage: NAME" and return NAME if found.
-/// NAME contains alphanumeric, underscore, or dash.
 fn find_usage_name(text: &str) -> Option<String> {
     const MARKER: &str = "Usage: ";
     let idx = text.find(MARKER)?;
@@ -867,7 +816,6 @@ fn find_usage_name(text: &str) -> Option<String> {
     }
 }
 
-/// strip backtick-quoted words: `word` -> word.
 fn strip_backtick_words(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;

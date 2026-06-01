@@ -14,9 +14,8 @@ pub(crate) mod systemd;
 
 type CompleteFn = fn(&[String], &DynCtx<'_>) -> Option<Vec<Candidate>>;
 
-/// where a provider sits relative to static completion. `Value` providers
-/// (adb selectors) preempt static flags; `Fallback` providers answer only
-/// when static completion produced nothing.
+/// where a provider sits relative to static completion. `Value` preempts static
+/// flags; `Fallback` answers only when static produced nothing.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Value,
@@ -115,16 +114,15 @@ fn provider_for(cmd: &str, kind: Kind) -> Option<&'static FunctionProvider> {
         .find(|provider| provider.kind() == kind && provider.commands().contains(&cmd))
 }
 
-/// handoff dispatch: fallback providers, called when static completion was
-/// empty. value providers (adb) are excluded here; they answer via
-/// `value_completions` before static runs.
+/// fallback providers, called when static completion was empty. value providers
+/// answer earlier via `value_completions`.
 pub(crate) fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     let cmd = spans.first()?.as_str();
     provider_for(cmd, Kind::Fallback).and_then(|provider| provider.complete(spans, ctx))
 }
 
-/// preempt dispatch: value providers (adb) that answer before static flag
-/// completion. `Some` (even empty) suppresses static; `None` falls through.
+/// value providers that answer before static flag completion. `Some` (even
+/// empty) suppresses static; `None` falls through.
 pub(crate) fn value_completions(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     let cmd = spans.first()?.as_str();
     provider_for(cmd, Kind::Value).and_then(|provider| provider.complete(spans, ctx))

@@ -1,20 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! Completion candidates: the shared scorer, the typed `Candidate`, and JSON
+//! completion candidates: the shared scorer, the typed `Candidate`, and JSON
 //! rendering.
-//!
-//! `fuzzy_score` and the JSON escaper previously existed verbatim in both
-//! `main.rs` (the static completer) and `dynamic/shared.rs` (the live
-//! providers), with a comment warning that the two copies had to be kept in
-//! sync by hand. They live here once now; both consumers import them.
 
 use std::fmt::Write as _;
 
 use crate::config::Config;
 use crate::parsers::manpage::{ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch};
 
-/// A single completion candidate. Rendered to JSON only at the output
-/// boundary (`into_json` / `completion_json`), so the rest of the pipeline
-/// works with typed values rather than pre-serialized strings.
 #[derive(Clone, Debug)]
 pub struct Candidate {
     pub value: String,
@@ -34,7 +26,6 @@ impl Candidate {
     }
 }
 
-/// `{"value":"…","description":"…"}` with both fields JSON-escaped.
 pub fn completion_json(value: &str, desc: &str) -> String {
     let mut out = String::with_capacity(value.len() + desc.len() + 30);
     out.push_str(r#"{"value":""#);
@@ -61,9 +52,8 @@ fn push_json_escaped(out: &mut String, s: &str) {
     }
 }
 
-/// Rank `needle` against `haystack`: exact match 1000, case-insensitive prefix
-/// 900+length-bonus, otherwise a subsequence score rewarding word boundaries
-/// and runs. 0 means no match; empty needle scores 1 (keep, unranked).
+/// exact 1000, ci-prefix 900+len bonus, else a subsequence score rewarding word
+/// boundaries and runs. 0 = no match; empty needle = 1 (keep, unranked).
 pub fn fuzzy_score(needle: &str, haystack: &str) -> i32 {
     let needle_len = needle.len();
     let haystack_len = haystack.len();
@@ -119,8 +109,7 @@ pub fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
             .all(|(&hay, &needle)| hay.eq_ignore_ascii_case(&needle))
 }
 
-/// A flag's tooltip: its description with the parameter placeholder appended
-/// (`<FILE>` for mandatory, `[FILE]` for optional).
+/// param placeholder convention: `<FILE>` mandatory, `[FILE]` optional.
 pub fn entry_completion_desc(e: &ManpageEntry) -> String {
     match &e.param {
         Some(OwnedParam::Mandatory(p)) => {
@@ -141,18 +130,10 @@ pub fn entry_completion_desc(e: &ManpageEntry) -> String {
     }
 }
 
-/// Score and rank the subcommand + flag candidates for a matched command
-/// `result`. Pure — the caller renders the returned candidates to JSON.
-///
-/// `matched_depth` is how many command tokens the cache match covered;
-/// `resolve_depth` is how many complete (non-partial) tokens the user typed.
-/// Subcommands are emitted ONLY when `matched_depth >= resolve_depth` — i.e.
-/// the match is a full prefix of what was typed. When the user has typed past
-/// the deepest cached command (e.g. `systemctl status` falls back to the
-/// `systemctl` match at depth 1), offering that ancestor's subcommands would
-/// be wrong; we stay silent so the dynamic completer (unit names, etc.) takes
-/// over. A token that exactly equals a candidate is dropped so it isn't echoed
-/// back, masking a downstream completer.
+/// subcommands emit only when `matched_depth >= resolve_depth` (match is a full
+/// prefix of what was typed). typing past the deepest cached command stays silent
+/// so nushell's dynamic completer can take over. a token equal to a candidate is
+/// dropped so it isn't echoed back.
 pub fn generate_candidates(
     result: &ManpageResult,
     matched_depth: usize,
@@ -177,11 +158,7 @@ pub fn generate_candidates(
     );
 
     if matched_depth >= resolve_depth {
-        // subcommands and positional-argument value choices (getent's database
-        // names) complete in the same argument slot; score both against the
-        // typed token. they live in distinct model channels so only real
-        // subcommands feed recursion/supplement, but the user sees one ranked
-        // list here.
+        // subcommands and positional-arg choices (getent db names) share one slot.
         let choices = subs.iter().chain(result.positional_choices.iter());
         for sc in choices {
             if !last_token.is_empty() && last_token == sc.name {
@@ -194,10 +171,8 @@ pub fn generate_candidates(
         }
     }
 
-    // flag candidates. the needle — and whether it scores against the bare flag
-    // name or the dashed form — depends on which trigger the user typed (see
-    // Config::flag_needle). the default "-" trigger keeps the dashed form, so
-    // ranking is unchanged.
+    // bare-vs-dashed scoring depends on the trigger typed (Config::flag_needle),
+    // default "-" keeps the dashed form.
     if typing_flag {
         let fneedle = cfg.flag_needle(last_token);
         let score_against = |dashed: &str, bare_name: &str| -> i32 {
@@ -296,16 +271,11 @@ mod tests {
 
     #[test]
     fn depth_guard_suppresses_subs_on_shallow_match() {
-        // `systemctl status` not cached -> match falls back to `systemctl` at
-        // depth 1 while resolve_depth is 2. The ancestor's subcommands must NOT
-        // be offered (the user typed past them); the dynamic completer takes
-        // over. matched_depth(1) < resolve_depth(2) => empty.
         let r = result_with_subs(&["start", "stop", "status"]);
         let cfg = Config::default();
         let shallow = generate_candidates(&r, 1, 2, "stat", &[], false, &cfg);
         assert!(shallow.is_empty(), "shallow match must not emit subs");
 
-        // full-prefix match (depth == resolve_depth) offers the fuzzy hits.
         let full = generate_candidates(&r, 1, 1, "st", &[], false, &cfg);
         let values: Vec<&str> = full.iter().map(|c| c.value.as_str()).collect();
         assert!(values.contains(&"start"));
@@ -314,8 +284,6 @@ mod tests {
 
     #[test]
     fn exact_token_is_dropped_to_unmask_downstream() {
-        // typing the full word back drops it, so a downstream completer isn't
-        // masked by an echo.
         let r = result_with_subs(&["status"]);
         let cfg = Config::default();
         let out = generate_candidates(&r, 1, 1, "status", &[], false, &cfg);

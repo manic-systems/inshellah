@@ -56,8 +56,8 @@ const JJ_REV_FLAGS: &[&str] = &[
     "--onto",
     "--change",
 ];
-// rewriting verbs draw their primary revset args from mutable(). their
-// destination/anchor flags (below) still draw from all().
+// rewriting verbs take primary revsets from mutable(); their dest/anchor flags
+// (below) still take all().
 const JJ_MUTABLE_VERBS: &[&str] = &[
     "abandon",
     "desc",
@@ -136,8 +136,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
     };
     let last = spans.last().map(String::as_str).unwrap_or("");
 
-    // rebase's `-b`/`--branch` is a revset; git push's `-b`/`--bookmark` is
-    // a local bookmark name. disambiguate on the subcommand.
+    // rebase's `-b`/`--branch` is a revset; git push's `-b` is a bookmark.
     if prev == "--branch" || (prev == "-b" && sub == "rebase") {
         return jj_revs(ctx, last, "mutable()");
     }
@@ -321,8 +320,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
     None
 }
 
-/// rewriting verbs pull their primary revsets from `mutable()`. the same
-/// verb's destination/anchor flags still pull from `all()`.
+/// mutable() for a rewriting verb's primary revsets, all() for its dest flags.
 fn jj_flag_revset(sub: &str, flag: &str) -> &'static str {
     if JJ_MUTABLE_VERBS.contains(&sub) && !JJ_DEST_FLAGS.contains(&flag) {
         "mutable()"
@@ -393,10 +391,9 @@ fn jj_change_ids(ctx: &DynCtx, revset: &str) -> Option<Vec<Candidate>> {
     Some(parse_tabular(&out, 2, |p| Candidate::new(p[0], p[1])))
 }
 
-/// config option names for `config get`/`set`/`list`/`unset`. `leaves_only`
-/// keeps just settable leaf keys (for get/set/unset), `list` also wants the
-/// intermediate table prefixes, derived here. `set_only` drops defaults so
-/// `unset` offers only keys actually present in a config file.
+/// config keys for `config get`/`set`/`list`/`unset`. `leaves_only` keeps just
+/// settable leaves; `list` also wants table prefixes. `set_only` drops defaults
+/// so `unset` only offers keys present in a file.
 fn jj_config_keys(ctx: &DynCtx, leaves_only: bool, set_only: bool) -> Option<Vec<Candidate>> {
     let mut args: Vec<String> = vec![ctx.bin("jj"), "config".into(), "list".into()];
     if !set_only {
@@ -414,7 +411,6 @@ fn jj_config_keys(ctx: &DynCtx, leaves_only: bool, set_only: bool) -> Option<Vec
             continue;
         }
         if !leaves_only {
-            // emit every dotted prefix as its own candidate
             let mut idx = 0;
             while let Some(dot) = name[idx..].find('.') {
                 let end = idx + dot;
@@ -477,10 +473,8 @@ fn jj_revset_aliases(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-/// named templates for `-T`/`--template`. jj stores builtins and user
-/// templates alike under `template-aliases.*`; parameterised ones come
-/// through quoted (`"format_short_id(id)"`) and are skipped, leaving the
-/// same nullary set jj's own completer offers.
+/// named templates for `-T`/`--template`, from `template-aliases.*`.
+/// parameterised ones come through quoted and are skipped.
 fn jj_templates(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run(
         &[
@@ -510,10 +504,9 @@ fn jj_templates(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-/// mirrors jj's `split_revset_trailing_name`: locate where the trailing
-/// symbol of a compound revset starts so candidates can be re-prefixed
-/// with everything before it. returns `(prefix, trailing_symbol)`; when
-/// the tail doesn't look like a symbol the whole string is the symbol.
+/// mirrors jj: find where the trailing symbol of a compound revset starts, so
+/// candidates can be re-prefixed. returns `(prefix, symbol)`; a non-symbol tail
+/// means the whole string is the symbol.
 pub(crate) fn split_revset_trailing_name(s: &str) -> (&str, &str) {
     let after_op = s
         .rsplit_once([':', '~', '|', '&', '(', ','])
@@ -531,9 +524,8 @@ pub(crate) fn split_revset_trailing_name(s: &str) -> (&str, &str) {
     }
 }
 
-/// a partially-typed revset symbol: word chars, `_` and `/`, with single
-/// `@ . + -` separators between (never leading, never doubled). a trailing
-/// separator is allowed so `main@` completes the remote part.
+/// a partial revset symbol: word chars, `_`, `/`, single `@ . + -` separators
+/// (never leading/doubled). trailing separator allowed so `main@` completes the remote.
 pub(crate) fn is_revset_symbol_prefix(s: &str) -> bool {
     let is_sep = |c: char| matches!(c, '@' | '.' | '+' | '-');
     let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '/';
@@ -553,8 +545,7 @@ pub(crate) fn is_revset_symbol_prefix(s: &str) -> bool {
     true
 }
 
-/// local bookmarks; `revset` (`all()`/`mutable()`) scopes them by their
-/// local target so `mutable()` callers don't offer immutable bookmarks.
+/// local bookmarks, scoped by `revset` so mutable() callers skip immutable ones.
 fn jj_bookmarks(ctx: &DynCtx, revset: &str) -> Option<Vec<Candidate>> {
     let out = run(
         &[
