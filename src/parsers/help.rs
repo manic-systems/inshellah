@@ -200,6 +200,7 @@ fn build_help_result(original: &str) -> ManpageResult {
     let mut result = ManpageResult {
         entries,
         subcommands,
+        positional_choices: Vec::new(),
         positionals,
         description: String::new(),
     };

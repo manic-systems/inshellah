@@ -6,6 +6,7 @@ subcommands:
   run
   test
   help
+positional_choices:
 flags:
   -V|--version
   -v|--verbose

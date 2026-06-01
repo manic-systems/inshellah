@@ -346,22 +346,33 @@ Print a short usage summary and exit.
         r.entries
     );
 
-    let subcommands: Vec<&str> = r.subcommands.iter().map(|sc| sc.name.as_str()).collect();
+    // database names are prose-mined positional value choices, not real
+    // subcommands — they live in their own channel (Phase 4) so they never
+    // flow into the real-child paths (recursion, supplement, extern stubs).
     assert!(
-        subcommands.contains(&"passwd"),
-        "subcommands: {subcommands:?}"
+        r.subcommands.is_empty(),
+        "database choices must not be filed as subcommands: {:?}",
+        r.subcommands
     );
-    assert!(
-        subcommands.contains(&"services"),
-        "subcommands: {subcommands:?}"
-    );
+    let choices: Vec<&str> = r
+        .positional_choices
+        .iter()
+        .map(|sc| sc.name.as_str())
+        .collect();
+    assert!(choices.contains(&"passwd"), "choices: {choices:?}");
+    assert!(choices.contains(&"services"), "choices: {choices:?}");
 
     let nu = generate_extern("getent", &r);
     assert!(nu.contains("database: glob"), "nu = {nu}");
     assert!(nu.contains("...key: glob"), "nu = {nu}");
     assert!(nu.contains("--service(-s): string"), "nu = {nu}");
     assert!(!nu.contains("--servicedatabase"), "nu = {nu}");
-    assert!(nu.contains("export extern \"getent passwd\""), "nu = {nu}");
+    // positional choices are NOT real subcommands, so no `getent passwd`
+    // extern stub is generated.
+    assert!(
+        !nu.contains("export extern \"getent passwd\""),
+        "nu = {nu}"
+    );
 }
 
 #[test]

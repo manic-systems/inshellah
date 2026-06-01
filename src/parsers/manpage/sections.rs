@@ -9,6 +9,7 @@ use crate::parsers::help::{
     extract_usage_positionals as help_extract_usage_positionals, parse_usage_args,
     parse_usage_flags, skip_command_name,
 };
+use crate::parsers::manpage::desc;
 use crate::parsers::manpage::groff::{
     GroffLine, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
 };
@@ -20,37 +21,87 @@ fn is_options_section(name: &str) -> bool {
     upper == "OPTIONS" || upper.contains("OPTION")
 }
 
+/// is this line a section heading whose name passes `header`? `also_ss`
+/// extends matching to `.SS` subsection headings (synopsis uses this).
+fn section_heading(line: &GroffLine, also_ss: bool, header: impl Fn(&str) -> bool) -> bool {
+    matches!(line, GroffLine::Macro { name, args }
+        if (name == "SH" || (also_ss && name == "SS")) && header(args))
+}
+
+/// collect the body lines of the FIRST `.SH`/`.SS` section whose heading
+/// passes `header`. the body runs until the next `.SH` (and, when `also_ss`,
+/// the next `.SS`). this is the single shape behind the per-section slicers;
+/// the `header` predicate is the only thing that varies between them.
+fn first_section_body(
+    lines: &[GroffLine],
+    also_ss: bool,
+    header: impl Fn(&str) -> bool,
+) -> Vec<GroffLine> {
+    let mut i = 0;
+    while i < lines.len() {
+        if section_heading(&lines[i], also_ss, &header) {
+            i += 1;
+            return take_until_boundary(lines, &mut i, also_ss);
+        }
+        i += 1;
+    }
+    Vec::new()
+}
+
+/// collect and concatenate the bodies of EVERY `.SH` section whose heading
+/// passes `header`. used where a tool splits the same logical section across
+/// several headings (git's multiple COMMANDS groups, nix's Options + Common
+/// Options).
+fn all_section_bodies(lines: &[GroffLine], header: impl Fn(&str) -> bool) -> Vec<GroffLine> {
+    let mut acc: Vec<GroffLine> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if section_heading(&lines[i], false, &header) {
+            i += 1;
+            acc.extend(take_until_boundary(lines, &mut i, false));
+        } else {
+            i += 1;
+        }
+    }
+    acc
+}
+
+/// from `*i` (just past a heading), clone lines until the next `.SH` (and,
+/// when `also_ss`, the next `.SS`), leaving `*i` on that boundary.
+fn take_until_boundary(lines: &[GroffLine], i: &mut usize, also_ss: bool) -> Vec<GroffLine> {
+    let mut acc: Vec<GroffLine> = Vec::new();
+    while *i < lines.len() {
+        if let GroffLine::Macro { name, .. } = &lines[*i]
+            && (name == "SH" || (also_ss && name == "SS"))
+        {
+            break;
+        }
+        acc.push(lines[*i].clone());
+        *i += 1;
+    }
+    acc
+}
+
 /// extract the lines from the OPTIONS section(s). collects from all
 /// option-like .SH sections and concatenates them (handles the nix pattern
 /// of "Options" and "Common Options" being separate sections).
 /// falls back to DESCRIPTION if no OPTIONS section exists.
 pub fn extract_options_section(lines: &[GroffLine]) -> Vec<GroffLine> {
+    // unlike all_section_bodies, the option sections need a synthetic empty
+    // .SH between them so the description collector (which stops on SH/SS)
+    // does not let one section's last description bleed into the next.
     let mut acc: Vec<GroffLine> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if let GroffLine::Macro { name, args } = &lines[i]
-            && name == "SH"
-            && is_options_section(args)
-        {
+        if section_heading(&lines[i], false, is_options_section) {
             i += 1;
-            // synthetic separator between concatenated sections so that
-            // collect_desc_text (which stops on SH/SS) does not let descriptions
-            // bleed between sections.
             if !acc.is_empty() {
                 acc.push(GroffLine::Macro {
                     name: "SH".to_string(),
                     args: String::new(),
                 });
             }
-            while i < lines.len() {
-                if let GroffLine::Macro { name, .. } = &lines[i]
-                    && name == "SH"
-                {
-                    break;
-                }
-                acc.push(lines[i].clone());
-                i += 1;
-            }
+            acc.extend(take_until_boundary(lines, &mut i, false));
         } else {
             i += 1;
         }
@@ -59,53 +110,13 @@ pub fn extract_options_section(lines: &[GroffLine]) -> Vec<GroffLine> {
         return acc;
     }
     // fallback: DESCRIPTION section
-    let mut i = 0;
-    while i < lines.len() {
-        if let GroffLine::Macro { name, args } = &lines[i]
-            && name == "SH"
-            && args.trim().eq_ignore_ascii_case("DESCRIPTION")
-        {
-            i += 1;
-            let mut desc_acc: Vec<GroffLine> = Vec::new();
-            while i < lines.len() {
-                if let GroffLine::Macro { name, .. } = &lines[i]
-                    && name == "SH"
-                {
-                    break;
-                }
-                desc_acc.push(lines[i].clone());
-                i += 1;
-            }
-            return desc_acc;
-        }
-        i += 1;
-    }
-    Vec::new()
+    extract_named_section(lines, "DESCRIPTION")
 }
 
 fn extract_named_section(lines: &[GroffLine], section_name: &str) -> Vec<GroffLine> {
-    let mut i = 0;
-    while i < lines.len() {
-        if let GroffLine::Macro { name, args } = &lines[i]
-            && name == "SH"
-            && args.trim().eq_ignore_ascii_case(section_name)
-        {
-            i += 1;
-            let mut acc: Vec<GroffLine> = Vec::new();
-            while i < lines.len() {
-                if let GroffLine::Macro { name, .. } = &lines[i]
-                    && name == "SH"
-                {
-                    break;
-                }
-                acc.push(lines[i].clone());
-                i += 1;
-            }
-            return acc;
-        }
-        i += 1;
-    }
-    Vec::new()
+    first_section_body(lines, false, |args| {
+        args.trim().eq_ignore_ascii_case(section_name)
+    })
 }
 
 /// the NAME section follows the convention "command \- short description".
@@ -425,7 +436,10 @@ fn extract_cmd(line: &str) -> Option<String> {
     }
 }
 
-/// extract the lines that form the SYNOPSIS section.
+/// extract the lines that form the SYNOPSIS section. an `.SS SYNOPSIS`
+/// subsection ends at the next `.SS` too, but an `.SH SYNOPSIS` runs through
+/// any `.SS` until the next `.SH` — so the boundary follows the matched
+/// heading kind.
 fn extract_synopsis_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     let mut i = 0;
     while i < lines.len() {
@@ -435,17 +449,7 @@ fn extract_synopsis_section(lines: &[GroffLine]) -> Vec<GroffLine> {
         {
             let stop_on_ss = name == "SS";
             i += 1;
-            let mut acc: Vec<GroffLine> = Vec::new();
-            while i < lines.len() {
-                if let GroffLine::Macro { name, .. } = &lines[i]
-                    && (name == "SH" || (stop_on_ss && name == "SS"))
-                {
-                    break;
-                }
-                acc.push(lines[i].clone());
-                i += 1;
-            }
-            return acc;
+            return take_until_boundary(lines, &mut i, stop_on_ss);
         }
         i += 1;
     }
@@ -722,36 +726,17 @@ fn is_description_choice_name(name: &str) -> bool {
 }
 
 fn collect_description_choice_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
-    let mut parts = Vec::new();
-    let mut i = start;
-    while i < lines.len() {
-        match &lines[i] {
-            GroffLine::Macro { name, .. } if matches!(name.as_str(), "TP" | "SH" | "SS") => {
-                break;
-            }
-            GroffLine::Text(text) => {
-                parts.push(text.clone());
-                i += 1;
-            }
-            GroffLine::Macro { name, args }
-                if matches!(name.as_str(), "B" | "BI" | "BR" | "I" | "IR" | "RI") =>
-            {
-                let text = strip_groff_escapes(&strip_inline_macro_args(args));
-                let text = text.trim();
-                if !text.is_empty() {
-                    parts.push(text.to_string());
-                }
-                i += 1;
-            }
-            GroffLine::Blank | GroffLine::Comment => {
-                i += 1;
-            }
-            GroffLine::Macro { .. } => {
-                i += 1;
-            }
-        }
-    }
-    (first_sentence(&parts.join(" ")), i)
+    let (body, i) = desc::collect(
+        lines,
+        start,
+        desc::DescOpts {
+            boundaries: &["TP", "SH", "SS"],
+            skip_rs: false,
+            stop_on_blank: false,
+            tags: desc::TagMacros::Common,
+        },
+    );
+    (first_sentence(&body), i)
 }
 
 fn first_sentence(text: &str) -> String {
@@ -784,28 +769,7 @@ fn is_commands_section(name: &str) -> bool {
 
 /// find all COMMANDS/.COMMAND sections and collect their lines.
 pub fn extract_commands_section(lines: &[GroffLine]) -> Vec<GroffLine> {
-    let mut acc: Vec<GroffLine> = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if let GroffLine::Macro { name, args } = &lines[i]
-            && name == "SH"
-            && is_commands_section(args)
-        {
-            i += 1;
-            while i < lines.len() {
-                if let GroffLine::Macro { name, .. } = &lines[i]
-                    && name == "SH"
-                {
-                    break;
-                }
-                acc.push(lines[i].clone());
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    acc
+    all_section_bodies(lines, is_commands_section)
 }
 
 /// collect the body of a `.SH SUBCOMMAND(S)` section. jj/clap group
@@ -813,31 +777,12 @@ pub fn extract_commands_section(lines: &[GroffLine]) -> Vec<GroffLine> {
 /// rather than the inline `*COMMANDS` layout `extract_commands_section`
 /// handles, so this is a separate, narrowly-scoped grab.
 pub fn extract_subcommand_list_section(lines: &[GroffLine]) -> Vec<GroffLine> {
-    let mut acc: Vec<GroffLine> = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if let GroffLine::Macro { name, args } = &lines[i]
-            && name == "SH"
-            && matches!(
-                args.trim().to_ascii_uppercase().as_str(),
-                "SUBCOMMAND" | "SUBCOMMANDS"
-            )
-        {
-            i += 1;
-            while i < lines.len() {
-                if let GroffLine::Macro { name, .. } = &lines[i]
-                    && name == "SH"
-                {
-                    break;
-                }
-                acc.push(lines[i].clone());
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    acc
+    all_section_bodies(lines, |args| {
+        matches!(
+            args.trim().to_ascii_uppercase().as_str(),
+            "SUBCOMMAND" | "SUBCOMMANDS"
+        )
+    })
 }
 
 /// extract SUBCOMMAND-style sections (clap-generated manpages put each

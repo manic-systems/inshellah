@@ -398,3 +398,82 @@ make_parser!(pub extract_cli11_positionals -> Vec<(&'a str, Positional)>,
         preceded(cli11_section_header, parse_cli11_body)
     )
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(line: &str) -> Vec<(String, bool, bool)> {
+        let (_, v) = parse_usage_args(line).expect("parse_usage_args");
+        v.into_iter()
+            .map(|(n, p)| (n.to_string(), p.optional, p.variadic))
+            .collect()
+    }
+
+    #[test]
+    fn mandatory_optional_and_allcaps() {
+        // `<src>` mandatory, `[dst]` optional, `FILE` bare all-caps mandatory.
+        assert_eq!(
+            args("<src> [dst] FILE"),
+            vec![
+                ("src".into(), false, false),
+                ("dst".into(), true, false),
+                ("FILE".into(), false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn variadic_markers() {
+        // in-bracket `<files...>` and post-token `[paths] ...` both set variadic.
+        assert_eq!(
+            args("<files...>"),
+            vec![("files".into(), false, true)]
+        );
+        assert_eq!(
+            args("[paths] ..."),
+            vec![("paths".into(), true, true)]
+        );
+    }
+
+    #[test]
+    fn flags_and_braces_are_skipped() {
+        // `--flag` and `{a|b}` choice braces are not positionals; only the
+        // real positional `<name>` survives.
+        assert_eq!(
+            args("--flag {a|b} <name>"),
+            vec![("name".into(), false, false)]
+        );
+    }
+
+    #[test]
+    fn options_placeholder_is_not_a_positional() {
+        // a bare `OPTIONS` / `[OPTIONS]` token is a section marker, not an arg.
+        assert!(args("[OPTIONS] <cmd>")
+            .iter()
+            .all(|(n, _, _)| n != "OPTIONS"));
+        assert_eq!(
+            args("[OPTIONS] <cmd>"),
+            vec![("cmd".into(), false, false)]
+        );
+    }
+
+    #[test]
+    fn parsing_stops_at_newline() {
+        // many0 must not wander past the usage line into a following OPTIONS
+        // block; the `--out <name>` on the next line must not be mined.
+        assert_eq!(
+            args("<input>\n  --out <name>\n"),
+            vec![("input".into(), false, false)]
+        );
+    }
+
+    #[test]
+    fn duplicate_names_collapse_case_insensitively() {
+        // caseless_push drops the second `FILE`/`file`.
+        assert_eq!(
+            args("<file> FILE"),
+            vec![("file".into(), false, false)]
+        );
+    }
+}

@@ -1,6 +1,9 @@
 subcommands:
+  create
+  list
+  remove
+positional_choices:
 flags:
   -v|--verbose
   --config
 positionals:
-  command

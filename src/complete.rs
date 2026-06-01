@@ -169,12 +169,21 @@ pub fn generate_candidates(
     };
 
     let mut scored: Vec<(i32, Candidate)> = Vec::with_capacity(
-        (if matched_depth >= resolve_depth { subs.len() } else { 0 })
-            + if typing_flag { result.entries.len() } else { 0 },
+        (if matched_depth >= resolve_depth {
+            subs.len() + result.positional_choices.len()
+        } else {
+            0
+        }) + if typing_flag { result.entries.len() } else { 0 },
     );
 
     if matched_depth >= resolve_depth {
-        for sc in subs {
+        // subcommands and positional-argument value choices (getent's database
+        // names) complete in the same argument slot; score both against the
+        // typed token. they live in distinct model channels so only real
+        // subcommands feed recursion/supplement, but the user sees one ranked
+        // list here.
+        let choices = subs.iter().chain(result.positional_choices.iter());
+        for sc in choices {
             if !last_token.is_empty() && last_token == sc.name {
                 continue;
             }
@@ -279,6 +288,7 @@ mod tests {
                     desc: String::new(),
                 })
                 .collect(),
+            positional_choices: Vec::new(),
             positionals: Vec::new(),
             description: String::new(),
         }

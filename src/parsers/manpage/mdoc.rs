@@ -231,6 +231,7 @@ pub fn parse_mdoc_lines(lines: &[GroffLine]) -> ManpageResult {
     ManpageResult {
         entries,
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: deduped,
         description: String::new(),
     }
