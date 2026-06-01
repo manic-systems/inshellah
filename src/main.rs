@@ -20,13 +20,15 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use inshellah::complete::{completion_json, fuzzy_score, starts_with_ignore_ascii_case};
+use inshellah::complete::{
+    Candidate, completion_json, generate_candidates, starts_with_ignore_ascii_case,
+};
 use inshellah::config::{Config, DEFAULT_TIMEOUT_MS};
 use inshellah::dynamic::dynamic_complete_with_path;
 use inshellah::parsers::help::help_parser;
 use inshellah::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
-    extract_synopsis_command, parse_manpage_string, parse_manpage_with_subs, read_manpage_file,
+    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedSwitch, extract_synopsis_command,
+    parse_manpage_string, parse_manpage_with_subs, read_manpage_file,
 };
 use inshellah::parsers::nushell::{generate_extern, is_nushell_builtin};
 use inshellah::pool::{ScrapePool, Submitter};
@@ -1402,26 +1404,6 @@ fn command_name_for_path(path: &Path) -> Option<String> {
 /// - prefix match: 900 + length bonus
 /// - subsequence match: per-character score with bonuses for word boundaries
 ///   and consecutive matches
-fn entry_completion_desc(e: &ManpageEntry) -> String {
-    match &e.param {
-        Some(OwnedParam::Mandatory(p)) => {
-            if e.desc.is_empty() {
-                format!("<{p}>")
-            } else {
-                format!("{} <{p}>", e.desc)
-            }
-        }
-        Some(OwnedParam::Optional(p)) => {
-            if e.desc.is_empty() {
-                format!("[{p}]")
-            } else {
-                format!("{} [{p}]", e.desc)
-            }
-        }
-        None => e.desc.clone(),
-    }
-}
-
 fn print_completion_candidates(candidates: &[String]) {
     if candidates.is_empty() {
         println!("null");
@@ -2384,100 +2366,18 @@ fn cmd_complete(
     };
     let candidates: Vec<String> = match &found {
         None => Vec::new(),
-        Some((_, r, depth)) => {
-            let subs: &[ManpageSubcommand] = if !r.subcommands.is_empty() {
-                &r.subcommands
-            } else {
-                &fallback_subcommands
-            };
-            let mut scored: Vec<(i32, String)> = Vec::with_capacity(
-                (if *depth >= resolve_depth {
-                    subs.len()
-                } else {
-                    0
-                }) + if typing_flag { r.entries.len() } else { 0 },
-            );
-            // subcommand candidates (skip if match is too shallow). when
-            // `systemctl status` isn't in the cache, `find_result` falls
-            // back to `systemctl` at depth 1; we must NOT then offer
-            // `systemctl`'s subs (`poweroff`, `preset`, ...) — the user has
-            // already typed past that point. requiring depth >= resolve_depth
-            // (the count of complete, non-partial tokens) keeps subs
-            // exclusive to a full-prefix match and lets the dynamic completer
-            // — systemctl unit names, etc. — take over otherwise.
-            //
-            // also: when the typed token *exactly* equals a candidate we
-            // drop it. the user has already written the full word; echoing
-            // it back masks any downstream dynamic completer.
-            if *depth >= resolve_depth {
-                for sc in subs {
-                    if !last_token.is_empty() && last_token == sc.name {
-                        continue;
-                    }
-                    let s = fuzzy_score(&last_token, &sc.name);
-                    if s > 0 {
-                        scored.push((s, completion_json(&sc.name, &sc.desc)));
-                    }
-                }
-            }
-            // flag candidates. the needle — and whether it scores against
-            // the bare flag name or the dashed form — depends on which
-            // trigger the user typed (see Config::flag_needle). the default
-            // "-" trigger keeps the dashed form, so ranking is unchanged.
-            if typing_flag {
-                let fneedle = cfg.flag_needle(&last_token);
-                let score_against = |dashed: &str, bare_name: &str| -> i32 {
-                    if fneedle.bare {
-                        fuzzy_score(fneedle.needle, bare_name)
-                    } else {
-                        fuzzy_score(fneedle.needle, dashed)
-                    }
-                };
-                for e in &r.entries {
-                    let (flag, aka, score) = match &e.switch {
-                        OwnedSwitch::Long(l) => {
-                            let flag = format!("--{l}");
-                            let score = score_against(&flag, l);
-                            (flag, None, score)
-                        }
-                        OwnedSwitch::Short(c) => {
-                            let flag = format!("-{c}");
-                            let short_bare = c.to_string();
-                            let score = score_against(&flag, &short_bare);
-                            (flag, None, score)
-                        }
-                        OwnedSwitch::Both(c, l) => {
-                            let long_flag = format!("--{l}");
-                            let short_flag = format!("-{c}");
-                            let short_bare = c.to_string();
-                            let ls = score_against(&long_flag, l);
-                            let ss = score_against(&short_flag, &short_bare);
-                            if ss > ls {
-                                (short_flag, Some(long_flag), ss)
-                            } else {
-                                (long_flag, Some(short_flag), ls)
-                            }
-                        }
-                    };
-                    if !last_token.is_empty() && last_token == flag {
-                        continue;
-                    }
-                    if score > 0 {
-                        let base_desc = entry_completion_desc(e);
-                        let desc = match aka {
-                            Some(aka) => format!("(aka {aka}) {base_desc}"),
-                            None => base_desc,
-                        };
-                        scored.push((score, completion_json(&flag, &desc)));
-                    }
-                }
-            }
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
-            if cfg.max_completions > 0 {
-                scored.truncate(cfg.max_completions);
-            }
-            scored.into_iter().map(|(_, json)| json).collect()
-        }
+        Some((_, r, depth)) => generate_candidates(
+            r,
+            *depth,
+            resolve_depth,
+            &last_token,
+            &fallback_subcommands,
+            typing_flag,
+            cfg,
+        )
+        .into_iter()
+        .map(Candidate::into_json)
+        .collect(),
     };
     // hand off at non-flag leaf positions so file and dynamic completers can
     // answer argument prefixes. when the token starts with "-", keep flags.
