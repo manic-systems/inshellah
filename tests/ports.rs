@@ -149,6 +149,21 @@ fn go_cobra_subcommands() {
 }
 
 #[test]
+fn aliased_subcommands_keep_canonical_name() {
+    // cargo-style `name, alias` rows: the comma must not abort the entry.
+    // the canonical (first) name is kept; the alias is discarded.
+    let txt = "Commands:\n  build, b    Compile the current package\n  check, c    Analyze the current package\n  clean       Remove the target directory\n";
+    let r = parse(txt);
+    let names: Vec<&str> = r.subcommands.iter().map(|sc| sc.name).collect();
+    assert!(names.contains(&"build"), "subcommands: {names:?}");
+    assert!(names.contains(&"check"), "subcommands: {names:?}");
+    assert!(names.contains(&"clean"), "subcommands: {names:?}");
+    assert!(!names.contains(&"b"), "alias leaked as subcommand: {names:?}");
+    let build = r.subcommands.iter().find(|sc| sc.name == "build").unwrap();
+    assert_eq!(build.desc, "Compile the current package");
+}
+
+#[test]
 fn help_parser_ignores_value_enums_and_defaults() {
     let txt = r#"Usage: tar [OPTION...] [FILE]...
 
