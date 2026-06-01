@@ -546,7 +546,11 @@ type ProcessedManpage = (String, ManpageResult, Vec<NamedManpageResult>);
 fn process_manpage(file: &Path) -> Option<ProcessedManpage> {
     let contents = read_manpage_file(file).ok()?;
     let (mut result, sub_sections) = parse_manpage_with_subs(&contents);
-    if result.entries.is_empty() && result.subcommands.is_empty() && sub_sections.is_empty() {
+    if result.entries.is_empty()
+        && result.subcommands.is_empty()
+        && result.positional_choices.is_empty()
+        && sub_sections.is_empty()
+    {
         return None;
     }
     let name = resolve_manpage_cmd_name(file, &contents);
@@ -1081,6 +1085,7 @@ fn cmd_index(
                 let stub = ManpageResult {
                     entries: Vec::new(),
                     subcommands: Vec::new(),
+                    positional_choices: Vec::new(),
                     positionals: Default::default(),
                     description: sc.desc.clone(),
                 };
@@ -2012,8 +2017,14 @@ fn cmd_complete(
         }
         _ => Vec::new(),
     };
+    // positional value choices (getent databases) fill the same argument slot
+    // as subcommands, so they suppress the file/dynamic handoff the same way.
     let has_subs = match &found {
-        Some((_, r, _)) => !r.subcommands.is_empty() || !fallback_subcommands.is_empty(),
+        Some((_, r, _)) => {
+            !r.subcommands.is_empty()
+                || !r.positional_choices.is_empty()
+                || !fallback_subcommands.is_empty()
+        }
         None => false,
     };
     let candidates: Vec<String> = match &found {

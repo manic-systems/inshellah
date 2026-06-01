@@ -80,6 +80,7 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
             sub("check", "Analyze the package"),
             sub("clean", "Remove build artifacts"),
         ],
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: "A demo tool".to_string(),
     };
@@ -92,6 +93,7 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
             entry(switch_both('j', "jobs"), Some("N"), "parallel jobs"),
         ],
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: "Compile the package".to_string(),
     };
@@ -105,6 +107,7 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
             sub("stop", "Stop it"),
             sub("status", "Show status"),
         ],
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: "Other tool".to_string(),
     };

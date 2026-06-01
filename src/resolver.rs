@@ -215,6 +215,7 @@ mod tests {
         ManpageResult {
             entries: Vec::new(),
             subcommands: names.iter().map(|n| sub(n)).collect(),
+            positional_choices: Vec::new(),
             positionals: Vec::new(),
             description: String::new(),
         }
@@ -228,6 +229,7 @@ mod tests {
                 desc: String::new(),
             }],
             subcommands: Vec::new(),
+            positional_choices: Vec::new(),
             positionals: Vec::new(),
             description: String::new(),
         }

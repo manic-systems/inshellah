@@ -37,6 +37,10 @@ fn render(r: &ManpageResult) -> String {
     for sc in &r.subcommands {
         let _ = writeln!(out, "  {}", sc.name);
     }
+    out.push_str("positional_choices:\n");
+    for sc in &r.positional_choices {
+        let _ = writeln!(out, "  {}", sc.name);
+    }
     out.push_str("flags:\n");
     for e in &r.entries {
         let _ = writeln!(out, "  {}", render_switch(&e.switch));

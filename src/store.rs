@@ -203,10 +203,11 @@ fn json_list<T, F: Fn(&T) -> String>(items: &[T], f: F) -> String {
 
 /// serialize a ManpageResult to JSON:
 ///   {"source":..., "description":..., "entries":[...],
-///    "subcommands":[...], "positionals":[...]}
+///    "subcommands":[...], "positional_choices":[...], "positionals":[...]}
 pub fn json_of_result(source: &str, result: &ManpageResult) -> String {
     let entries = json_list(&result.entries, json_entry);
     let subcommands = json_list(&result.subcommands, json_subcommand);
+    let positional_choices = json_list(&result.positional_choices, json_subcommand);
     let positionals_parts: Vec<String> = result
         .positionals
         .iter()
@@ -214,11 +215,12 @@ pub fn json_of_result(source: &str, result: &ManpageResult) -> String {
         .collect();
     let positionals = format!("[{}]", positionals_parts.join(","));
     format!(
-        r#"{{"source":{},"description":{},"entries":{},"subcommands":{},"positionals":{}}}"#,
+        r#"{{"source":{},"description":{},"entries":{},"subcommands":{},"positional_choices":{},"positionals":{}}}"#,
         json_string(source),
         json_string(&result.description),
         entries,
         subcommands,
+        positional_choices,
         positionals,
     )
 }
@@ -291,7 +293,10 @@ fn source_from_json_data(data: &str) -> String {
 }
 
 fn has_completion_content(result: &ManpageResult) -> bool {
-    !result.entries.is_empty() || !result.subcommands.is_empty() || !result.positionals.is_empty()
+    !result.entries.is_empty()
+        || !result.subcommands.is_empty()
+        || !result.positional_choices.is_empty()
+        || !result.positionals.is_empty()
 }
 
 fn switch_from_json(v: &Value) -> Option<OwnedSwitch> {
@@ -373,6 +378,11 @@ pub fn result_from_json(v: &Value) -> ManpageResult {
         .and_then(|x| x.as_array())
         .map(|arr| arr.iter().filter_map(subcommand_from_json).collect())
         .unwrap_or_default();
+    let positional_choices = v
+        .get("positional_choices")
+        .and_then(|x| x.as_array())
+        .map(|arr| arr.iter().filter_map(subcommand_from_json).collect())
+        .unwrap_or_default();
     let positionals = v
         .get("positionals")
         .and_then(|x| x.as_array())
@@ -381,6 +391,7 @@ pub fn result_from_json(v: &Value) -> ManpageResult {
     ManpageResult {
         entries,
         subcommands,
+        positional_choices,
         positionals,
         description,
     }
@@ -452,6 +463,7 @@ pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
     ManpageResult {
         entries: matched.entries.clone(),
         subcommands,
+        positional_choices: Vec::new(),
         positionals: matched.positionals.clone(),
         description: matched.description.clone(),
     }
@@ -861,6 +873,7 @@ mod tests {
                 desc: "json flag".to_string(),
             }],
             subcommands: Vec::new(),
+            positional_choices: Vec::new(),
             positionals: Vec::new(),
             description: String::new(),
         };
@@ -887,6 +900,7 @@ mod tests {
                 desc: String::new(),
             }],
             subcommands: Vec::new(),
+            positional_choices: Vec::new(),
             positionals: Vec::new(),
             description: String::new(),
         };
@@ -916,6 +930,7 @@ mod tests {
                 desc: String::new(),
             }],
             subcommands: Vec::new(),
+            positional_choices: Vec::new(),
             positionals: Vec::new(),
             description: String::new(),
         };
@@ -926,6 +941,7 @@ mod tests {
                 desc: String::new(),
             }],
             subcommands: Vec::new(),
+            positional_choices: Vec::new(),
             positionals: Vec::new(),
             description: String::new(),
         };
@@ -957,6 +973,7 @@ mod tests {
         let result = ManpageResult {
             entries: Vec::new(),
             subcommands: Vec::new(),
+            positional_choices: Vec::new(),
             positionals: Vec::new(),
             description: "child desc".to_string(),
         };
