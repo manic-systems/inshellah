@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2
+pub mod complete;
 pub mod config;
 pub mod dynamic;
 pub mod parsers;
