@@ -19,6 +19,35 @@ pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
     dynamic_complete_with_path(spans, None, cfg)
 }
 
+/// preempt path: value completions (adb device serials / package names) that
+/// override static flag completion. `Some` (even empty) suppresses static;
+/// `None` lets static answer. unlike the handoff path these candidates are
+/// already scored/ordered and carry their own replacement prefixes, so they
+/// bypass `filter_candidates`.
+pub fn dynamic_value_completions(
+    cmd_name: &str,
+    rest: &[String],
+    explicit_cmd_path: Option<&Path>,
+    timeout_ms: u64,
+) -> Option<Vec<String>> {
+    let mut spans = Vec::with_capacity(rest.len() + 1);
+    spans.push(cmd_name.to_string());
+    spans.extend_from_slice(rest);
+    let deadline = if timeout_ms == 0 {
+        None
+    } else {
+        Some(Instant::now() + Duration::from_millis(timeout_ms))
+    };
+    let ctx = DynCtx {
+        deadline,
+        limit: 0,
+        cmd_name,
+        explicit_cmd_path,
+    };
+    let raw = providers::value_completions(&spans, &ctx)?;
+    Some(raw.into_iter().map(|c| c.into_json()).collect())
+}
+
 /// Like `dynamic_complete`, but subprocess-backed providers invoke
 /// `explicit_cmd_path` for the completed command instead of resolving
 /// `spans[0]` through PATH.

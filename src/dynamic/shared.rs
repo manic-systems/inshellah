@@ -66,6 +66,33 @@ pub(crate) fn run(args: &[String], ctx: &DynCtx) -> Option<String> {
     subprocess::run_quiet(args, ctx.ms_left())
 }
 
+/// scrape-path runner (cwd /tmp, stderr captured) for providers that read a
+/// tool's own machine output rather than repo state. adb's `devices`/`pm list`
+/// don't need the user's cwd and must not inherit it.
+pub(crate) fn run_scrape(args: &[String], ctx: &DynCtx) -> Option<String> {
+    subprocess::run_cmd(args, ctx.ms_left())
+}
+
+/// resolve a bare command name through PATH. providers that shell out via an
+/// absolute path (adb) use this when no explicit path was supplied.
+pub(crate) fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in path_var.split(':') {
+        let candidate = Path::new(dir).join(name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
+        .unwrap_or(false)
+}
+
 pub(crate) fn run_with(
     args: &[String],
     ctx: &DynCtx,
