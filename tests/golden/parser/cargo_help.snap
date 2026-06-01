@@ -13,4 +13,4 @@ flags:
   --color
   -h|--help
 positionals:
-  COMMAND
+  command

@@ -442,7 +442,7 @@ fn remaining_ms(deadline: Instant) -> u64 {
 fn parse_help_text(text: &str) -> ManpageResult {
     let cleaned: String = fast_strip_ansi::strip_ansi_string(text).into_owned();
     match help_parser(&cleaned) {
-        Ok((_, r)) => (&r).into(),
+        Ok((_, r)) => r,
         Err(_) => ManpageResult::default(),
     }
 }

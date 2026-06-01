@@ -10,7 +10,7 @@ use nom::{
 
 use crate::make_parser;
 use crate::parsers::help::helpers::{eol, is_option_char};
-use crate::types::Subcommand;
+use crate::parsers::manpage::ManpageSubcommand;
 
 fn is_placeholder(c: char) -> bool {
     match c {
@@ -75,7 +75,7 @@ make_parser!(
 // chars, not starting with '-'), optional comma-separated aliases, optional
 // argument placeholders, exactly two spaces, optional padding, then the
 // description text and eol.
-make_parser!(pub subcommand_entry -> Subcommand<'a>,
+make_parser!(pub subcommand_entry -> ManpageSubcommand,
     (
         preceded(
             space0,
@@ -93,6 +93,8 @@ make_parser!(pub subcommand_entry -> Subcommand<'a>,
         // some help formats prefix desc with "- " (manpage-style); strip it.
         let d = desc.trim_start();
         let desc = d.strip_prefix("- ").map(|s| s.trim_start()).unwrap_or(d);
-        Subcommand { name, desc }
+        // name kept as-parsed here; build_help_result lowercases at assembly
+        // (matching the former From<&HelpResult> behavior).
+        ManpageSubcommand { name: name.to_string(), desc: desc.to_string() }
     }
 );

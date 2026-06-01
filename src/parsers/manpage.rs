@@ -31,7 +31,7 @@ mod strategies;
 use std::io::{self, Read};
 use std::path::Path;
 
-use crate::types::{HelpResult, OptionEntry, Param, Positional, Subcommand, Switch};
+use crate::types::Positional;
 
 pub use self::groff::{GroffLine, classify_line, strip_groff_escapes};
 pub use self::sections::{extract_subcommand_sections, extract_synopsis_command};
@@ -72,84 +72,45 @@ pub struct ManpageResult {
 
 impl ManpageResult {
     /// canonicalize the entry list before persistence: fold non-adjacent
-    /// Short/Long pairs into `Both`, then dedup by key. always called once
-    /// at the end of a parse path so the JSON cache holds the canonical
-    /// shape and downstream consumers (runtime completer, static `extern`
-    /// generation) don't have to repeat the work.
+    /// Short/Long pairs into `Both`, then dedup by key, and clamp every
+    /// description to a tooltip length. always called once at the end of a
+    /// parse path so the JSON cache holds the canonical shape and downstream
+    /// consumers (runtime completer, static `extern` generation) don't have
+    /// to repeat the work.
     pub fn normalize(&mut self) {
         let entries = std::mem::take(&mut self.entries);
         self.entries = dedup_entries(merge_short_long_pairs(entries));
-    }
-}
-
-impl From<&Switch<'_>> for OwnedSwitch {
-    fn from(s: &Switch<'_>) -> Self {
-        match s {
-            Switch::Short(c) => OwnedSwitch::Short(*c),
-            Switch::Long(l) => OwnedSwitch::Long((*l).to_string()),
-            Switch::Both(c, l) => OwnedSwitch::Both(*c, (*l).to_string()),
+        for e in &mut self.entries {
+            clamp_description(&mut e.desc);
         }
-    }
-}
-
-impl From<&Param<'_>> for OwnedParam {
-    fn from(p: &Param<'_>) -> Self {
-        match p {
-            Param::Mandatory(s) => OwnedParam::Mandatory((*s).to_string()),
-            Param::Optional(s) => OwnedParam::Optional((*s).to_string()),
+        for sc in self.subcommands.iter_mut().chain(&mut self.positional_choices) {
+            clamp_description(&mut sc.desc);
         }
+        clamp_description(&mut self.description);
     }
 }
 
-impl From<&OptionEntry<'_>> for ManpageEntry {
-    fn from(e: &OptionEntry<'_>) -> Self {
-        let desc: String = e
-            .desc
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        ManpageEntry {
-            switch: (&e.switch).into(),
-            param: e.param.as_ref().map(Into::into),
-            desc,
-        }
-    }
-}
+/// soft cap on a description before it becomes a completion tooltip. past
+/// this we break on the next word boundary: even an ultrawide terminal rarely
+/// shows more than this horizontally, and nushell truncates the menu anyway.
+const MAX_DESC_LEN: usize = 256;
 
-impl From<&Subcommand<'_>> for ManpageSubcommand {
-    fn from(sc: &Subcommand<'_>) -> Self {
-        // lowercase the subcommand name here so (a) file naming is
-        // consistent (meat_yum.json vs meat_YUM.json) and (b) recursive
-        // --help probes use the lowercase form, which is what most real
-        // CLIs accept — even tools like meat that DISPLAY uppercase
-        // names in their help text dispatch on the lowercased argument.
-        ManpageSubcommand {
-            name: sc.name.to_ascii_lowercase(),
-            desc: sc.desc.to_string(),
-        }
-    }
-}
-
-impl From<&HelpResult<'_>> for ManpageResult {
-    fn from(r: &HelpResult<'_>) -> Self {
-        let mut result = ManpageResult {
-            entries: r.entries.iter().map(Into::into).collect(),
-            subcommands: r.subcommands.iter().map(Into::into).collect(),
-            // positional names are stored lowercased so output is
-            // stable across the various places we extract them from
-            // (synopsis, usage, cli11 sections).
-            positionals: r
-                .positionals
-                .iter()
-                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-                .collect(),
-            description: r.desc.to_string(),
-        };
-        result.normalize();
-        result
-    }
+/// clamp a description in place to `MAX_DESC_LEN`, breaking on the first space
+/// at or after the cap so a word is never split, and marking the cut with `…`.
+/// an unbroken token past the cap is hard-cut at the cap. shorter descriptions
+/// are left untouched.
+pub(crate) fn clamp_description(desc: &mut String) {
+    let Some((cut, _)) = desc.char_indices().nth(MAX_DESC_LEN) else {
+        return;
+    };
+    let end = desc[cut..]
+        .find(char::is_whitespace)
+        .map(|off| cut + off)
+        .unwrap_or(cut);
+    desc.truncate(end);
+    let trimmed = desc.trim_end().len();
+    desc.truncate(trimmed);
+    desc.push('…');
 }
 
 fn entry_key(e: &ManpageEntry) -> String {
@@ -471,9 +432,13 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
         // these are the authoritative list for clap-generated manpages.
         result.subcommands = sub_sections
             .iter()
-            .map(|(name, desc, _)| ManpageSubcommand {
-                name: name.to_ascii_lowercase(),
-                desc: desc.clone(),
+            .map(|(name, desc, _)| {
+                let mut desc = desc.clone();
+                clamp_description(&mut desc);
+                ManpageSubcommand {
+                    name: name.to_ascii_lowercase(),
+                    desc,
+                }
             })
             .collect();
     }
@@ -526,6 +491,45 @@ pub fn parse_manpage_file<P: AsRef<Path>>(path: P) -> io::Result<ManpageResult> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_leaves_short_descriptions_untouched() {
+        let mut d = "a short description".to_string();
+        clamp_description(&mut d);
+        assert_eq!(d, "a short description");
+        assert!(!d.ends_with('…'));
+    }
+
+    #[test]
+    fn clamp_breaks_long_descriptions_on_a_word_boundary() {
+        let word = "lorem ipsum ";
+        let mut d = word.repeat(40); // ~480 chars
+        clamp_description(&mut d);
+        // cut at the first space at or after the cap, never mid-word.
+        assert!(d.ends_with('…'));
+        assert!(d.chars().count() <= MAX_DESC_LEN + 16);
+        let body = d.trim_end_matches('…');
+        assert!(!body.ends_with(' '));
+        assert!(body.split(' ').all(|w| w.is_empty() || w == "lorem" || w == "ipsum"));
+    }
+
+    #[test]
+    fn clamp_hard_cuts_an_unbroken_token_with_no_trailing_space() {
+        let mut d = "x".repeat(400);
+        clamp_description(&mut d);
+        // no whitespace past the cap → hard cut at the cap, still marked.
+        assert_eq!(d.chars().count(), MAX_DESC_LEN + 1);
+        assert!(d.ends_with('…'));
+    }
+
+    #[test]
+    fn clamp_respects_utf8_char_boundaries() {
+        // multibyte chars straddling the cap must not panic or split a code point.
+        let mut d = "é".repeat(400);
+        clamp_description(&mut d);
+        assert!(d.ends_with('…'));
+        assert!(d.chars().all(|c| c == 'é' || c == '…'));
+    }
 
     const TP_MANPAGE: &str = r#".TH FOO 1 "2024" "1.0" "User Commands"
 .SH NAME

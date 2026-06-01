@@ -13,7 +13,7 @@ use crate::parsers::manpage::groff::{
     GroffLine, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
 };
 use crate::parsers::manpage::{ManpageEntry, ManpageSubcommand, OwnedParam, OwnedSwitch};
-use crate::types::{Param, Positional, Switch};
+use crate::types::Positional;
 
 fn is_options_section(name: &str) -> bool {
     let upper = name.trim().to_ascii_uppercase();
@@ -597,21 +597,6 @@ fn render_leading_italic_arg(args: &str) -> String {
     }
 }
 
-fn to_owned_switch(s: Switch<'_>) -> OwnedSwitch {
-    match s {
-        Switch::Short(c) => OwnedSwitch::Short(c),
-        Switch::Long(l) => OwnedSwitch::Long(l.to_string()),
-        Switch::Both(c, l) => OwnedSwitch::Both(c, l.to_string()),
-    }
-}
-
-fn to_owned_param(p: Param<'_>) -> OwnedParam {
-    match p {
-        Param::Mandatory(s) => OwnedParam::Mandatory(s.to_string()),
-        Param::Optional(s) => OwnedParam::Optional(s.to_string()),
-    }
-}
-
 /// extract flag-tagged entries from the SYNOPSIS line. some manpages
 /// (notably nix-env, sed) declare flags only in the synopsis and never
 /// repeat them as entries in the OPTIONS body, so the body-only pass
@@ -624,14 +609,14 @@ pub fn extract_synopsis_flags(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     if full.is_empty() {
         return Vec::new();
     }
-    let result: nom::IResult<&str, Vec<(Switch<'_>, Option<Param<'_>>)>> =
+    let result: nom::IResult<&str, Vec<(OwnedSwitch, Option<OwnedParam>)>> =
         preceded(skip_command_name, parse_usage_flags).parse(&full);
     match result {
         Ok((_, pairs)) => pairs
             .into_iter()
             .map(|(switch, param)| ManpageEntry {
-                switch: to_owned_switch(switch),
-                param: param.map(to_owned_param),
+                switch,
+                param,
                 desc: String::new(),
             })
             .collect(),
