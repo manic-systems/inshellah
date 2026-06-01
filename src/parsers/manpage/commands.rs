@@ -10,6 +10,7 @@
 //!   .RE
 
 use crate::parsers::manpage::ManpageSubcommand;
+use crate::parsers::manpage::desc;
 use crate::parsers::manpage::groff::{GroffLine, strip_groff_escapes, strip_inline_macro_args};
 
 /// validate that the extracted name looks like a subcommand: lowercase,
@@ -77,32 +78,72 @@ fn extract_command_name_from_line(line: &GroffLine) -> Option<String> {
 }
 
 /// walk through commands section lines, extracting subcommand name+description
-/// pairs from .PP + Text + .RS/.RE blocks.
+/// pairs. handles two tagged-list layouts: `.PP` + bold name + `.RS/.RE`
+/// (systemctl, git) and `.TP` + `.B name` + body (the help2man tagged-list
+/// shape, e.g. widget's `.SH COMMANDS`).
+///
+/// only top-level entries are mined: `.PP`/`.TP` tags nested inside an `.RS`
+/// block are a command's own option/value sublists (e.g. bash's per-builtin
+/// `complete` flags), not sibling commands. tracking `.RS` depth keeps those
+/// out of the subcommand list.
 pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
     let mut out = Vec::new();
     let mut i = 0;
+    let mut rs_depth: u32 = 0;
     while i < lines.len() {
-        if let GroffLine::Macro { name, .. } = &lines[i]
-            && name == "PP"
-        {
-            i += 1;
-            if i >= lines.len() {
-                continue;
-            }
-            if let Some(name) = extract_command_name_from_line(&lines[i]) {
-                let (desc, new_i) = collect_subcmd_desc(lines, i + 1);
-                let short_desc = first_sentence(&desc);
-                out.push(ManpageSubcommand {
-                    name: name.to_ascii_lowercase(),
-                    desc: short_desc,
-                });
-                i = new_i;
-                continue;
-            } else {
+        match &lines[i] {
+            GroffLine::Macro { name, .. } if name == "RS" => {
+                rs_depth += 1;
                 i += 1;
             }
-        } else {
-            i += 1;
+            GroffLine::Macro { name, .. } if name == "RE" => {
+                rs_depth = rs_depth.saturating_sub(1);
+                i += 1;
+            }
+            GroffLine::Macro { name, .. } if rs_depth == 0 && (name == "PP" || name == "TP") => {
+                i += 1;
+                if i >= lines.len() {
+                    continue;
+                }
+                if let Some(name) = extract_command_name_from_line(&lines[i]) {
+                    let (desc, new_i) = collect_subcmd_desc(lines, i + 1);
+                    let short_desc = first_sentence(&desc);
+                    out.push(ManpageSubcommand {
+                        name: name.to_ascii_lowercase(),
+                        desc: short_desc,
+                    });
+                    i = new_i;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    // a tool may document the same command name across several `.TP` tags
+    // (bash repeats `bind`/`history` once per flag of that builtin). dedup at
+    // the parser layer so the cache holds the canonical, single-entry shape.
+    dedup_by_name(out)
+}
+
+/// keep one entry per case-insensitive name, preferring the longest
+/// description; preserves first-seen order.
+fn dedup_by_name(raw: Vec<ManpageSubcommand>) -> Vec<ManpageSubcommand> {
+    use std::collections::HashMap;
+    let mut best: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<ManpageSubcommand> = Vec::with_capacity(raw.len());
+    for sc in raw {
+        let key = sc.name.to_ascii_lowercase();
+        match best.get(&key) {
+            Some(&idx) => {
+                if sc.desc.len() > out[idx].desc.len() {
+                    out[idx].desc = sc.desc;
+                }
+            }
+            None => {
+                best.insert(key, out.len());
+                out.push(sc);
+            }
         }
     }
     out
@@ -189,21 +230,19 @@ fn shared_dash_prefix<'a>(tokens: impl Iterator<Item = &'a str>) -> String {
 }
 
 /// collect an xref entry's description: text lines until the next
-/// .TP/.SH/.SS boundary.
+/// .TP/.SH/.SS boundary. Text is already groff-stripped at classify time,
+/// so no inline-macro rendering is needed here.
 fn collect_xref_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
-    let mut acc: Vec<String> = Vec::new();
-    let mut i = start;
-    while i < lines.len() {
-        match &lines[i] {
-            GroffLine::Text(t) => {
-                acc.push(strip_groff_escapes(t));
-                i += 1;
-            }
-            GroffLine::Macro { name, .. } if name == "TP" || name == "SH" || name == "SS" => break,
-            _ => i += 1,
-        }
-    }
-    (acc.join(" "), i)
+    desc::collect(
+        lines,
+        start,
+        desc::DescOpts {
+            boundaries: &["TP", "SH", "SS"],
+            skip_rs: false,
+            stop_on_blank: false,
+            tags: desc::TagMacros::None,
+        },
+    )
 }
 
 /// collect the description for a subcommand entry. handles .RS/.RE blocks
@@ -251,5 +290,55 @@ fn first_sentence(s: &str) -> String {
     match s.find('.') {
         Some(idx) if idx > 0 => s[..idx].trim().to_string(),
         _ => s.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parsers::manpage::groff::classify_line;
+
+    fn commands_of(src: &str) -> Vec<(String, String)> {
+        let lines: Vec<GroffLine> = src.split('\n').map(classify_line).collect();
+        extract_subcommands_from_commands(&lines)
+            .into_iter()
+            .map(|sc| (sc.name, sc.desc))
+            .collect()
+    }
+
+    #[test]
+    fn tp_flat_command_list() {
+        // widget-style `.SH COMMANDS`: `.TP` + `.B name` + one-line desc.
+        let src = ".TP\n.B create\nCreate a new widget.\n.TP\n.B list\nList existing widgets.\n.TP\n.B remove\nRemove a widget by name.\n";
+        let got = commands_of(src);
+        assert_eq!(
+            got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["create", "list", "remove"]
+        );
+        assert_eq!(got[0].1, "Create a new widget");
+    }
+
+    #[test]
+    fn nested_rs_entries_are_not_mined() {
+        // a command's own option sublist lives in an `.RS` block; those `.TP`
+        // tags must not be mined as sibling commands (bash's builtin flags).
+        let src = ".TP\n.B complete\nGenerate completions.\n.RS\n.TP\n.B nospace\ninner option value\n.TP\n.B plusdirs\nanother option value\n.RE\n.TP\n.B alias\nDefine an alias.\n";
+        let got = commands_of(src);
+        assert_eq!(
+            got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["complete", "alias"],
+            "nested .RS .TP option values leaked: {got:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_names_collapse_keeping_longest_desc() {
+        // bash repeats `bind` once per flag; the parser keeps one entry with
+        // the richest description.
+        let src = ".TP\n.B bind\nshort.\n.TP\n.B bind\nDisplay current key and function bindings.\n";
+        let got = commands_of(src);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "bind");
+        assert_eq!(got[0].1, "Display current key and function bindings");
     }
 }

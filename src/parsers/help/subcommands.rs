@@ -98,3 +98,60 @@ make_parser!(pub subcommand_entry -> ManpageSubcommand,
         ManpageSubcommand { name: name.to_string(), desc: desc.to_string() }
     }
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(line: &str) -> (String, String) {
+        let (_, sc) = subcommand_entry(line).expect("subcommand_entry");
+        (sc.name, sc.desc)
+    }
+
+    #[test]
+    fn plain_entry() {
+        let (name, desc) = parse("    build    Compile the package\n");
+        assert_eq!(name, "build");
+        assert_eq!(desc, "Compile the package");
+    }
+
+    #[test]
+    fn comma_alias_keeps_canonical_name() {
+        // cargo lists `build, b` — the alias is consumed and discarded so the
+        // canonical first name survives and the two-space gap still parses.
+        let (name, desc) = parse("    build, b    Compile the current package\n");
+        assert_eq!(name, "build");
+        assert_eq!(desc, "Compile the current package");
+        let (name, _) = parse("    check, c    Analyze the package\n");
+        assert_eq!(name, "check");
+    }
+
+    #[test]
+    fn dash_prefixed_description_is_stripped() {
+        // manpage-style help prefixes the desc with "- ".
+        let (name, desc) = parse("  clone  - Clone a repository\n");
+        assert_eq!(name, "clone");
+        assert_eq!(desc, "Clone a repository");
+    }
+
+    #[test]
+    fn arg_placeholders_are_skipped() {
+        // `<url>` and `[DIR]` are argument placeholders, not part of the name
+        // or the two-space-delimited description.
+        let (name, desc) = parse("    add <url> [DIR]    Add a dependency\n");
+        assert_eq!(name, "add");
+        assert_eq!(desc, "Add a dependency");
+    }
+
+    #[test]
+    fn flag_line_is_rejected() {
+        // a line whose token starts with '-' is a flag, not a subcommand.
+        assert!(subcommand_entry("    --verbose    be loud\n").is_err());
+    }
+
+    #[test]
+    fn single_char_name_is_rejected() {
+        // names must be at least two option chars.
+        assert!(subcommand_entry("    x    too short\n").is_err());
+    }
+}

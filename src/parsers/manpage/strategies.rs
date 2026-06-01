@@ -8,6 +8,7 @@ use nom::{Parser, combinator::opt};
 
 use crate::make_macro_walker;
 use crate::parsers::help::{help_parser, param_parser, switch_parser};
+use crate::parsers::manpage::desc;
 use crate::parsers::manpage::groff::{
     GroffLine, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
 };
@@ -29,53 +30,20 @@ fn collect_text_lines(lines: &[GroffLine]) -> (String, &[GroffLine]) {
 }
 
 fn collect_description_lines(lines: &[GroffLine], start: usize) -> (String, usize) {
-    let mut acc: Vec<String> = Vec::new();
-    let mut i = start;
-    while i < lines.len() {
-        match &lines[i] {
-            GroffLine::Macro { name, .. }
-                if matches!(name.as_str(), "TP" | "TQ" | "IP" | "PP" | "SH" | "SS") =>
-            {
-                break;
-            }
-            GroffLine::Text(t) => {
-                acc.push(t.clone());
-                i += 1;
-            }
-            GroffLine::Macro { name, args }
-                if matches!(
-                    name.as_str(),
-                    "B" | "BI" | "BR" | "I" | "IR" | "IB" | "RB" | "RI"
-                ) =>
-            {
-                let text = tag_of_macro(name, args);
-                if !text.is_empty() {
-                    acc.push(text);
-                }
-                i += 1;
-            }
-            GroffLine::Blank => {
-                // a blank line ends the description, but only after we've
-                // collected some text — leading blanks between the tag and
-                // the first description line are still skipped. this caps
-                // clap-style "summary\n\nexpanded body" entries (jj, etc.)
-                // at the summary, which is what completion tooltips want.
-                // `.IP`-style help already stops at blanks (collect_text_lines
-                // breaks on any non-Text line); this brings `.TP` in line.
-                if !acc.is_empty() {
-                    break;
-                }
-                i += 1;
-            }
-            GroffLine::Comment => {
-                i += 1;
-            }
-            GroffLine::Macro { .. } => {
-                i += 1;
-            }
-        }
-    }
-    (acc.join(" "), i)
+    // a blank line ends the description, but only after some text was
+    // collected — leading blanks between the tag and the first body line
+    // are skipped. this caps clap-style "summary\n\nexpanded body" entries
+    // (jj, etc.) at the summary, which is what completion tooltips want.
+    desc::collect(
+        lines,
+        start,
+        desc::DescOpts {
+            boundaries: &["TP", "TQ", "IP", "PP", "SH", "SS"],
+            skip_rs: false,
+            stop_on_blank: true,
+            tags: desc::TagMacros::Wide,
+        },
+    )
 }
 
 /// attempt to parse a tag string (e.g. "-v, --verbose FILE") into an entry.
@@ -294,60 +262,16 @@ pub fn strategy_hp(lines: &[GroffLine]) -> Vec<ManpageEntry> {
 /// example blocks — those are sub-value listings, not part of the flag's
 /// own description text.
 fn collect_hp_description(lines: &[GroffLine], start: usize) -> (String, usize) {
-    let mut acc: Vec<String> = Vec::new();
-    let mut i = start;
-    while i < lines.len() {
-        match &lines[i] {
-            GroffLine::Macro { name, .. }
-                if matches!(name.as_str(), "HP" | "TP" | "TQ" | "PP" | "SH" | "SS") =>
-            {
-                break;
-            }
-            GroffLine::Macro { name, .. } if name == "RS" => {
-                i += 1;
-                let mut depth: u32 = 1;
-                while i < lines.len() && depth > 0 {
-                    if let GroffLine::Macro { name, .. } = &lines[i] {
-                        if name == "RS" {
-                            depth += 1;
-                        } else if name == "RE" {
-                            depth -= 1;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            GroffLine::Text(t) => {
-                acc.push(t.clone());
-                i += 1;
-            }
-            GroffLine::Macro { name, args }
-                if matches!(
-                    name.as_str(),
-                    "B" | "BI" | "BR" | "I" | "IR" | "IB" | "RB" | "RI"
-                ) =>
-            {
-                let text = tag_of_macro(name, args);
-                if !text.is_empty() {
-                    acc.push(text);
-                }
-                i += 1;
-            }
-            GroffLine::Blank => {
-                if !acc.is_empty() {
-                    break;
-                }
-                i += 1;
-            }
-            GroffLine::Comment => {
-                i += 1;
-            }
-            GroffLine::Macro { .. } => {
-                i += 1;
-            }
-        }
-    }
-    (acc.join(" "), i)
+    desc::collect(
+        lines,
+        start,
+        desc::DescOpts {
+            boundaries: &["HP", "TP", "TQ", "PP", "SH", "SS"],
+            skip_rs: true,
+            stop_on_blank: true,
+            tags: desc::TagMacros::Wide,
+        },
+    )
 }
 
 // strategy b'': bare Text tag immediately followed by `.RS/.RE` (ripgrep,
@@ -643,14 +567,36 @@ fn specialized_candidates(lines: &[GroffLine]) -> Vec<(&'static str, Vec<Manpage
         .collect()
 }
 
-fn best_entries(candidates: Vec<(&'static str, Vec<ManpageEntry>)>) -> Option<Vec<ManpageEntry>> {
-    let mut best: Vec<ManpageEntry> = Vec::new();
-    for (_, entries) in candidates {
-        if entries.len() >= best.len() {
-            best = entries;
-        }
+/// tie-break priority for a strategy, higher wins. when two strategies
+/// extract the same number of entries, this explicit ranking decides — so
+/// editing or reordering the candidate list can no longer silently change
+/// which strategy wins (the old code resolved ties by `>=` push order, an
+/// invisible coupling). the values preserve that historical order: the
+/// later a strategy was pushed, the higher it ranked on a tie.
+fn strategy_priority(tag: &str) -> u8 {
+    match tag {
+        "TP" => 0,
+        "IP" => 1,
+        "PP+RS" => 2,
+        "nix" => 3,
+        "HP" => 4,
+        "Text+RS" => 5,
+        _ => 0,
     }
-    (!best.is_empty()).then_some(best)
+}
+
+/// pick the strongest candidate: most entries first, then the deterministic
+/// `strategy_priority` tie-break.
+fn best_entries(candidates: Vec<(&'static str, Vec<ManpageEntry>)>) -> Option<Vec<ManpageEntry>> {
+    candidates
+        .into_iter()
+        .filter(|(_, e)| !e.is_empty())
+        .max_by(|(a_tag, a), (b_tag, b)| {
+            a.len()
+                .cmp(&b.len())
+                .then_with(|| strategy_priority(a_tag).cmp(&strategy_priority(b_tag)))
+        })
+        .map(|(_, entries)| entries)
 }
 
 fn entry_sections(lines: &[GroffLine]) -> Vec<&[GroffLine]> {

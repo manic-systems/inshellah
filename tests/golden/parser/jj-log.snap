@@ -1,0 +1,35 @@
+subcommands:
+positional_choices:
+flags:
+  -r|--revision
+  -n|--limit
+  --reversed
+  -G|--no-graph
+  -T|--template
+  -p|--patch
+  --count
+  -h|--help
+  -s|--summary
+  --stat
+  --types
+  --name-only
+  -e
+  --git
+  --color-words
+  --tool
+  --context
+  --ignore-all-space
+  --ignore-space-change
+  -R|--repository
+  --ignore-working-copy
+  --no-integrate-operation
+  --ignore-immutable
+  --at-operation
+  --debug
+  --color
+  --quiet
+  --no-pager
+  --config
+  --config-file
+positionals:
+  filesets

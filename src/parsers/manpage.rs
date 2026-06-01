@@ -23,6 +23,7 @@
 //! the most flag entries, on the theory that more results = better match.
 
 mod commands;
+mod desc;
 mod groff;
 mod mdoc;
 mod sections;

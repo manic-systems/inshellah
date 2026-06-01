@@ -1,0 +1,25 @@
+subcommands:
+positional_choices:
+flags:
+  -b|--branch
+  -s|--source
+  -r|--revision
+  -o|--onto
+  -A|--insert-after
+  -B|--insert-before
+  --skip-emptied
+  --keep-divergent
+  --simplify-parents
+  -h|--help
+  -R|--repository
+  --ignore-working-copy
+  --no-integrate-operation
+  --ignore-immutable
+  --at-operation
+  --debug
+  --color
+  --quiet
+  --no-pager
+  --config
+  --config-file
+positionals:

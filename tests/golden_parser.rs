@@ -61,7 +61,20 @@ fn render_manpage(txt: &str) -> String {
     render(&parse_manpage_string(txt))
 }
 
-const CASES: &[&str] = &["cargo_help.txt", "getent.1", "widget.1"];
+// jj is clap-generated with a separate `Global Options:` section, short+long
+// flag pairs that fold into `Both`, and revset/bookmark value flags. these are
+// real `jj <sub> --help` captures: a regression in jj flag coverage (the hard
+// case to keep fully covered) shows up as a golden diff here.
+const CASES: &[&str] = &[
+    "cargo_help.txt",
+    "getent.1",
+    "widget.1",
+    "jj-squash.txt",
+    "jj-rebase.txt",
+    "jj-log.txt",
+    "jj-git-push.txt",
+    "jj-bookmark-set.txt",
+];
 
 #[test]
 fn golden_parser_corpus() {
