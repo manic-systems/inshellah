@@ -3,6 +3,7 @@ pub mod config;
 pub mod dynamic;
 pub mod parsers;
 pub mod pool;
+pub mod resolver;
 pub mod store;
 pub mod subprocess;
 pub mod types;
