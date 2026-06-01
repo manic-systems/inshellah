@@ -66,6 +66,12 @@ pub struct ManpageSubcommand {
 pub struct ManpageResult {
     pub entries: Vec<ManpageEntry>,
     pub subcommands: Vec<ManpageSubcommand>,
+    /// values for a positional argument, mined from prose (getent's database
+    /// names under DESCRIPTION). kept distinct from `subcommands` so they
+    /// never flow into the real-child paths (recursion, supplement, prefix
+    /// stripping) — they're completion choices for an argument slot, not
+    /// commands. surfaced at the completion/extern layer.
+    pub positional_choices: Vec<ManpageSubcommand>,
     pub positionals: Vec<(String, Positional)>,
     pub description: String,
 }
@@ -354,17 +360,21 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
                 )
             });
         }
-        for positional in sections::extract_description_positionals(lines) {
-            if !subcommands
-                .iter()
-                .any(|sc| sc.name.eq_ignore_ascii_case(&positional.name))
-            {
-                subcommands.push(positional);
-            }
-        }
+        // prose-mined positional value choices (getent's database names) go
+        // to their own channel, never `subcommands` — they're argument values,
+        // not real children. skip any that collide with a real subcommand name.
+        let positional_choices = sections::extract_description_positionals(lines)
+            .into_iter()
+            .filter(|choice| {
+                !subcommands
+                    .iter()
+                    .any(|sc| sc.name.eq_ignore_ascii_case(&choice.name))
+            })
+            .collect();
         ManpageResult {
             entries,
             subcommands,
+            positional_choices,
             positionals,
             description: String::new(),
         }
@@ -422,6 +432,7 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
             let mut sub_result = ManpageResult {
                 entries: strategies::extract_entries(&lines),
                 subcommands: Vec::new(),
+                positional_choices: Vec::new(),
                 positionals,
                 description: desc,
             };

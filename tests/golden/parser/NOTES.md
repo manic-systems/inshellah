@@ -15,14 +15,14 @@ INSHELLAH_BLESS=1 cargo test --test golden_parser
 
 - `cargo_help` — comma-aliased subcommands (`build, b`) keep the canonical
   name (regression already fixed); option parsing; the `COMMAND` positional.
+- `getent` — prose-mined positional value choices (`passwd`/`group`/`hosts`)
+  land in the dedicated `positional_choices` channel, NOT `subcommands`
+  (Phase 4 fix). The completer still offers them in the argument slot, but
+  they never flow into the real-child paths (recursion, supplement, extern
+  stubs).
 
 ## Known-pinned bugs (these goldens will change *deliberately* in later phases)
 
-- **`getent` — type confusion (Phase 4 target).** `passwd`/`group`/`hosts` are
-  positional *database choices* mined from DESCRIPTION prose, but they are
-  currently filed under `subcommands` (because the model has no positional-
-  choices channel). When Phase 4 introduces `CompletionKind`, these move out of
-  `subcommands` and this golden is re-blessed to reflect it.
 - **`widget` — empty COMMANDS (Phase 5 target).** A `.SH COMMANDS` section in
   `.TP`/`.B name` tagged-list form yields **zero** subcommands today — the
   strategy/section extractors don't cover this layout, and the failure is

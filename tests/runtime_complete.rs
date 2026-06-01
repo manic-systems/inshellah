@@ -68,6 +68,7 @@ exit 2
             name: "clone".to_string(),
             desc: "Clone a repository".to_string(),
         }],
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -179,6 +180,7 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
             name: "sub".to_string(),
             desc: "subcommand".to_string(),
         }],
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -189,6 +191,7 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
             desc: "child flag".to_string(),
         }],
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -345,6 +348,7 @@ fn complete_uses_boundary_aware_fuzzy_ranking() {
                 desc: "clone something".to_string(),
             },
         ],
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -388,6 +392,7 @@ fn complete_returns_flags_only_after_hyphen() {
             desc: "verbose output".to_string(),
         }],
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -460,6 +465,7 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
                 desc: "set preset".to_string(),
             },
         ],
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -530,6 +536,7 @@ fn complete_drops_exact_subcommand_match() {
                 desc: "start unit".to_string(),
             },
         ],
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -847,6 +854,7 @@ fn flag_demo_cache(name: &str, flags: &[&str]) -> std::path::PathBuf {
             })
             .collect(),
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -865,6 +873,7 @@ fn purge_clears_user_cache_but_not_system_dirs() {
     let result = ManpageResult {
         entries: Vec::new(),
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -917,6 +926,7 @@ fn complete_dir_overlay_uses_user_before_system() {
             desc: "user flag".to_string(),
         }],
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -927,6 +937,7 @@ fn complete_dir_overlay_uses_user_before_system() {
             desc: "system flag".to_string(),
         }],
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -975,6 +986,7 @@ fn complete_empty_native_file_does_not_shadow_json() {
             desc: "json flag".to_string(),
         }],
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
@@ -1007,12 +1019,14 @@ fn complete_discovers_underscored_subcommand_from_encoded_cache() {
     let parent = ManpageResult {
         entries: Vec::new(),
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     };
     let child = ManpageResult {
         entries: Vec::new(),
         subcommands: Vec::new(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: "underscored child".to_string(),
     };

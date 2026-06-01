@@ -47,6 +47,7 @@ fn subs(pairs: &[(&str, &str)]) -> ManpageResult {
                 desc: desc.to_string(),
             })
             .collect(),
+        positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
     }

@@ -1,4 +1,5 @@
 subcommands:
+positional_choices:
 flags:
   -v|--verbose
   --config
