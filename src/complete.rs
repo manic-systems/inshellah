@@ -9,6 +9,9 @@
 
 use std::fmt::Write as _;
 
+use crate::config::Config;
+use crate::parsers::manpage::{ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch};
+
 /// A single completion candidate. Rendered to JSON only at the output
 /// boundary (`into_json` / `completion_json`), so the rest of the pipeline
 /// works with typed values rather than pre-serialized strings.
@@ -116,6 +119,132 @@ pub fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
             .all(|(&hay, &needle)| hay.eq_ignore_ascii_case(&needle))
 }
 
+/// A flag's tooltip: its description with the parameter placeholder appended
+/// (`<FILE>` for mandatory, `[FILE]` for optional).
+pub fn entry_completion_desc(e: &ManpageEntry) -> String {
+    match &e.param {
+        Some(OwnedParam::Mandatory(p)) => {
+            if e.desc.is_empty() {
+                format!("<{p}>")
+            } else {
+                format!("{} <{p}>", e.desc)
+            }
+        }
+        Some(OwnedParam::Optional(p)) => {
+            if e.desc.is_empty() {
+                format!("[{p}]")
+            } else {
+                format!("{} [{p}]", e.desc)
+            }
+        }
+        None => e.desc.clone(),
+    }
+}
+
+/// Score and rank the subcommand + flag candidates for a matched command
+/// `result`. Pure — the caller renders the returned candidates to JSON.
+///
+/// `matched_depth` is how many command tokens the cache match covered;
+/// `resolve_depth` is how many complete (non-partial) tokens the user typed.
+/// Subcommands are emitted ONLY when `matched_depth >= resolve_depth` — i.e.
+/// the match is a full prefix of what was typed. When the user has typed past
+/// the deepest cached command (e.g. `systemctl status` falls back to the
+/// `systemctl` match at depth 1), offering that ancestor's subcommands would
+/// be wrong; we stay silent so the dynamic completer (unit names, etc.) takes
+/// over. A token that exactly equals a candidate is dropped so it isn't echoed
+/// back, masking a downstream completer.
+pub fn generate_candidates(
+    result: &ManpageResult,
+    matched_depth: usize,
+    resolve_depth: usize,
+    last_token: &str,
+    fallback_subcommands: &[ManpageSubcommand],
+    typing_flag: bool,
+    cfg: &Config,
+) -> Vec<Candidate> {
+    let subs: &[ManpageSubcommand] = if !result.subcommands.is_empty() {
+        &result.subcommands
+    } else {
+        fallback_subcommands
+    };
+
+    let mut scored: Vec<(i32, Candidate)> = Vec::with_capacity(
+        (if matched_depth >= resolve_depth { subs.len() } else { 0 })
+            + if typing_flag { result.entries.len() } else { 0 },
+    );
+
+    if matched_depth >= resolve_depth {
+        for sc in subs {
+            if !last_token.is_empty() && last_token == sc.name {
+                continue;
+            }
+            let s = fuzzy_score(last_token, &sc.name);
+            if s > 0 {
+                scored.push((s, Candidate::new(sc.name.clone(), sc.desc.clone())));
+            }
+        }
+    }
+
+    // flag candidates. the needle — and whether it scores against the bare flag
+    // name or the dashed form — depends on which trigger the user typed (see
+    // Config::flag_needle). the default "-" trigger keeps the dashed form, so
+    // ranking is unchanged.
+    if typing_flag {
+        let fneedle = cfg.flag_needle(last_token);
+        let score_against = |dashed: &str, bare_name: &str| -> i32 {
+            if fneedle.bare {
+                fuzzy_score(fneedle.needle, bare_name)
+            } else {
+                fuzzy_score(fneedle.needle, dashed)
+            }
+        };
+        for e in &result.entries {
+            let (flag, aka, score) = match &e.switch {
+                OwnedSwitch::Long(l) => {
+                    let flag = format!("--{l}");
+                    let score = score_against(&flag, l);
+                    (flag, None, score)
+                }
+                OwnedSwitch::Short(c) => {
+                    let flag = format!("-{c}");
+                    let short_bare = c.to_string();
+                    let score = score_against(&flag, &short_bare);
+                    (flag, None, score)
+                }
+                OwnedSwitch::Both(c, l) => {
+                    let long_flag = format!("--{l}");
+                    let short_flag = format!("-{c}");
+                    let short_bare = c.to_string();
+                    let ls = score_against(&long_flag, l);
+                    let ss = score_against(&short_flag, &short_bare);
+                    if ss > ls {
+                        (short_flag, Some(long_flag), ss)
+                    } else {
+                        (long_flag, Some(short_flag), ls)
+                    }
+                }
+            };
+            if !last_token.is_empty() && last_token == flag {
+                continue;
+            }
+            if score > 0 {
+                let base_desc = entry_completion_desc(e);
+                let desc = match aka {
+                    Some(aka) => format!("(aka {aka}) {base_desc}"),
+                    None => base_desc,
+                };
+                scored.push((score, Candidate::new(flag, desc)));
+            }
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    if cfg.max_completions > 0 {
+        scored.truncate(cfg.max_completions);
+    }
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +267,48 @@ mod tests {
             completion_json("a\"b", "line\nnext"),
             r#"{"value":"a\"b","description":"line\nnext"}"#
         );
+    }
+
+    fn result_with_subs(names: &[&str]) -> ManpageResult {
+        ManpageResult {
+            entries: Vec::new(),
+            subcommands: names
+                .iter()
+                .map(|n| ManpageSubcommand {
+                    name: n.to_string(),
+                    desc: String::new(),
+                })
+                .collect(),
+            positionals: Vec::new(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn depth_guard_suppresses_subs_on_shallow_match() {
+        // `systemctl status` not cached -> match falls back to `systemctl` at
+        // depth 1 while resolve_depth is 2. The ancestor's subcommands must NOT
+        // be offered (the user typed past them); the dynamic completer takes
+        // over. matched_depth(1) < resolve_depth(2) => empty.
+        let r = result_with_subs(&["start", "stop", "status"]);
+        let cfg = Config::default();
+        let shallow = generate_candidates(&r, 1, 2, "stat", &[], false, &cfg);
+        assert!(shallow.is_empty(), "shallow match must not emit subs");
+
+        // full-prefix match (depth == resolve_depth) offers the fuzzy hits.
+        let full = generate_candidates(&r, 1, 1, "st", &[], false, &cfg);
+        let values: Vec<&str> = full.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"start"));
+        assert!(values.contains(&"status"));
+    }
+
+    #[test]
+    fn exact_token_is_dropped_to_unmask_downstream() {
+        // typing the full word back drops it, so a downstream completer isn't
+        // masked by an echo.
+        let r = result_with_subs(&["status"]);
+        let cfg = Config::default();
+        let out = generate_candidates(&r, 1, 1, "status", &[], false, &cfg);
+        assert!(out.is_empty());
     }
 }
