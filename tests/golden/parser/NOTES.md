@@ -20,12 +20,9 @@ INSHELLAH_BLESS=1 cargo test --test golden_parser
   (Phase 4 fix). The completer still offers them in the argument slot, but
   they never flow into the real-child paths (recursion, supplement, extern
   stubs).
-
-## Known-pinned bugs (these goldens will change *deliberately* in later phases)
-
-- **`widget` — empty COMMANDS (Phase 5 target).** A `.SH COMMANDS` section in
-  `.TP`/`.B name` tagged-list form yields **zero** subcommands today — the
-  strategy/section extractors don't cover this layout, and the failure is
-  silent (empty, indistinguishable from "no subcommands"). Phase 5's principled
-  selection should surface `create`/`list`/`remove`; this golden will then be
-  re-blessed to show them.
+- `widget` — a `.SH COMMANDS` section in `.TP`/`.B name` tagged-list form now
+  surfaces `create`/`list`/`remove` (Phase 5 fix). The COMMANDS extractor
+  handles both `.PP` and `.TP` tags and tracks `.RS` depth so a command's
+  nested option/value sublists (bash's per-builtin flags) are not mined as
+  sibling commands. Because `subcommands` is now populated, the synopsis
+  `<command>` placeholder positional is correctly dropped.
