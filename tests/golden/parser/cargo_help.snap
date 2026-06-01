@@ -1,0 +1,16 @@
+subcommands:
+  build
+  check
+  clean
+  doc
+  run
+  test
+  help
+flags:
+  -V|--version
+  -v|--verbose
+  -q|--quiet
+  --color
+  -h|--help
+positionals:
+  COMMAND

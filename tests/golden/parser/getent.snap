@@ -1,0 +1,10 @@
+subcommands:
+  passwd
+  group
+  hosts
+flags:
+  -s|--service
+  --no-idn
+positionals:
+  database
+  key
