@@ -58,9 +58,23 @@ make_parser!(
     )
 );
 
+// some help formats list a subcommand with comma-separated aliases before
+// the description gap, e.g. cargo's `build, b` / `check, c`. consume and
+// discard the aliases so the entry parses and the canonical (first) name is
+// kept; without this the comma fails the two-space check and the whole line
+// — every aliased subcommand — is dropped.
+make_parser!(
+    skip_subcommand_aliases -> (),
+    value(
+        (),
+        many0(preceded(tag(", "), take_while1(is_option_char))),
+    )
+);
+
 // parse a subcommand entry: leading whitespace, then a name (2+ option
-// chars, not starting with '-'), optional argument placeholders, exactly
-// two spaces, optional padding, then the description text and eol.
+// chars, not starting with '-'), optional comma-separated aliases, optional
+// argument placeholders, exactly two spaces, optional padding, then the
+// description text and eol.
 make_parser!(pub subcommand_entry -> Subcommand<'a>,
     (
         preceded(
@@ -70,11 +84,12 @@ make_parser!(pub subcommand_entry -> Subcommand<'a>,
                 |n: &str| n.len() >= 2,
             ),
         ),
+        skip_subcommand_aliases,
         skip_arg_placeholders,
         tag("  "),
         space0,
         terminated(take_till(|c: char| c.is_newline()), eol),
-    ) => |(name, _, _, _, desc): (&'a str, _, _, _, &'a str)| {
+    ) => |(name, _, _, _, _, desc): (&'a str, _, _, _, _, &'a str)| {
         // some help formats prefix desc with "- " (manpage-style); strip it.
         let d = desc.trim_start();
         let desc = d.strip_prefix("- ").map(|s| s.trim_start()).unwrap_or(d);
