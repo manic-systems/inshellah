@@ -43,60 +43,6 @@ def inshellah-complete-spans [spans: list<string>] {
     }
 }
 
-def inshellah-unquote-ast-token [token: string] {
-    let len = ($token | str length)
-    if $len >= 2 {
-        let first = ($token | str substring 0..<1)
-        let last = ($token | str substring ($len - 1)..<$len)
-        if (($first == '"' and $last == '"') or ($first == "'" and $last == "'")) {
-            return ($token | str substring 1..<($len - 1))
-        }
-    }
-    $token
-}
-
-def inshellah-tokenize-commandline-prefix [prefix: string] {
-    let ast_tokens = (try {
-        # shape_internalcall is the head of a stub-defined command: the module
-        # installs `extern "<cmd>" [...args: string@inshellah-complete-commandline]`
-        # for every dynamic-backed tool, so nu parses `jj`/`git`/`systemctl` as
-        # an internal call rather than a bare external. without it the command
-        # name is dropped and the spans start at the first arg (`jj g` -> `[g]`),
-        # which strands the static lookup and every dynamic provider.
-        ast $prefix --flatten
-        | where shape in [shape_internalcall shape_external shape_externalarg shape_string shape_filepath shape_globpattern shape_flag]
-        | sort-by span.start
-        | get content
-        | each {|token| inshellah-unquote-ast-token $token }
-    } catch { null })
-
-    if $ast_tokens == null {
-        # Fallback for old Nushell releases or transient parser failures. This
-        # path is intentionally narrow: generated dynamic stubs may mis-handle
-        # quoted args here, but the normal external completer still receives
-        # Nu-provided spans directly through `inshellah-complete-spans`.
-        return ($prefix | split row " " | where {|token| $token != "" })
-    }
-
-    let trailing_empty = if (($prefix | str length) > 0) and ($prefix =~ '\s$') {
-        [""]
-    } else {
-        []
-    }
-    $ast_tokens | append $trailing_empty
-}
-
-def inshellah-complete-commandline [line: string, cursor: int] {
-    let prefix = if $cursor <= ($line | str length) {
-        $line | str substring 0..<$cursor
-    } else {
-        $line
-    }
-    let current = ($prefix | split row "\n" | last)
-    let spans = (inshellah-tokenize-commandline-prefix $current)
-    inshellah-complete-spans $spans
-}
-
 let inshellah_complete = { |spans| inshellah-complete-spans $spans }
 
 $env.config.completions.external = {enable: true, max_results: $inshellah_max_results, completer: $inshellah_complete}
