@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use pound::Parse;
 
 use inshellah::complete::{Candidate, generate_candidates};
 use inshellah::config::{Config, DEFAULT_TIMEOUT_MS};
@@ -808,8 +809,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         timeout_ms: ctx.timeout_ms,
         // pool bounds total work + per-subprocess timeouts, so no per-job budget
         deadline: Instant::now() + Duration::from_secs(86_400),
-        skip_manpage: ctx.help_only.contains(&job.base_cmd)
-            || ctx.help_only.contains(&full_cmd),
+        skip_manpage: ctx.help_only.contains(&job.base_cmd) || ctx.help_only.contains(&full_cmd),
     };
 
     // classify only at top level
@@ -2016,71 +2016,136 @@ struct IndexArgs {
     workers: usize,
 }
 
-fn parse_index_args(args: &[String]) -> IndexArgs {
-    let mut out = IndexArgs {
-        prefixes: Vec::new(),
-        dir: None,
-        ignore: None,
-        help_only: None,
-        timeout_ms: DEFAULT_TIMEOUT_MS,
-        workers: default_workers(),
-    };
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dir" => {
-                i += 1;
-                if i < args.len() {
-                    out.dir = Some(PathBuf::from(&args[i]));
-                }
-            }
-            "--ignore" => {
-                i += 1;
-                if i < args.len() {
-                    out.ignore = Some(PathBuf::from(&args[i]));
-                }
-            }
-            "--help-only" => {
-                i += 1;
-                if i < args.len() {
-                    out.help_only = Some(PathBuf::from(&args[i]));
-                }
-            }
-            // so callers (nix's extraScrapePackages) needn't rely on arg order.
-            "--prefix" => {
-                i += 1;
-                if i < args.len() {
-                    out.prefixes.extend(
-                        args[i]
-                            .split(':')
-                            .filter(|s| !s.is_empty())
-                            .map(PathBuf::from),
-                    );
-                }
-            }
-            "--timeout-ms" => {
-                i += 1;
-                if i < args.len()
-                    && let Ok(n) = args[i].parse::<u64>()
-                {
-                    out.timeout_ms = n;
-                }
-            }
-            "--workers" => {
-                i += 1;
-                if i < args.len()
-                    && let Ok(n) = args[i].parse::<usize>()
-                {
-                    out.workers = n.max(1);
-                }
-            }
-            other => {
-                out.prefixes.push(PathBuf::from(other));
-            }
-        }
-        i += 1;
+#[derive(Parse, Debug)]
+#[pound(name = "inshellah")]
+enum Cli {
+    /// index completions into a directory of JSON/nu files
+    Index {
+        #[pound(positional, value_name = "PREFIX")]
+        prefixes: Vec<PathBuf>,
+        #[pound(long)]
+        dir: Option<PathBuf>,
+        #[pound(long)]
+        ignore: Option<PathBuf>,
+        #[pound(long)]
+        help_only: Option<PathBuf>,
+        #[pound(long = "prefix", value_name = "PATHS")]
+        extra_prefixes: Vec<String>,
+        #[pound(long)]
+        timeout_ms: Option<String>,
+        #[pound(long)]
+        workers: Option<String>,
+    },
+    /// parse a manpage and emit nushell extern
+    Manpage { file: PathBuf },
+    /// batch-process manpages under a directory
+    ManpageDir { dir: PathBuf },
+    /// nushell custom completer
+    Complete {
+        #[pound(long)]
+        dir: Option<String>,
+        #[pound(long)]
+        timeout_ms: Option<String>,
+        #[pound(positional, value_name = "SPAN")]
+        spans: Vec<String>,
+    },
+    /// print stored completion data
+    Query {
+        #[pound(long)]
+        dir: Option<String>,
+        #[pound(positional, value_name = "CMD")]
+        cmd: Vec<String>,
+    },
+    /// list indexed commands
+    Dump {
+        #[pound(long)]
+        dir: Option<String>,
+    },
+    /// audit source divergence
+    Diff {
+        #[pound(long)]
+        scan: Option<PathBuf>,
+        #[pound(long)]
+        dir: Option<String>,
+        #[pound(long)]
+        timeout_ms: Option<String>,
+        #[pound(positional, value_name = "CMD")]
+        cmd: Vec<String>,
+    },
+    /// delete the on-the-fly user cache
+    Purge {
+        #[pound(long)]
+        dir: Option<String>,
+    },
+    /// generate nushell completions for inshellah
+    Completions,
+    #[pound(hidden)]
+    Help,
+}
+
+#[cfg(test)]
+#[derive(Parse, Debug)]
+#[pound(name = "inshellah index")]
+struct IndexCli {
+    #[pound(positional, value_name = "PREFIX")]
+    prefixes: Vec<PathBuf>,
+    #[pound(long)]
+    dir: Option<PathBuf>,
+    #[pound(long)]
+    ignore: Option<PathBuf>,
+    #[pound(long)]
+    help_only: Option<PathBuf>,
+    #[pound(long = "prefix", value_name = "PATHS")]
+    extra_prefixes: Vec<String>,
+    #[pound(long)]
+    timeout_ms: Option<String>,
+    #[pound(long)]
+    workers: Option<String>,
+}
+
+#[cfg(test)]
+impl From<IndexCli> for IndexArgs {
+    fn from(parsed: IndexCli) -> Self {
+        index_args_from_parts(
+            parsed.prefixes,
+            parsed.dir,
+            parsed.ignore,
+            parsed.help_only,
+            parsed.extra_prefixes,
+            parsed.timeout_ms.as_deref(),
+            parsed.workers.as_deref(),
+        )
     }
-    out
+}
+
+fn index_args_from_parts(
+    mut prefixes: Vec<PathBuf>,
+    dir: Option<PathBuf>,
+    ignore: Option<PathBuf>,
+    help_only: Option<PathBuf>,
+    extra_prefixes: Vec<String>,
+    timeout_ms: Option<&str>,
+    workers: Option<&str>,
+) -> IndexArgs {
+    prefixes.extend(split_colon_paths(extra_prefixes.iter().map(String::as_str)));
+    IndexArgs {
+        prefixes,
+        dir,
+        ignore,
+        help_only,
+        timeout_ms: timeout_ms
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_TIMEOUT_MS),
+        workers: workers
+            .and_then(|n| n.parse::<usize>().ok())
+            .map(|n| n.max(1))
+            .unwrap_or_else(default_workers),
+    }
+}
+
+#[cfg(test)]
+fn parse_index_args(args: &[String]) -> IndexArgs {
+    IndexCli::parse_from(args.iter().map(String::as_str)).into()
 }
 
 fn default_workers() -> usize {
@@ -2102,35 +2167,59 @@ fn mandir_for_completion_dir(dir: &Path) -> Option<PathBuf> {
 
 // timeout is `None` when unset so the caller can fall back to the configured
 // default.
-fn parse_dir_args(args: &[String]) -> (Vec<String>, Vec<PathBuf>, Option<u64>) {
-    let mut positional = Vec::new();
-    let mut dirs: Option<Vec<PathBuf>> = None;
-    let mut timeout_ms: Option<u64> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dir" => {
+fn split_colon_paths<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<PathBuf> {
+    values
+        .into_iter()
+        .flat_map(|value| value.split(':'))
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn completion_dirs(dir: Option<&str>) -> Vec<PathBuf> {
+    dir.map(|d| d.split(':').map(PathBuf::from).collect())
+        .unwrap_or_else(|| vec![default_store_path()])
+}
+
+fn parse_timeout_ms(timeout_ms: Option<&str>) -> Option<u64> {
+    timeout_ms.and_then(|n| n.parse::<u64>().ok())
+}
+
+const COMPLETE_DASH_ARG_SENTINEL: &str = "__INSHELLAH_COMPLETE_DASH_ARG__";
+const COMPLETE_DOUBLE_DASH_SENTINEL: &str = "__INSHELLAH_LITERAL_DOUBLE_DASH__";
+
+fn normalize_cli_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut args: Vec<String> = args.into_iter().collect();
+    if args.first().is_some_and(|arg| arg == "complete") {
+        let mut i = 1;
+        while i < args.len() {
+            if args[i] == "--dir" || args[i] == "--timeout-ms" {
+                i += 2;
+                continue;
+            }
+            if args[i].starts_with("--dir=") || args[i].starts_with("--timeout-ms=") {
                 i += 1;
-                if i < args.len() {
-                    dirs = Some(args[i].split(':').map(PathBuf::from).collect());
-                }
+                continue;
             }
-            "--timeout-ms" => {
-                i += 1;
-                if i < args.len()
-                    && let Ok(n) = args[i].parse::<u64>()
-                {
-                    timeout_ms = Some(n);
-                }
+            if args[i] == "--" {
+                args[i] = COMPLETE_DOUBLE_DASH_SENTINEL.to_string();
+            } else if args[i].starts_with('-') {
+                args[i] = format!("{COMPLETE_DASH_ARG_SENTINEL}{}", args[i]);
             }
-            _ => {
-                positional.push(args[i].clone());
-            }
+            i += 1;
         }
-        i += 1;
     }
-    let dirs = dirs.unwrap_or_else(|| vec![default_store_path()]);
-    (positional, dirs, timeout_ms)
+    args
+}
+
+fn restore_complete_spans(spans: &mut [String]) {
+    for span in spans {
+        if span == COMPLETE_DOUBLE_DASH_SENTINEL {
+            *span = "--".to_string();
+        } else if let Some(rest) = span.strip_prefix(COMPLETE_DASH_ARG_SENTINEL) {
+            *span = rest.to_string();
+        }
+    }
 }
 
 fn main() {
@@ -2140,14 +2229,38 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args.is_empty() {
         usage();
         std::process::exit(1);
     }
-    match args[1].as_str() {
-        "index" => {
-            let parsed = parse_index_args(&args[2..]);
+    if raw_args
+        .first()
+        .is_some_and(|arg| arg == "-h" || arg == "--help")
+    {
+        usage();
+        return;
+    }
+    let args = normalize_cli_args(raw_args);
+    match Cli::parse_from(args.iter().map(String::as_str)) {
+        Cli::Index {
+            prefixes,
+            dir,
+            ignore,
+            help_only,
+            extra_prefixes,
+            timeout_ms,
+            workers,
+        } => {
+            let parsed = index_args_from_parts(
+                prefixes,
+                dir,
+                ignore,
+                help_only,
+                extra_prefixes,
+                timeout_ms.as_deref(),
+                workers.as_deref(),
+            );
             if parsed.prefixes.is_empty() {
                 eprintln!("error: index requires at least one PREFIX");
                 std::process::exit(1);
@@ -2182,29 +2295,27 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        "manpage" => {
-            if args.len() < 3 {
-                eprintln!("error: manpage requires a FILE argument");
-                std::process::exit(1);
-            }
-            if let Err(e) = cmd_manpage(Path::new(&args[2])) {
+        Cli::Manpage { file } => {
+            if let Err(e) = cmd_manpage(&file) {
                 eprintln!("manpage failed: {e}");
                 std::process::exit(1);
             }
         }
-        "manpage-dir" => {
-            if args.len() < 3 {
-                eprintln!("error: manpage-dir requires a DIR argument");
-                std::process::exit(1);
-            }
-            if let Err(e) = cmd_manpage_dir(Path::new(&args[2])) {
+        Cli::ManpageDir { dir } => {
+            if let Err(e) = cmd_manpage_dir(&dir) {
                 eprintln!("manpage-dir failed: {e}");
                 std::process::exit(1);
             }
         }
-        "complete" => {
+        Cli::Complete {
+            dir,
+            timeout_ms,
+            mut spans,
+        } => {
+            restore_complete_spans(&mut spans);
             let cfg = Config::from_env();
-            let (positional, dirs, timeout_override) = parse_dir_args(&args[2..]);
+            let dirs = completion_dirs(dir.as_deref());
+            let timeout_override = parse_timeout_ms(timeout_ms.as_deref());
             let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
             // first dir is the writable user cache; rest are read-only system dirs
             let (user_dir, system_dirs): (PathBuf, Vec<PathBuf>) = match dirs.split_first() {
@@ -2216,65 +2327,51 @@ fn main() {
                 .filter_map(|d| mandir_for_completion_dir(d))
                 .filter(|p| p.is_dir())
                 .collect();
-            cmd_complete(
-                &positional,
-                &user_dir,
-                &system_dirs,
-                &mandirs,
-                timeout_ms,
-                &cfg,
-            );
+            cmd_complete(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg);
         }
-        "query" => {
-            let (positional, dirs, _timeout_ms) = parse_dir_args(&args[2..]);
-            if positional.is_empty() {
+        Cli::Query { dir, cmd } => {
+            let dirs = completion_dirs(dir.as_deref());
+            if cmd.is_empty() {
                 eprintln!("error: query requires a CMD argument");
                 std::process::exit(1);
             }
-            let cmd = positional.join(" ");
+            let cmd = cmd.join(" ");
             if let Err(e) = cmd_query(&cmd, &dirs) {
                 eprintln!("query failed: {e}");
                 std::process::exit(1);
             }
         }
-        "dump" => {
-            let (_, dirs, _timeout_ms) = parse_dir_args(&args[2..]);
+        Cli::Dump { dir } => {
+            let dirs = completion_dirs(dir.as_deref());
             cmd_dump(&dirs);
         }
-        "diff" => {
+        Cli::Diff {
+            scan,
+            dir,
+            timeout_ms,
+            cmd,
+        } => {
             let cfg = Config::from_env();
-            if let Some(pos) = args.iter().position(|a| a == "--scan") {
-                let Some(prefix) = args.get(pos + 1) else {
-                    eprintln!("error: --scan requires a PREFIX path");
-                    std::process::exit(1);
-                };
-                cmd_diff_scan(Path::new(prefix), cfg.timeout_ms);
+            if let Some(prefix) = scan {
+                cmd_diff_scan(&prefix, cfg.timeout_ms);
             } else {
-                let (positional, dirs, timeout_override) = parse_dir_args(&args[2..]);
-                if positional.is_empty() {
+                let dirs = completion_dirs(dir.as_deref());
+                let timeout_override = parse_timeout_ms(timeout_ms.as_deref());
+                if cmd.is_empty() {
                     eprintln!("error: diff requires a CMD argument");
                     std::process::exit(1);
                 }
-                cmd_diff(
-                    &positional,
-                    &dirs,
-                    timeout_override.unwrap_or(cfg.timeout_ms),
-                );
+                cmd_diff(&cmd, &dirs, timeout_override.unwrap_or(cfg.timeout_ms));
             }
         }
-        "purge" => {
-            let (_, dirs, _timeout_ms) = parse_dir_args(&args[2..]);
+        Cli::Purge { dir } => {
+            let dirs = completion_dirs(dir.as_deref());
             // only the writable user dir is purged, never the system overlays
             let user_dir = dirs.first().cloned().unwrap_or_else(default_store_path);
             cmd_purge(&user_dir);
         }
-        "completions" => cmd_completions(),
-        "--help" | "-h" | "help" => usage(),
-        other => {
-            eprintln!("unknown subcommand: {other}");
-            usage();
-            std::process::exit(1);
-        }
+        Cli::Completions => cmd_completions(),
+        Cli::Help => usage(),
     }
     let _ = filename_of_command;
 }
