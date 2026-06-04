@@ -1376,6 +1376,117 @@ fn complete_custom_trigger_char_surfaces_flags() {
 }
 
 #[test]
+fn complete_rescrapes_stale_user_cache_past_ttl() {
+    // a user-cache entry older than INSHELLAH_CACHE_TTL_SECS is re-resolved on
+    // the next touch; a fresh-or-disabled ttl serves the stale set unchanged.
+    let root = unique_temp_dir("inshellah-stale-rescrape");
+    let bin_dir = root.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let fakecmd = bin_dir.join("fakerefresh");
+    fs::write(
+        &fakecmd,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  cat <<'EOF'
+Usage: fakerefresh [OPTIONS] COMMAND
+
+Commands:
+  fresh    A freshly scraped command
+
+Options:
+  -h, --help           show help
+EOF
+  exit 0
+fi
+exit 2
+"#,
+    )
+    .expect("write fakerefresh");
+    let mut perms = fs::metadata(&fakecmd).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fakecmd, perms).expect("chmod");
+
+    // seed a cache whose subcommand differs from what --help now emits.
+    let stale = ManpageResult {
+        entries: Vec::new(),
+        subcommands: vec![ManpageSubcommand::new(
+            "staleonly".to_string(),
+            "Only in the stale cache".to_string(),
+        )],
+        positional_choices: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "fakerefresh", "help", &stale).expect("stale cache");
+    let cache_file = cache_dir.join(format!("{}.json", filename_of_command("fakerefresh")));
+
+    // backdate the entry well past a 1s ttl (deterministic, no sleep).
+    let old = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+    filetime::set_file_mtime(&cache_file, old).expect("backdate cache mtime");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let path_env = format!("{}:{}", bin_dir.display(), old_path.to_string_lossy());
+    let run = |ttl: &str| {
+        Command::new(env!("CARGO_BIN_EXE_inshellah"))
+            .args(["complete", "--dir"])
+            .arg(&cache_dir)
+            .args(["--timeout-ms", "1000", "fakerefresh", ""])
+            .env("INSHELLAH_CACHE_TTL_SECS", ttl)
+            .env("PATH", &path_env)
+            .output()
+            .expect("run inshellah complete")
+    };
+
+    // order matters: the ttl=1 run below rewrites the cache, so the stale-served
+    // case must be asserted first.
+    // ttl disabled: the stale set is served, the cache untouched.
+    let disabled = run("0");
+    assert!(
+        disabled.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&disabled.stderr)
+    );
+    let disabled_stdout = String::from_utf8(disabled.stdout).expect("stdout");
+    assert!(
+        disabled_stdout.contains(r#""value":"staleonly""#),
+        "disabled ttl should serve stale set; stdout = {disabled_stdout}"
+    );
+    assert!(
+        fs::read_to_string(&cache_file)
+            .expect("cache json")
+            .contains("staleonly"),
+        "disabled ttl must not rewrite the cache"
+    );
+
+    // ttl exceeded: the entry is re-resolved from --help and the cache rewritten.
+    let refreshed = run("1");
+    assert!(
+        refreshed.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    let refreshed_stdout = String::from_utf8(refreshed.stdout).expect("stdout");
+    assert!(
+        refreshed_stdout.contains(r#""value":"fresh""#),
+        "stale entry should be rescraped; stdout = {refreshed_stdout}"
+    );
+    assert!(
+        !refreshed_stdout.contains(r#""value":"staleonly""#),
+        "stale subcommand should be gone after rescrape; stdout = {refreshed_stdout}"
+    );
+    let rewritten = fs::read_to_string(&cache_file).expect("cache json");
+    assert!(
+        rewritten.contains("fresh") && !rewritten.contains("staleonly"),
+        "cache should be rewritten with the fresh set; cache = {rewritten}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn complete_max_completions_caps_results() {
     let cache_dir = flag_demo_cache(
         "inshellah-max-completions",

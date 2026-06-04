@@ -11,6 +11,9 @@ pub const DEFAULT_DYNAMIC_LIMIT: usize = 200;
 
 pub const DEFAULT_FLAG_TRIGGERS: &str = "-";
 
+/// rescrape user-cached sets older than this; 0 disables.
+pub const DEFAULT_CACHE_TTL_SECS: u64 = 604_800;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// chars that, as a token's first byte, surface flags.
@@ -24,6 +27,8 @@ pub struct Config {
     /// budget across dynamic provider subprocesses, distinct from timeout_ms.
     pub dynamic_timeout_ms: u64,
     pub dynamic_limit: usize,
+    /// rescrape user-cached sets older than this many seconds, 0 disables.
+    pub cache_ttl_secs: u64,
 }
 
 impl Default for Config {
@@ -35,6 +40,7 @@ impl Default for Config {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             dynamic_timeout_ms: DEFAULT_DYNAMIC_TIMEOUT_MS,
             dynamic_limit: DEFAULT_DYNAMIC_LIMIT,
+            cache_ttl_secs: DEFAULT_CACHE_TTL_SECS,
         }
     }
 }
@@ -64,6 +70,11 @@ impl Config {
             && let Ok(n) = raw.trim().parse::<u64>()
         {
             cfg.timeout_ms = n;
+        }
+        if let Some(raw) = get("INSHELLAH_CACHE_TTL_SECS")
+            && let Ok(n) = raw.trim().parse::<u64>()
+        {
+            cfg.cache_ttl_secs = n;
         }
         // i64 so "-1" rejects instead of wrapping, negatives and garbage fall back.
         if let Some(raw) = get("INSHELLAH_DYNAMIC_TIMEOUT_MS")
@@ -142,6 +153,7 @@ mod tests {
         assert!(!cfg.flag_on_empty);
         assert_eq!(cfg.max_completions, 0);
         assert_eq!(cfg.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(cfg.cache_ttl_secs, DEFAULT_CACHE_TTL_SECS);
 
         assert!(cfg.triggers_flags("-"));
         assert!(cfg.triggers_flags("--verbose"));
@@ -227,15 +239,26 @@ mod tests {
         let cfg = cfg_from(&[
             ("INSHELLAH_MAX_COMPLETIONS", "50"),
             ("INSHELLAH_TIMEOUT_MS", "1000"),
+            ("INSHELLAH_CACHE_TTL_SECS", "3600"),
         ]);
         assert_eq!(cfg.max_completions, 50);
         assert_eq!(cfg.timeout_ms, 1000);
+        assert_eq!(cfg.cache_ttl_secs, 3600);
+
+        let zeroed = cfg_from(&[("INSHELLAH_CACHE_TTL_SECS", "0")]);
+        assert_eq!(zeroed.cache_ttl_secs, 0);
 
         let bad = cfg_from(&[
             ("INSHELLAH_MAX_COMPLETIONS", "lots"),
             ("INSHELLAH_TIMEOUT_MS", "soon"),
+            ("INSHELLAH_CACHE_TTL_SECS", "never"),
         ]);
         assert_eq!(bad.max_completions, 0);
         assert_eq!(bad.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(bad.cache_ttl_secs, DEFAULT_CACHE_TTL_SECS);
+
+        // u64 parse rejects negatives, no explicit guard needed.
+        let negative = cfg_from(&[("INSHELLAH_CACHE_TTL_SECS", "-1")]);
+        assert_eq!(negative.cache_ttl_secs, DEFAULT_CACHE_TTL_SECS);
     }
 }
