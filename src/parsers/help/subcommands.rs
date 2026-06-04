@@ -55,7 +55,7 @@ make_parser!(
     skip_subcommand_aliases -> (),
     value(
         (),
-        many0(preceded(tag(", "), take_while1(is_option_char))),
+        many0(preceded(alt((tag(", "), tag(" | "))), take_while1(is_option_char))),
     )
 );
 
@@ -70,7 +70,9 @@ make_parser!(pub subcommand_entry -> ManpageSubcommand,
         ),
         skip_subcommand_aliases,
         skip_arg_placeholders,
-        tag("  "),
+        // column gap is 2+ spaces or a tab; long names (get-permissions) abut a
+        // bare tab with no padding spaces.
+        alt((tag("  "), tag("\t"))),
         space0,
         terminated(take_till(|c: char| c.is_newline()), eol),
     ) => |(name, _, _, _, _, desc): (&'a str, _, _, _, _, &'a str)| {
@@ -106,6 +108,22 @@ mod tests {
         assert_eq!(desc, "Compile the current package");
         let (name, _) = parse("    check, c    Analyze the package\n");
         assert_eq!(name, "check");
+    }
+
+    #[test]
+    fn pipe_alias_keeps_canonical_name() {
+        // pw-cli's `help | h`: pipe-separated alias discarded, canonical survives.
+        let (name, desc) = parse("    help | h    Show this help\n");
+        assert_eq!(name, "help");
+        assert_eq!(desc, "Show this help");
+    }
+
+    #[test]
+    fn tab_column_gap_separates_desc() {
+        // long names abut a bare tab with no padding spaces (pw-cli get-permissions).
+        let (name, desc) = parse("    get-permissions | gp\tGet permissions of a client\n");
+        assert_eq!(name, "get-permissions");
+        assert_eq!(desc, "Get permissions of a client");
     }
 
     #[test]
