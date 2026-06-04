@@ -168,6 +168,16 @@ in
       '';
     };
 
+    cacheTtlSecs = lib.mkOption {
+      type = lib.types.int;
+      default = 604800;
+      example = 86400;
+      description = ''
+        rescrape user-cached completion sets older than N seconds; 0 disables
+        time-based rescraping. exported as INSHELLAH_CACHE_TTL_SECS.
+      '';
+    };
+
     completeTimeoutMs = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
       default = null;
@@ -207,6 +217,7 @@ in
     environment.variables.INSHELLAH_FLAG_TRIGGERS = cfg.flagTriggers;
     environment.variables.INSHELLAH_FLAG_ON_EMPTY = if cfg.flagOnEmpty then "1" else "0";
     environment.variables.INSHELLAH_MAX_COMPLETIONS = toString cfg.maxCompletions;
+    environment.variables.INSHELLAH_CACHE_TTL_SECS = toString cfg.cacheTtlSecs;
     environment.variables.INSHELLAH_TIMEOUT_MS = lib.mkIf (cfg.completeTimeoutMs != null) (
       toString cfg.completeTimeoutMs
     );

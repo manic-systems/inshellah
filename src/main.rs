@@ -22,7 +22,7 @@ use inshellah::parsers::nushell::{generate_extern, is_nushell_builtin};
 use inshellah::pool::{ScrapePool, Submitter};
 use inshellah::resolver::{self, NodeClass, Outcome, Probe, resolve_node};
 use inshellah::store::{
-    all_commands, default_store_path, ensure_dir, file_type_of, filename_of_command, lookup,
+    self, all_commands, default_store_path, ensure_dir, file_type_of, filename_of_command, lookup,
     lookup_raw, parse_nu_completions, purge_dir, subcommands_of, write_native, write_result,
 };
 use inshellah::subprocess::run_cmd;
@@ -72,6 +72,7 @@ Configuration (environment, read by `complete`):
   INSHELLAH_FLAG_ON_EMPTY   1 to also surface flags on an empty token
   INSHELLAH_MAX_COMPLETIONS cap on candidates returned (0 = no cap)
   INSHELLAH_TIMEOUT_MS      default --help resolve timeout (--timeout-ms wins)
+  INSHELLAH_CACHE_TTL_SECS  rescrape user-cached sets older than N seconds (default 604800; 0 = never)
 "
     );
 }
@@ -1731,6 +1732,19 @@ fn canonical_for_alias(result: &ManpageResult, token: &str) -> Option<String> {
     })
 }
 
+// a user-cache set is stale when its newest file is older than the ttl. ttl 0
+// disables; system-dir hits aren't in the user cache so they never go stale.
+fn cache_is_stale(
+    user_dir: &Path,
+    found: Option<&(String, ManpageResult, usize)>,
+    ttl_secs: u64,
+) -> bool {
+    ttl_secs > 0
+        && found.is_some_and(|(name, _, _)| {
+            store::user_cache_age(user_dir, name).is_some_and(|age| age.as_secs() > ttl_secs)
+        })
+}
+
 fn cmd_complete(
     spans: &[String],
     user_dir: &Path,
@@ -1834,10 +1848,13 @@ fn cmd_complete(
         .cloned()
         .collect();
     let resolve_depth = resolve_tokens.len();
-    let need_resolve = match &found {
-        Some((_, _, depth)) => *depth < resolve_depth,
-        None => resolve_depth > 0,
-    };
+    // a stale hit re-resolves through the same path: the resolve block overwrites
+    // the cache and falls back to the stale value if rescrape fails.
+    let need_resolve = cache_is_stale(user_dir, found.as_ref(), cfg.cache_ttl_secs)
+        || match &found {
+            Some((_, _, depth)) => *depth < resolve_depth,
+            None => resolve_depth > 0,
+        };
     if need_resolve
         && let Some(path) = explicit_cmd_path
             .as_ref()

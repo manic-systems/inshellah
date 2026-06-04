@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
@@ -64,6 +65,20 @@ fn filename_candidates(cmd: &str) -> Vec<String> {
     } else {
         vec![encoded, legacy]
     }
+}
+
+/// age since the newest user-cache file for `command` was written, i.e. when
+/// this set was last resolved. checks `user_dir` only; system/index dirs are
+/// never auto-refreshed. None when no user-cache file exists.
+pub fn user_cache_age(user_dir: &Path, command: &str) -> Option<Duration> {
+    let now = SystemTime::now();
+    let newest = filename_candidates(command)
+        .into_iter()
+        .flat_map(|base| ["nu", "json"].map(|ext| user_dir.join(format!("{base}.{ext}"))))
+        .filter_map(|path| fs::metadata(&path).and_then(|m| m.modified()).ok())
+        .max()?;
+    // future-dated mtime (clock skew) saturates to age 0.
+    Some(now.duration_since(newest).unwrap_or_default())
 }
 
 fn decode_hex(b: u8) -> Option<u8> {
@@ -793,7 +808,7 @@ pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::UNIX_EPOCH;
 
     fn unique_dir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -952,6 +967,40 @@ mod tests {
             file_type_of(std::slice::from_ref(&dir), "demo child").as_deref(),
             Some("manpage")
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_cache_age_reports_recent_write_and_none_when_absent() {
+        let dir = unique_dir("cache-age");
+        fs::create_dir_all(&dir).unwrap();
+        let result = ManpageResult {
+            entries: Vec::new(),
+            subcommands: Vec::new(),
+            positional_choices: Vec::new(),
+            positionals: Vec::new(),
+            description: String::new(),
+        };
+        write_result(&dir, "command", "manpage", &result).unwrap();
+        let age = user_cache_age(&dir, "command").expect("cache file should exist");
+        assert!(age.as_secs() < 60, "age too large: {age:?}");
+        assert!(user_cache_age(&dir, "nonexistent-command").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_cache_age_tracks_the_newest_candidate() {
+        let dir = unique_dir("cache-age-newest");
+        fs::create_dir_all(&dir).unwrap();
+        // an ancient json beside a fresh nu: the age must follow the newer file.
+        write_result(&dir, "multi", "manpage", &ManpageResult::default()).unwrap();
+        let json = dir.join(format!("{}.json", filename_of_command("multi")));
+        let ancient = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+        filetime::set_file_mtime(&json, ancient).unwrap();
+        write_native(&dir, "multi", "export extern \"multi\" [\n  --flag\n]\n").unwrap();
+
+        let age = user_cache_age(&dir, "multi").expect("cache file should exist");
+        assert!(age.as_secs() < 60, "expected newest-file age, got {age:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 
