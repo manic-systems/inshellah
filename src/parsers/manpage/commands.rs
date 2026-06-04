@@ -99,10 +99,10 @@ pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubc
                 if let Some(name) = extract_command_name_from_line(&lines[i]) {
                     let (desc, new_i) = collect_subcmd_desc(lines, i + 1);
                     let short_desc = first_sentence(&desc);
-                    out.push(ManpageSubcommand {
-                        name: name.to_ascii_lowercase(),
-                        desc: short_desc,
-                    });
+                    out.push(ManpageSubcommand::new(
+                        name.to_ascii_lowercase(),
+                        short_desc,
+                    ));
                     i = new_i;
                 } else {
                     i += 1;
@@ -183,10 +183,7 @@ pub fn extract_subcommand_xrefs(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
     raw.into_iter()
         .filter_map(|(token, desc)| {
             let child = token.strip_prefix(&prefix).unwrap_or(&token);
-            is_valid_subcmd(child).then(|| ManpageSubcommand {
-                name: child.to_ascii_lowercase(),
-                desc,
-            })
+            is_valid_subcmd(child).then(|| ManpageSubcommand::new(child.to_ascii_lowercase(), desc))
         })
         .collect()
 }

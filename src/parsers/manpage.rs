@@ -40,6 +40,19 @@ pub struct ManpageEntry {
 pub struct ManpageSubcommand {
     pub name: String,
     pub desc: String,
+    /// alternate invocations (cargo `b` for build, pw-cli `lm` for load-module);
+    /// rendered as `(aka ...)` and accepted during descent, like switch shorts.
+    pub aliases: Vec<String>,
+}
+
+impl ManpageSubcommand {
+    pub fn new(name: String, desc: String) -> Self {
+        Self {
+            name,
+            desc,
+            aliases: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -381,10 +394,7 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
             .map(|(name, desc, _)| {
                 let mut desc = desc.clone();
                 clamp_description(&mut desc);
-                ManpageSubcommand {
-                    name: name.to_ascii_lowercase(),
-                    desc,
-                }
+                ManpageSubcommand::new(name.to_ascii_lowercase(), desc)
             })
             .collect();
     }

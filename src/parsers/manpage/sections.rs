@@ -625,7 +625,7 @@ pub fn extract_description_positionals(lines: &[GroffLine]) -> Vec<ManpageSubcom
                 }
                 let (desc, new_i) = collect_description_choice_desc(&description, i + 2);
                 if seen.insert(name.clone()) {
-                    out.push(ManpageSubcommand { name, desc });
+                    out.push(ManpageSubcommand::new(name, desc));
                 }
                 i = new_i;
             }

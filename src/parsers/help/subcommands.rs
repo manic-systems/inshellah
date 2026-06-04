@@ -48,15 +48,11 @@ make_parser!(
     )
 );
 
-// comma-separated aliases before the desc gap, e.g. cargo's `build, b`.
-// discard to keep the canonical first name, else the comma fails the
-// two-space check and the whole line is dropped.
+// aliases before the desc gap, comma- (cargo `build, b`) or pipe-separated
+// (pw-cli `help | h`). captured as alternates; the canonical first name leads.
 make_parser!(
-    skip_subcommand_aliases -> (),
-    value(
-        (),
-        many0(preceded(alt((tag(", "), tag(" | "))), take_while1(is_option_char))),
-    )
+    collect_subcommand_aliases -> Vec<&'a str>,
+    many0(preceded(alt((tag(", "), tag(" | "))), take_while1(is_option_char)))
 );
 
 make_parser!(pub subcommand_entry -> ManpageSubcommand,
@@ -68,18 +64,22 @@ make_parser!(pub subcommand_entry -> ManpageSubcommand,
                 |n: &str| n.len() >= 2,
             ),
         ),
-        skip_subcommand_aliases,
+        collect_subcommand_aliases,
         skip_arg_placeholders,
         // column gap is 2+ spaces or a tab; long names (get-permissions) abut a
         // bare tab with no padding spaces.
         alt((tag("  "), tag("\t"))),
         space0,
         terminated(take_till(|c: char| c.is_newline()), eol),
-    ) => |(name, _, _, _, _, desc): (&'a str, _, _, _, _, &'a str)| {
+    ) => |(name, aliases, _, _, _, desc): (&'a str, Vec<&'a str>, _, _, _, &'a str)| {
         let d = desc.trim_start();
         let desc = d.strip_prefix("- ").map(|s| s.trim_start()).unwrap_or(d);
-        // name kept as-parsed, build_help_result lowercases at assembly.
-        ManpageSubcommand { name: name.to_string(), desc: desc.to_string() }
+        // name/aliases kept as-parsed, build_help_result lowercases at assembly.
+        ManpageSubcommand {
+            name: name.to_string(),
+            desc: desc.to_string(),
+            aliases: aliases.into_iter().map(str::to_string).collect(),
+        }
     }
 );
 
@@ -124,6 +124,14 @@ mod tests {
         let (name, desc) = parse("    get-permissions | gp\tGet permissions of a client\n");
         assert_eq!(name, "get-permissions");
         assert_eq!(desc, "Get permissions of a client");
+    }
+
+    #[test]
+    fn aliases_are_captured_pipe_and_comma() {
+        let (_, sc) = subcommand_entry("    help | h    Show this help\n").expect("pipe");
+        assert_eq!(sc.aliases, vec!["h"]);
+        let (_, sc) = subcommand_entry("    build, b    Compile\n").expect("comma");
+        assert_eq!(sc.aliases, vec!["b"]);
     }
 
     #[test]

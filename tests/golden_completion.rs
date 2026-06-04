@@ -53,10 +53,7 @@ fn entry(switch: OwnedSwitch, param: Option<&str>, desc: &str) -> ManpageEntry {
 }
 
 fn sub(name: &str, desc: &str) -> ManpageSubcommand {
-    ManpageSubcommand {
-        name: name.to_string(),
-        desc: desc.to_string(),
-    }
+    ManpageSubcommand::new(name.to_string(), desc.to_string())
 }
 
 /// Build the hermetic fixture: a user cache, a system cache, and a fake `tool`

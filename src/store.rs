@@ -168,10 +168,25 @@ fn json_entry(e: &ManpageEntry) -> String {
 }
 
 fn json_subcommand(sc: &ManpageSubcommand) -> String {
+    // omit aliases when absent so non-aliased caches stay byte-identical.
+    if sc.aliases.is_empty() {
+        return format!(
+            r#"{{"name":{},"desc":{}}}"#,
+            json_string(&sc.name),
+            json_string(&sc.desc)
+        );
+    }
+    let aliases = sc
+        .aliases
+        .iter()
+        .map(|a| json_string(a))
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        r#"{{"name":{},"desc":{}}}"#,
+        r#"{{"name":{},"desc":{},"aliases":[{}]}}"#,
         json_string(&sc.name),
-        json_string(&sc.desc)
+        json_string(&sc.desc),
+        aliases
     )
 }
 
@@ -333,7 +348,21 @@ fn subcommand_from_json(v: &Value) -> Option<ManpageSubcommand> {
         .and_then(|d| d.as_str())
         .unwrap_or("")
         .to_string();
-    Some(ManpageSubcommand { name, desc })
+    // absent in pre-alias caches; defaults to none.
+    let aliases = v
+        .get("aliases")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ManpageSubcommand {
+        name,
+        desc,
+        aliases,
+    })
 }
 
 fn positional_from_json(v: &Value) -> Option<(String, Positional)> {
@@ -428,10 +457,10 @@ pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
             && !suffix.contains(' ')
             && !suffix.is_empty()
         {
-            subcommands.push(ManpageSubcommand {
-                name: suffix.to_string(),
-                desc: b.description.clone(),
-            });
+            subcommands.push(ManpageSubcommand::new(
+                suffix.to_string(),
+                b.description.clone(),
+            ));
         }
     }
 
@@ -720,10 +749,7 @@ pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand>
             };
             seen.insert(
                 rest.to_string(),
-                ManpageSubcommand {
-                    name: rest.to_string(),
-                    desc,
-                },
+                ManpageSubcommand::new(rest.to_string(), desc),
             );
         }
     }

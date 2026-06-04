@@ -42,10 +42,7 @@ fn subs(pairs: &[(&str, &str)]) -> ManpageResult {
         entries: Vec::new(),
         subcommands: pairs
             .iter()
-            .map(|(name, desc)| ManpageSubcommand {
-                name: name.to_string(),
-                desc: desc.to_string(),
-            })
+            .map(|(name, desc)| ManpageSubcommand::new(name.to_string(), desc.to_string()))
             .collect(),
         positional_choices: Vec::new(),
         positionals: Vec::new(),

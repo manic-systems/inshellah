@@ -161,12 +161,38 @@ pub fn generate_candidates(
         // subcommands and positional-arg choices (getent db names) share one slot.
         let choices = subs.iter().chain(result.positional_choices.iter());
         for sc in choices {
-            if !last_token.is_empty() && last_token == sc.name {
+            // exact match on the name or any alias hands off to a dynamic
+            // completer, mirroring the switch path.
+            if !last_token.is_empty()
+                && (last_token == sc.name || sc.aliases.iter().any(|a| a == last_token))
+            {
                 continue;
             }
-            let s = fuzzy_score(last_token, &sc.name);
-            if s > 0 {
-                scored.push((s, Candidate::new(sc.name.clone(), sc.desc.clone())));
+            // emit the best-scoring form (name or alias) as the value; the rest
+            // become `(aka ...)`, like a switch's short/long pair.
+            let mut best: Option<(i32, &str)> = None;
+            let mut others: Vec<&str> = Vec::new();
+            for form in std::iter::once(sc.name.as_str()).chain(sc.aliases.iter().map(String::as_str))
+            {
+                let fs = fuzzy_score(last_token, form);
+                match best {
+                    Some((bs, bf)) if fs > bs => {
+                        others.push(bf);
+                        best = Some((fs, form));
+                    }
+                    Some(_) => others.push(form),
+                    None => best = Some((fs, form)),
+                }
+            }
+            if let Some((score, value)) = best
+                && score > 0
+            {
+                let desc = if others.is_empty() {
+                    sc.desc.clone()
+                } else {
+                    format!("(aka {}) {}", others.join(", "), sc.desc)
+                };
+                scored.push((score, Candidate::new(value.to_string(), desc)));
             }
         }
     }
@@ -258,10 +284,7 @@ mod tests {
             entries: Vec::new(),
             subcommands: names
                 .iter()
-                .map(|n| ManpageSubcommand {
-                    name: n.to_string(),
-                    desc: String::new(),
-                })
+                .map(|n| ManpageSubcommand::new(n.to_string(), String::new()))
                 .collect(),
             positional_choices: Vec::new(),
             positionals: Vec::new(),

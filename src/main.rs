@@ -1434,11 +1434,17 @@ fn supplement_result_from_help(result: &mut ManpageResult, help: &ManpageResult)
             .iter_mut()
             .find(|sc| sc.name.eq_ignore_ascii_case(&help_sub.name))
         {
-            Some(existing) if existing.desc.is_empty() && !help_sub.desc.is_empty() => {
-                existing.desc = help_sub.desc.clone();
-                changed = true;
+            Some(existing) => {
+                if existing.desc.is_empty() && !help_sub.desc.is_empty() {
+                    existing.desc = help_sub.desc.clone();
+                    changed = true;
+                }
+                // manpage subs carry no aliases; adopt help's (`help | h`).
+                if existing.aliases.is_empty() && !help_sub.aliases.is_empty() {
+                    existing.aliases = help_sub.aliases.clone();
+                    changed = true;
+                }
             }
-            Some(_) => {}
             None => {
                 result.subcommands.push(help_sub.clone());
                 changed = true;
@@ -1695,7 +1701,13 @@ fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> Vec<
             continue;
         }
 
-        tokens.push(token.clone());
+        // map an alias to its canonical child name (cargo `b` -> build) so the
+        // path resolves to the real node and descends into its flags/subs.
+        let resolved = current
+            .as_ref()
+            .and_then(|r| canonical_for_alias(r, token))
+            .unwrap_or_else(|| token.clone());
+        tokens.push(resolved);
         let name = tokens
             .iter()
             .filter(|t| !t.is_empty())
@@ -1706,6 +1718,17 @@ fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> Vec<
     }
 
     tokens
+}
+
+/// canonical child name for a token that matches one of `result`'s subcommand
+/// aliases (not its name), else None.
+fn canonical_for_alias(result: &ManpageResult, token: &str) -> Option<String> {
+    result.subcommands.iter().find_map(|sc| {
+        sc.aliases
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(token))
+            .then(|| sc.name.clone())
+    })
 }
 
 fn cmd_complete(

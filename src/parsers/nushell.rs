@@ -387,10 +387,10 @@ mod tests {
     #[test]
     fn subcommand_name_and_desc_newline_stays_single_line() {
         let result = ManpageResult {
-            subcommands: vec![ManpageSubcommand {
-                name: "stash\"]\nrm -rf /".into(),
-                desc: "danger\nous".into(),
-            }],
+            subcommands: vec![ManpageSubcommand::new(
+                "stash\"]\nrm -rf /".into(),
+                "danger\nous".into(),
+            )],
             ..Default::default()
         };
         let out = generate_extern("git", &result);

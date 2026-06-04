@@ -174,6 +174,11 @@ fn build_help_result(original: &str) -> ManpageResult {
         .map(|sc| ManpageSubcommand {
             name: sc.name.to_ascii_lowercase(),
             desc: sc.desc,
+            aliases: sc
+                .aliases
+                .iter()
+                .map(|a| a.to_ascii_lowercase())
+                .collect(),
         })
         .collect();
     // cli11 positional section carries types and optionality, prefer it over

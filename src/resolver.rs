@@ -164,10 +164,7 @@ mod tests {
     use std::cell::Cell;
 
     fn sub(name: &str) -> ManpageSubcommand {
-        ManpageSubcommand {
-            name: name.to_string(),
-            desc: String::new(),
-        }
+        ManpageSubcommand::new(name.to_string(), String::new())
     }
 
     fn with_subs(names: &[&str]) -> ManpageResult {

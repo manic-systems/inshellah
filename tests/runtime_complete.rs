@@ -64,10 +64,7 @@ exit 2
 
     let parent = ManpageResult {
         entries: Vec::new(),
-        subcommands: vec![ManpageSubcommand {
-            name: "clone".to_string(),
-            desc: "Clone a repository".to_string(),
-        }],
+        subcommands: vec![ManpageSubcommand::new("clone".to_string(), "Clone a repository".to_string())],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
@@ -104,6 +101,87 @@ exit 2
             .is_file(),
         "subcommand cache was not written"
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_descends_through_subcommand_alias() {
+    // a typed alias (`cl` for clone) must resolve to the canonical child so its
+    // --help is scraped and its flags complete, like typing the full name.
+    let root = unique_temp_dir("inshellah-alias-descent");
+    let bin_dir = root.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let fakecmd = bin_dir.join("fakealias");
+    fs::write(
+        &fakecmd,
+        r#"#!/bin/sh
+if [ "$1" = "clone" ]; then
+  if [ "$2" = "--help" ] || [ "$2" = "-h" ]; then
+    cat <<'EOF'
+Usage: fakealias clone [OPTIONS] <repository>
+
+Options:
+  --depth <n>          clone depth
+EOF
+    exit 0
+  fi
+fi
+exit 2
+"#,
+    )
+    .expect("write fakealias");
+    let mut perms = fs::metadata(&fakecmd).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fakecmd, perms).expect("chmod");
+
+    let parent = ManpageResult {
+        entries: Vec::new(),
+        subcommands: vec![ManpageSubcommand {
+            name: "clone".to_string(),
+            desc: "Clone a repository".to_string(),
+            aliases: vec!["cl".to_string()],
+        }],
+        positional_choices: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "fakealias", "help", &parent).expect("parent cache");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let run = |sub: &str| {
+        Command::new(env!("CARGO_BIN_EXE_inshellah"))
+            .args(["complete", "--dir"])
+            .arg(&cache_dir)
+            .args(["--timeout-ms", "1000", "fakealias", sub, "--"])
+            .env(
+                "PATH",
+                format!("{}:{}", bin_dir.display(), old_path.to_string_lossy()),
+            )
+            .output()
+            .expect("run inshellah complete")
+    };
+
+    // the alias descends to clone's scraped flags.
+    let via_alias = String::from_utf8(run("cl").stdout).expect("stdout");
+    assert!(via_alias.contains("--depth"), "alias path: {via_alias}");
+
+    // and `complete fakealias ''` advertises the alias in the tooltip.
+    let listing = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["--timeout-ms", "1000", "fakealias", ""])
+        .env(
+            "PATH",
+            format!("{}:{}", bin_dir.display(), old_path.to_string_lossy()),
+        )
+        .output()
+        .expect("run listing");
+    let listing = String::from_utf8(listing.stdout).expect("stdout");
+    assert!(listing.contains("(aka cl)"), "listing: {listing}");
 
     let _ = fs::remove_dir_all(root);
 }
@@ -176,10 +254,7 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
             param: Some(OwnedParam::Mandatory("FILE".to_string())),
             desc: "config file".to_string(),
         }],
-        subcommands: vec![ManpageSubcommand {
-            name: "sub".to_string(),
-            desc: "subcommand".to_string(),
-        }],
+        subcommands: vec![ManpageSubcommand::new("sub".to_string(), "subcommand".to_string())],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
@@ -339,14 +414,8 @@ fn complete_uses_boundary_aware_fuzzy_ranking() {
     let result = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![
-            ManpageSubcommand {
-                name: "load".to_string(),
-                desc: "load something".to_string(),
-            },
-            ManpageSubcommand {
-                name: "clone".to_string(),
-                desc: "clone something".to_string(),
-            },
+            ManpageSubcommand::new("load".to_string(), "load something".to_string()),
+            ManpageSubcommand::new("clone".to_string(), "clone something".to_string()),
         ],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -452,18 +521,9 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
     let parent = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![
-            ManpageSubcommand {
-                name: "status".to_string(),
-                desc: "show status".to_string(),
-            },
-            ManpageSubcommand {
-                name: "poweroff".to_string(),
-                desc: "power off".to_string(),
-            },
-            ManpageSubcommand {
-                name: "preset".to_string(),
-                desc: "set preset".to_string(),
-            },
+            ManpageSubcommand::new("status".to_string(), "show status".to_string()),
+            ManpageSubcommand::new("poweroff".to_string(), "power off".to_string()),
+            ManpageSubcommand::new("preset".to_string(), "set preset".to_string()),
         ],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -527,14 +587,8 @@ fn complete_drops_exact_subcommand_match() {
     let result = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![
-            ManpageSubcommand {
-                name: "status".to_string(),
-                desc: "show status".to_string(),
-            },
-            ManpageSubcommand {
-                name: "start".to_string(),
-                desc: "start unit".to_string(),
-            },
+            ManpageSubcommand::new("status".to_string(), "show status".to_string()),
+            ManpageSubcommand::new("start".to_string(), "start unit".to_string()),
         ],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
