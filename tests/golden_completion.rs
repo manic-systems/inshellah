@@ -44,6 +44,14 @@ fn switch_both(c: char, long: &str) -> OwnedSwitch {
     OwnedSwitch::Both(c, long.to_string())
 }
 
+fn write_stub_executable(bin: &Path, name: &str) {
+    let path = bin.join(name);
+    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub executable");
+    let mut perms = fs::metadata(&path).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).expect("chmod");
+}
+
 fn entry(switch: OwnedSwitch, param: Option<&str>, desc: &str) -> ManpageEntry {
     ManpageEntry {
         switch,
@@ -132,6 +140,7 @@ exit 2
     let mut perms = fs::metadata(&tool_bin).expect("metadata").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&tool_bin, perms).expect("chmod");
+    write_stub_executable(&bin, "othertool");
 
     (user, system, bin)
 }

@@ -1,5 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,12 +9,26 @@ use inshellah::parsers::manpage::{
 };
 use inshellah::store::{filename_of_command, write_native, write_result};
 
-fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
     std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+}
+
+fn write_stub_executable(bin_dir: &Path, name: &str) {
+    fs::create_dir_all(bin_dir).expect("bin dir");
+    let path = bin_dir.join(name);
+    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub executable");
+    let mut perms = fs::metadata(&path).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).expect("chmod");
+}
+
+fn path_with_bin(bin_dir: &Path) -> String {
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    format!("{}:{}", bin_dir.display(), old_path.to_string_lossy())
 }
 
 #[test]
@@ -64,7 +79,10 @@ exit 2
 
     let parent = ManpageResult {
         entries: Vec::new(),
-        subcommands: vec![ManpageSubcommand::new("clone".to_string(), "Clone a repository".to_string())],
+        subcommands: vec![ManpageSubcommand::new(
+            "clone".to_string(),
+            "Clone a repository".to_string(),
+        )],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
@@ -245,7 +263,9 @@ exit 2
 #[test]
 fn complete_lookup_skips_global_flag_values_before_subcommands() {
     let root = unique_temp_dir("inshellah-global-flag-value");
+    let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
+    write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let parent = ManpageResult {
@@ -254,7 +274,10 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
             param: Some(OwnedParam::Mandatory("FILE".to_string())),
             desc: "config file".to_string(),
         }],
-        subcommands: vec![ManpageSubcommand::new("sub".to_string(), "subcommand".to_string())],
+        subcommands: vec![ManpageSubcommand::new(
+            "sub".to_string(),
+            "subcommand".to_string(),
+        )],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
         description: String::new(),
@@ -282,6 +305,7 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
         .arg("cfg")
         .arg("sub")
         .arg("--")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
 
@@ -406,9 +430,48 @@ fn complete_does_not_scan_path_at_command_position() {
 }
 
 #[test]
+fn complete_ignores_cached_command_missing_from_path() {
+    let root = unique_temp_dir("inshellah-missing-path-command");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    let result = ManpageResult {
+        entries: Vec::new(),
+        subcommands: vec![ManpageSubcommand::new(
+            "start".to_string(),
+            "start it".to_string(),
+        )],
+        positional_choices: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "vanished", "help", &result).expect("cache");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .args(["vanished", "st"])
+        .env("PATH", "")
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert_eq!(stdout.trim(), "null", "stdout = {stdout}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn complete_uses_boundary_aware_fuzzy_ranking() {
     let root = unique_temp_dir("inshellah-fuzzy-complete");
+    let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
+    write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let result = ManpageResult {
@@ -429,6 +492,7 @@ fn complete_uses_boundary_aware_fuzzy_ranking() {
         .arg(&cache_dir)
         .arg("demo")
         .arg("lo")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
 
@@ -451,7 +515,9 @@ fn complete_uses_boundary_aware_fuzzy_ranking() {
 #[test]
 fn complete_returns_flags_only_after_hyphen() {
     let root = unique_temp_dir("inshellah-flag-prefix-complete");
+    let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
+    write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let result = ManpageResult {
@@ -473,6 +539,7 @@ fn complete_returns_flags_only_after_hyphen() {
         .arg(&cache_dir)
         .arg("demo")
         .arg("")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     assert!(
@@ -489,6 +556,7 @@ fn complete_returns_flags_only_after_hyphen() {
         .arg(&cache_dir)
         .arg("demo")
         .arg("--")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     assert!(
@@ -515,7 +583,9 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
     // it must return null so the downstream dynamic completer (unit names)
     // can take over.
     let root = unique_temp_dir("inshellah-shallow-fallback");
+    let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
+    write_stub_executable(&bin_dir, "fakectl");
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let parent = ManpageResult {
@@ -540,7 +610,7 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
         .arg("--user")
         .arg("status")
         .arg("p")
-        .env("PATH", "")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     assert!(
@@ -562,7 +632,7 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
         .arg(&cache_dir)
         .arg("fakectl")
         .arg("p")
-        .env("PATH", "")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     let top_stdout = String::from_utf8(top_partial.stdout).expect("stdout");
@@ -581,7 +651,9 @@ fn complete_drops_exact_subcommand_match() {
     // git remote names, etc.) can take over instead of echoing the
     // already-typed word back.
     let root = unique_temp_dir("inshellah-exact-subcommand-drop");
+    let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
+    write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let result = ManpageResult {
@@ -602,6 +674,7 @@ fn complete_drops_exact_subcommand_match() {
         .arg(&cache_dir)
         .arg("demo")
         .arg("status")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     assert!(
@@ -622,6 +695,7 @@ fn complete_drops_exact_subcommand_match() {
         .arg(&cache_dir)
         .arg("demo")
         .arg("sta")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     let partial_stdout = String::from_utf8(partial.stdout).expect("stdout");
@@ -894,9 +968,11 @@ exit 2
 
 /// write a single-command cache directory exposing the given long flags,
 /// returning the cache dir. callers drive `inshellah complete demo ...`.
-fn flag_demo_cache(name: &str, flags: &[&str]) -> std::path::PathBuf {
+fn flag_demo_cache(name: &str, flags: &[&str]) -> PathBuf {
     let root = unique_temp_dir(name);
+    let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
+    write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&cache_dir).expect("cache dir");
     let result = ManpageResult {
         entries: flags
@@ -914,6 +990,10 @@ fn flag_demo_cache(name: &str, flags: &[&str]) -> std::path::PathBuf {
     };
     write_result(&cache_dir, "demo", "help", &result).expect("cache");
     cache_dir
+}
+
+fn flag_demo_path(cache_dir: &Path) -> String {
+    path_with_bin(&cache_dir.parent().expect("cache parent").join("bin"))
 }
 
 #[test]
@@ -968,8 +1048,10 @@ fn purge_clears_user_cache_but_not_system_dirs() {
 #[test]
 fn complete_dir_overlay_uses_user_before_system() {
     let root = unique_temp_dir("inshellah-dir-overlay");
+    let bin_dir = root.join("bin");
     let user_dir = root.join("user");
     let system_dir = root.join("system");
+    write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&user_dir).expect("user dir");
     fs::create_dir_all(&system_dir).expect("system dir");
 
@@ -1001,6 +1083,7 @@ fn complete_dir_overlay_uses_user_before_system() {
     let dir_arg = format!("{}:{}", user_dir.display(), system_dir.display());
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .args(["complete", "--dir", &dir_arg, "demo", "--"])
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     assert!(
@@ -1021,7 +1104,9 @@ fn complete_dir_overlay_uses_user_before_system() {
 #[test]
 fn complete_empty_native_file_does_not_shadow_json() {
     let root = unique_temp_dir("inshellah-empty-native");
+    let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
+    write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     write_native(
@@ -1051,6 +1136,7 @@ fn complete_empty_native_file_does_not_shadow_json() {
         .arg("--dir")
         .arg(&cache_dir)
         .args(["demo", "--"])
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     assert!(
@@ -1067,7 +1153,9 @@ fn complete_empty_native_file_does_not_shadow_json() {
 #[test]
 fn complete_discovers_underscored_subcommand_from_encoded_cache() {
     let root = unique_temp_dir("inshellah-underscore-subcommand");
+    let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
+    write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let parent = ManpageResult {
@@ -1092,6 +1180,7 @@ fn complete_discovers_underscored_subcommand_from_encoded_cache() {
         .arg("--dir")
         .arg(&cache_dir)
         .args(["demo", ""])
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah complete");
     assert!(
@@ -1316,6 +1405,7 @@ fn complete_flag_on_empty_env_surfaces_flags_after_space() {
         .args(["complete", "--dir"])
         .arg(&cache_dir)
         .args(["demo", ""])
+        .env("PATH", flag_demo_path(&cache_dir))
         .output()
         .expect("run inshellah complete");
     assert_eq!(
@@ -1330,6 +1420,7 @@ fn complete_flag_on_empty_env_surfaces_flags_after_space() {
         .args(["complete", "--dir"])
         .arg(&cache_dir)
         .args(["demo", ""])
+        .env("PATH", flag_demo_path(&cache_dir))
         .output()
         .expect("run inshellah complete");
     let stdout = String::from_utf8_lossy(&opted_in.stdout);
@@ -1350,6 +1441,7 @@ fn complete_custom_trigger_char_surfaces_flags() {
         .args(["complete", "--dir"])
         .arg(&cache_dir)
         .args(["demo", "+v"])
+        .env("PATH", flag_demo_path(&cache_dir))
         .output()
         .expect("run inshellah complete");
     assert_eq!(
@@ -1364,6 +1456,7 @@ fn complete_custom_trigger_char_surfaces_flags() {
         .args(["complete", "--dir"])
         .arg(&cache_dir)
         .args(["demo", "+v"])
+        .env("PATH", flag_demo_path(&cache_dir))
         .output()
         .expect("run inshellah complete");
     let stdout = String::from_utf8_lossy(&opted_in.stdout);
@@ -1498,6 +1591,7 @@ fn complete_max_completions_caps_results() {
         .args(["complete", "--dir"])
         .arg(&cache_dir)
         .args(["demo", "--ver"])
+        .env("PATH", flag_demo_path(&cache_dir))
         .output()
         .expect("run inshellah complete");
     let stdout = String::from_utf8_lossy(&capped.stdout);
@@ -1509,6 +1603,7 @@ fn complete_max_completions_caps_results() {
         .args(["complete", "--dir"])
         .arg(&cache_dir)
         .args(["demo", "--ver"])
+        .env("PATH", flag_demo_path(&cache_dir))
         .output()
         .expect("run inshellah complete");
     let stdout = String::from_utf8_lossy(&uncapped.stdout);

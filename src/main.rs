@@ -1794,7 +1794,7 @@ fn cmd_complete(
         explicit_cmd_path = Some(path);
     }
 
-    if spans.is_empty() {
+    if spans.is_empty() || (explicit_cmd_path.is_none() && find_in_path(&spans[0]).is_none()) {
         println!("null");
         return;
     }

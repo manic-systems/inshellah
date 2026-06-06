@@ -14,6 +14,8 @@
 //! break `cargo test` on machines without nushell; the flake's nushell check
 //! runs it where nu is guaranteed.
 
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,6 +37,15 @@ fn unique_temp_dir(name: &str) -> PathBuf {
         .expect("system time")
         .as_nanos();
     std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+}
+
+fn write_stub_executable(bin_dir: &Path, name: &str) {
+    fs::create_dir_all(bin_dir).expect("bin dir");
+    let path = bin_dir.join(name);
+    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub executable");
+    let mut perms = fs::metadata(&path).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).expect("chmod");
 }
 
 fn subs(pairs: &[(&str, &str)]) -> ManpageResult {
@@ -61,20 +72,17 @@ fn nu_tokenizer_to_real_binary_seam() {
     // completer.nu calls `^inshellah complete ...$spans` with no --dir, so it
     // reads the default store at $XDG_CACHE_HOME/inshellah. Seed that.
     let cache = root.join("inshellah");
-    std::fs::create_dir_all(&cache).expect("cache dir");
+    fs::create_dir_all(&cache).expect("cache dir");
 
-    // Fixture commands. These are NOT real binaries, so no on-the-fly resolve
-    // fires — the completion comes purely from this cache, keeping the test
-    // hermetic. Expectations live in tests/seam-completer.nu and must match.
+    // fixture commands are no-op executables
+    let fixture_bin = root.join("bin");
+    write_stub_executable(&fixture_bin, "demotool");
+    write_stub_executable(&fixture_bin, "othertool");
     write_result(
         &cache,
         "demotool",
         "manpage",
-        &subs(&[
-            ("alpha", "first"),
-            ("beta", "second"),
-            ("gamma", "third"),
-        ]),
+        &subs(&[("alpha", "first"), ("beta", "second"), ("gamma", "third")]),
     )
     .expect("write demotool");
     write_result(
@@ -111,7 +119,12 @@ fn nu_tokenizer_to_real_binary_seam() {
         ))
         .env(
             "PATH",
-            format!("{}:{}", bin_dir.display(), old_path.to_string_lossy()),
+            format!(
+                "{}:{}:{}",
+                fixture_bin.display(),
+                bin_dir.display(),
+                old_path.to_string_lossy()
+            ),
         )
         .env("XDG_CACHE_HOME", &root)
         .env_remove("INSHELLAH_FLAG_TRIGGERS")
@@ -127,5 +140,5 @@ fn nu_tokenizer_to_real_binary_seam() {
         "seam test failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
     );
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&root);
 }
