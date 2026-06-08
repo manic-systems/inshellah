@@ -127,6 +127,60 @@ const JJ_WORKSPACE_VERBS: &[&str] = &["add", "forget", "list", "rename", "root",
 const JJ_SPARSE_VERBS: &[&str] = &["edit", "list", "reset", "set"];
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let last = spans.last().map(String::as_str).unwrap_or("");
+
+    match jj_completion(spans)? {
+        JjCompletion::Static {
+            values,
+            description,
+        } => Some(static_candidates(values, description)),
+        JjCompletion::Revs(revset) => jj_revs(ctx, last, revset),
+        JjCompletion::Templates => jj_templates(ctx),
+        JjCompletion::Remotes => jj_remotes(ctx),
+        JjCompletion::Bookmarks(revset) => jj_bookmarks(ctx, revset),
+        JjCompletion::RemoteBookmarks(tracked) => jj_remote_bookmarks(ctx, tracked),
+        JjCompletion::Ops => jj_ops(ctx),
+        JjCompletion::ConfigKeys {
+            leaves_only,
+            set_only,
+        } => jj_config_keys(ctx, leaves_only, set_only),
+        JjCompletion::Tags => jj_tags(ctx),
+        JjCompletion::Files => jj_files(ctx),
+        JjCompletion::ConflictedFiles => jj_conflicted_files(ctx),
+        JjCompletion::Workspaces => jj_workspaces(ctx),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum JjCompletion {
+    Static {
+        values: &'static [&'static str],
+        description: &'static str,
+    },
+    Revs(&'static str),
+    Templates,
+    Remotes,
+    Bookmarks(&'static str),
+    RemoteBookmarks(Option<bool>),
+    Ops,
+    ConfigKeys {
+        leaves_only: bool,
+        set_only: bool,
+    },
+    Tags,
+    Files,
+    ConflictedFiles,
+    Workspaces,
+}
+
+fn static_candidates(values: &'static [&'static str], description: &'static str) -> Vec<Candidate> {
+    values
+        .iter()
+        .map(|v| Candidate::new(*v, description))
+        .collect()
+}
+
+fn jj_completion(spans: &[String]) -> Option<JjCompletion> {
     let span_len = spans.len();
     let sub = spans.get(1).map(String::as_str).unwrap_or("");
     let prev = if span_len >= 2 {
@@ -134,85 +188,85 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
     } else {
         ""
     };
-    let last = spans.last().map(String::as_str).unwrap_or("");
 
     // rebase's `-b`/`--branch` is a revset; git push's `-b` is a bookmark.
     if prev == "--branch" || (prev == "-b" && sub == "rebase") {
-        return jj_revs(ctx, last, "mutable()");
+        return Some(JjCompletion::Revs("mutable()"));
     }
     if JJ_REV_FLAGS.contains(&prev) {
-        return jj_revs(ctx, last, jj_flag_revset(sub, prev));
+        return Some(JjCompletion::Revs(jj_flag_revset(sub, prev)));
     }
     if prev == "-T" || prev == "--template" {
-        return jj_templates(ctx);
+        return Some(JjCompletion::Templates);
     }
     if prev == "--remote" {
-        return jj_remotes(ctx);
+        return Some(JjCompletion::Remotes);
     }
     if prev == "--bookmark" || prev == "-b" {
-        return jj_bookmarks(ctx, "all()");
+        return Some(JjCompletion::Bookmarks("all()"));
     }
     if prev == "--at-operation" || prev == "--at-op" {
-        return jj_ops(ctx);
+        return Some(JjCompletion::Ops);
     }
     if span_len <= 2 {
-        return Some(
-            JJ_TOP_VERBS
-                .iter()
-                .map(|v| Candidate::new(*v, "jj subcommand"))
-                .collect(),
-        );
+        return Some(JjCompletion::Static {
+            values: JJ_TOP_VERBS,
+            description: "jj subcommand",
+        });
     }
     if sub == "bookmark" || sub == "b" {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                JJ_BOOKMARK_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "bookmark subcommand"))
-                    .collect(),
-            );
+            return Some(JjCompletion::Static {
+                values: JJ_BOOKMARK_VERBS,
+                description: "bookmark subcommand",
+            });
         }
         if ["delete", "forget", "move", "rename", "set", "advance"].contains(&verb) {
-            return jj_bookmarks(ctx, "all()");
+            return Some(JjCompletion::Bookmarks("all()"));
         }
         if verb == "track" {
-            return jj_remote_bookmarks(ctx, Some(false));
+            return Some(JjCompletion::RemoteBookmarks(Some(false)));
         }
         if verb == "untrack" {
-            return jj_remote_bookmarks(ctx, Some(true));
+            return Some(JjCompletion::RemoteBookmarks(Some(true)));
         }
         return None;
     }
     if sub == "config" {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                JJ_CONFIG_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "config subcommand"))
-                    .collect(),
-            );
+            return Some(JjCompletion::Static {
+                values: JJ_CONFIG_VERBS,
+                description: "config subcommand",
+            });
         }
         return match verb {
-            "get" | "g" | "set" | "s" => jj_config_keys(ctx, true, false),
-            "unset" | "u" => jj_config_keys(ctx, true, true),
-            "list" | "l" => jj_config_keys(ctx, false, false),
+            "get" | "g" | "set" | "s" => Some(JjCompletion::ConfigKeys {
+                leaves_only: true,
+                set_only: false,
+            }),
+            "unset" | "u" => Some(JjCompletion::ConfigKeys {
+                leaves_only: true,
+                set_only: true,
+            }),
+            "list" | "l" => Some(JjCompletion::ConfigKeys {
+                leaves_only: false,
+                set_only: false,
+            }),
             _ => None,
         };
     }
     if sub == "tag" {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                ["delete", "list", "set"]
-                    .iter()
-                    .map(|v| Candidate::new(*v, "tag subcommand"))
-                    .collect(),
-            );
+            return Some(JjCompletion::Static {
+                values: &["delete", "list", "set"],
+                description: "tag subcommand",
+            });
         }
         if ["delete", "set"].contains(&verb) {
-            return jj_tags(ctx);
+            return Some(JjCompletion::Tags);
         }
         return None;
     }
@@ -220,101 +274,89 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
         let git_verb = spans.get(2).map(String::as_str).unwrap_or("");
         let remote_verb = spans.get(3).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                JJ_GIT_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "jj git subcommand"))
-                    .collect(),
-            );
+            return Some(JjCompletion::Static {
+                values: JJ_GIT_VERBS,
+                description: "jj git subcommand",
+            });
         }
         if git_verb == "remote" {
             if span_len <= 4 {
-                return Some(
-                    JJ_REMOTE_VERBS
-                        .iter()
-                        .map(|v| Candidate::new(*v, "remote subcommand"))
-                        .collect(),
-                );
+                return Some(JjCompletion::Static {
+                    values: JJ_REMOTE_VERBS,
+                    description: "remote subcommand",
+                });
             }
             if ["remove", "rename", "set-url"].contains(&remote_verb) {
-                return jj_remotes(ctx);
+                return Some(JjCompletion::Remotes);
             }
             return None;
         }
         if matches!(git_verb, "fetch" | "push") {
-            return jj_remotes(ctx);
+            return Some(JjCompletion::Remotes);
         }
         return None;
     }
     if sub == "operation" || sub == "op" {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                JJ_OP_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "operation subcommand"))
-                    .collect(),
-            );
+            return Some(JjCompletion::Static {
+                values: JJ_OP_VERBS,
+                description: "operation subcommand",
+            });
         }
         if ["abandon", "diff", "integrate", "restore", "revert", "show"].contains(&verb) {
-            return jj_ops(ctx);
+            return Some(JjCompletion::Ops);
         }
         return None;
     }
     if sub == "file" {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                JJ_FILE_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "file subcommand"))
-                    .collect(),
-            );
+            return Some(JjCompletion::Static {
+                values: JJ_FILE_VERBS,
+                description: "file subcommand",
+            });
         }
         if ["annotate", "chmod", "list", "search", "show", "untrack"].contains(&verb) {
-            return jj_files(ctx);
+            return Some(JjCompletion::Files);
         }
         return None;
     }
     if sub == "workspace" {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                JJ_WORKSPACE_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "workspace subcommand"))
-                    .collect(),
-            );
+            return Some(JjCompletion::Static {
+                values: JJ_WORKSPACE_VERBS,
+                description: "workspace subcommand",
+            });
         }
         if ["forget", "update-stale"].contains(&verb) {
-            return jj_workspaces(ctx);
+            return Some(JjCompletion::Workspaces);
         }
         return None;
     }
     if sub == "sparse" {
         if span_len <= 3 {
-            return Some(
-                JJ_SPARSE_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "sparse subcommand"))
-                    .collect(),
-            );
+            return Some(JjCompletion::Static {
+                values: JJ_SPARSE_VERBS,
+                description: "sparse subcommand",
+            });
         }
         return None;
     }
     // bare positional argument: file, revision, or nothing, per verb.
     if span_len >= 3 {
         if JJ_FILE_POS_VERBS.contains(&sub) {
-            return jj_files(ctx);
+            return Some(JjCompletion::Files);
         }
         if sub == "resolve" {
-            return jj_conflicted_files(ctx);
+            return Some(JjCompletion::ConflictedFiles);
         }
         if JJ_MUTABLE_POS_VERBS.contains(&sub) {
-            return jj_revs(ctx, last, "mutable()");
+            return Some(JjCompletion::Revs("mutable()"));
         }
         if JJ_ALL_POS_VERBS.contains(&sub) {
-            return jj_revs(ctx, last, "all()");
+            return Some(JjCompletion::Revs("all()"));
         }
     }
     None

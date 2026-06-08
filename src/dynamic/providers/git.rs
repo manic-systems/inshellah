@@ -97,6 +97,48 @@ const GIT_WORKTREE_VERBS: &[&str] = &[
 ];
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    match git_completion(spans)? {
+        GitCompletion::Static {
+            values,
+            description,
+        } => Some(static_candidates(values, description)),
+        GitCompletion::Refs => git_refs(ctx),
+        GitCompletion::Branches => git_branches(ctx),
+        GitCompletion::Tags => git_tags(ctx),
+        GitCompletion::Remotes => git_remotes(ctx),
+        GitCompletion::Stashes => git_stashes(ctx),
+        GitCompletion::StatusPaths => git_status_paths(ctx),
+        GitCompletion::TrackedPaths => git_tracked_paths(ctx),
+        GitCompletion::Submodules => git_submodules(ctx),
+        GitCompletion::Worktrees => git_worktrees(ctx),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GitCompletion {
+    Static {
+        values: &'static [&'static str],
+        description: &'static str,
+    },
+    Refs,
+    Branches,
+    Tags,
+    Remotes,
+    Stashes,
+    StatusPaths,
+    TrackedPaths,
+    Submodules,
+    Worktrees,
+}
+
+fn static_candidates(values: &'static [&'static str], description: &'static str) -> Vec<Candidate> {
+    values
+        .iter()
+        .map(|v| Candidate::new(*v, description))
+        .collect()
+}
+
+fn git_completion(spans: &[String]) -> Option<GitCompletion> {
     let span_len = spans.len();
     let sub = spans.get(1).map(String::as_str).unwrap_or("");
     let prev = if span_len >= 2 {
@@ -112,81 +154,71 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
         .collect();
 
     if span_len <= 2 {
-        return Some(
-            GIT_TOP_VERBS
-                .iter()
-                .map(|v| Candidate::new(*v, "git subcommand"))
-                .collect(),
-        );
+        return Some(GitCompletion::Static {
+            values: GIT_TOP_VERBS,
+            description: "git subcommand",
+        });
     }
 
     if sub == "worktree" {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                GIT_WORKTREE_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "worktree subcommand"))
-                    .collect(),
-            );
+            return Some(GitCompletion::Static {
+                values: GIT_WORKTREE_VERBS,
+                description: "worktree subcommand",
+            });
         }
         if ["remove", "move", "lock", "unlock", "repair"].contains(&verb) {
-            return git_worktrees(ctx);
+            return Some(GitCompletion::Worktrees);
         }
         if verb == "add" && span_len >= 5 {
-            return git_refs(ctx);
+            return Some(GitCompletion::Refs);
         }
         return None;
     }
     if sub == "remote" && span_len >= 3 {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                GIT_REMOTE_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "remote subcommand"))
-                    .collect(),
-            );
+            return Some(GitCompletion::Static {
+                values: GIT_REMOTE_VERBS,
+                description: "remote subcommand",
+            });
         }
         if GIT_REMOTE_VERBS.contains(&verb) && verb != "add" {
-            return git_remotes(ctx);
+            return Some(GitCompletion::Remotes);
         }
         return None;
     }
     if matches!(sub, "fetch" | "push" | "pull") && span_len >= 3 {
         if positionals_after_sub.is_empty() {
-            return git_remotes(ctx);
+            return Some(GitCompletion::Remotes);
         } else {
-            return git_refs(ctx);
+            return Some(GitCompletion::Refs);
         }
     }
     if sub == "stash" && span_len >= 3 {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                GIT_STASH_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "stash subcommand"))
-                    .collect(),
-            );
+            return Some(GitCompletion::Static {
+                values: GIT_STASH_VERBS,
+                description: "stash subcommand",
+            });
         }
         if ["show", "drop", "pop", "apply", "store"].contains(&verb) {
-            return git_stashes(ctx);
+            return Some(GitCompletion::Stashes);
         }
         if verb == "branch" && positionals_after_sub.len() >= 2 {
-            return git_stashes(ctx);
+            return Some(GitCompletion::Stashes);
         }
         return None;
     }
     if sub == "submodule" && span_len >= 3 {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                GIT_SUBMODULE_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "submodule subcommand"))
-                    .collect(),
-            );
+            return Some(GitCompletion::Static {
+                values: GIT_SUBMODULE_VERBS,
+                description: "submodule subcommand",
+            });
         }
         if [
             "status",
@@ -201,22 +233,20 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
         ]
         .contains(&verb)
         {
-            return git_submodules(ctx);
+            return Some(GitCompletion::Submodules);
         }
         return None;
     }
     if sub == "bisect" && span_len >= 3 {
         let verb = spans.get(2).map(String::as_str).unwrap_or("");
         if span_len <= 3 {
-            return Some(
-                GIT_BISECT_VERBS
-                    .iter()
-                    .map(|v| Candidate::new(*v, "bisect subcommand"))
-                    .collect(),
-            );
+            return Some(GitCompletion::Static {
+                values: GIT_BISECT_VERBS,
+                description: "bisect subcommand",
+            });
         }
         if ["bad", "good", "new", "old", "skip", "reset", "start"].contains(&verb) {
-            return git_refs(ctx);
+            return Some(GitCompletion::Refs);
         }
         return None;
     }
@@ -225,28 +255,28 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
             .iter()
             .any(|f| spans.iter().any(|s| s == f));
         if delete_or_verify {
-            return git_tags(ctx);
+            return Some(GitCompletion::Tags);
         }
         if span_len >= 4 {
-            return git_refs(ctx);
+            return Some(GitCompletion::Refs);
         }
-        return git_tags(ctx);
+        return Some(GitCompletion::Tags);
     }
     if sub == "add" && span_len >= 3 {
-        return git_status_paths(ctx);
+        return Some(GitCompletion::StatusPaths);
     }
     if sub == "restore" && span_len >= 3 {
         if prev == "--source" || prev == "-s" {
-            return git_refs(ctx);
+            return Some(GitCompletion::Refs);
         }
-        return git_status_paths(ctx);
+        return Some(GitCompletion::StatusPaths);
     }
     if sub == "rm" && span_len >= 3 {
-        return git_tracked_paths(ctx);
+        return Some(GitCompletion::TrackedPaths);
     }
     if sub == "mv" && span_len >= 3 {
         return if positionals_after_sub.is_empty() {
-            git_tracked_paths(ctx)
+            Some(GitCompletion::TrackedPaths)
         } else {
             None
         };
@@ -255,19 +285,19 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
         if ["-b", "-B", "--orphan"].contains(&prev) {
             return None;
         }
-        return git_refs(ctx);
+        return Some(GitCompletion::Refs);
     }
     if sub == "switch" && span_len >= 3 {
         if ["-c", "-C", "--create", "--force-create", "--orphan"].contains(&prev) {
             return None;
         }
-        return git_branches(ctx);
+        return Some(GitCompletion::Branches);
     }
     if GIT_BRANCH_VERBS.contains(&sub) && span_len >= 3 {
-        return git_branches(ctx);
+        return Some(GitCompletion::Branches);
     }
     if GIT_REF_VERBS.contains(&sub) && span_len >= 3 {
-        return git_refs(ctx);
+        return Some(GitCompletion::Refs);
     }
     None
 }
