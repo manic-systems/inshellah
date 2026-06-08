@@ -2,6 +2,7 @@
 pub mod complete;
 pub mod config;
 pub mod dynamic;
+pub mod indexer;
 pub mod parsers;
 pub mod pool;
 pub mod resolver;
