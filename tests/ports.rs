@@ -6,11 +6,11 @@
 
 use inshellah::parsers::help::help_parser;
 use inshellah::parsers::manpage::{
-    extract_synopsis_command, parse_manpage_string, strip_groff_escapes, ManpageResult, OwnedParam,
-    OwnedSwitch,
+    ManpageResult, OwnedParam, OwnedSwitch, extract_synopsis_command, parse_manpage_string,
+    strip_groff_escapes,
 };
-use inshellah::parsers::nushell::{generate_extern, generate_module};
-use inshellah::store::{json_of_result, parse_nu_completions, result_from_json};
+use inshellah::parsers::nushell::{generate_extern, generate_module, parse_nu_completions};
+use inshellah::store::{json_of_result, result_from_json};
 
 // both parsers now produce the owned model; these aliases keep the ported
 // assertions (which match on `Switch::`/`Param::` variants) unchanged.
@@ -161,7 +161,10 @@ fn aliased_subcommands_keep_canonical_name() {
     assert!(names.contains(&"build"), "subcommands: {names:?}");
     assert!(names.contains(&"check"), "subcommands: {names:?}");
     assert!(names.contains(&"clean"), "subcommands: {names:?}");
-    assert!(!names.contains(&"b"), "alias leaked as subcommand: {names:?}");
+    assert!(
+        !names.contains(&"b"),
+        "alias leaked as subcommand: {names:?}"
+    );
     let build = r.subcommands.iter().find(|sc| sc.name == "build").unwrap();
     assert_eq!(build.desc, "Compile the current package");
 }
@@ -369,10 +372,7 @@ Print a short usage summary and exit.
     assert!(!nu.contains("--servicedatabase"), "nu = {nu}");
     // positional choices are NOT real subcommands, so no `getent passwd`
     // extern stub is generated.
-    assert!(
-        !nu.contains("export extern \"getent passwd\""),
-        "nu = {nu}"
-    );
+    assert!(!nu.contains("export extern \"getent passwd\""), "nu = {nu}");
 }
 
 #[test]
@@ -844,7 +844,9 @@ fn long_switch_rejects_dash_only_separator_lines() {
     // the first two chars look like a `--` prefix; the rest is just dashes.
     // without an alphanumeric-first guard, the parser would treat the whole
     // separator as a flag named `------…`.
-    let r = parse("  ---------------------------------------------------\n  -a, --all                  show all\n");
+    let r = parse(
+        "  ---------------------------------------------------\n  -a, --all                  show all\n",
+    );
     assert_eq!(
         r.entries.len(),
         1,
@@ -949,7 +951,10 @@ Options:
     assert!(
         has_start,
         "expected start in subcommands: {:?}",
-        r.subcommands.iter().map(|sc| sc.name.as_str()).collect::<Vec<_>>()
+        r.subcommands
+            .iter()
+            .map(|sc| sc.name.as_str())
+            .collect::<Vec<_>>()
     );
     assert!(r.entries.len() >= 2);
 }
