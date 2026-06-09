@@ -1,10 +1,10 @@
 {
 
-  inputs.nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
-
   outputs =
-    { self, nixpkgs }:
+    { self, ... }@args:
     let
+      inputs = import ./.tack { overrides = args.tackOverrides or { }; };
+      inherit (inputs) nixpkgs;
       inherit (nixpkgs) lib;
       forAllSystems =
         f:
