@@ -234,9 +234,6 @@ pub fn generate_candidates(
                     }
                 }
             };
-            if !last_token.is_empty() && last_token == flag {
-                continue;
-            }
             if score > 0 {
                 let base_desc = entry_completion_desc(e);
                 let desc = match aka {
@@ -311,5 +308,49 @@ mod tests {
         let cfg = Config::default();
         let out = generate_candidates(&r, 1, 1, "status", &[], false, &cfg);
         assert!(out.is_empty());
+    }
+
+    fn result_with_flags(entries: Vec<ManpageEntry>) -> ManpageResult {
+        ManpageResult {
+            entries,
+            subcommands: Vec::new(),
+            positional_choices: Vec::new(),
+            positionals: Vec::new(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn exact_short_flag_is_kept_for_preview() {
+        let r = result_with_flags(vec![ManpageEntry {
+            switch: OwnedSwitch::Both('x', "catalog".to_string()),
+            param: None,
+            desc: "explain log messages".to_string(),
+        }]);
+        let cfg = Config::default();
+        let out = generate_candidates(&r, 1, 1, "-x", &[], true, &cfg);
+        let values: Vec<&str> = out.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, vec!["-x"]);
+    }
+
+    #[test]
+    fn exact_long_flag_is_kept_alongside_longer_matches() {
+        let r = result_with_flags(vec![
+            ManpageEntry {
+                switch: OwnedSwitch::Long("image".to_string()),
+                param: None,
+                desc: "use an image".to_string(),
+            },
+            ManpageEntry {
+                switch: OwnedSwitch::Long("image-policy".to_string()),
+                param: None,
+                desc: "set image policy".to_string(),
+            },
+        ]);
+        let cfg = Config::default();
+        let out = generate_candidates(&r, 1, 1, "--image", &[], true, &cfg);
+        let values: Vec<&str> = out.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"--image"), "values = {values:?}");
+        assert!(values.contains(&"--image-policy"), "values = {values:?}");
     }
 }
