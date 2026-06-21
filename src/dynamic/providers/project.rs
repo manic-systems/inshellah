@@ -7,6 +7,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candida
         "make" => make_completions(spans, ctx),
         "just" => just_completions(spans, ctx),
         "cargo" => cargo_completions(spans, ctx),
+        "zig" => zig_completions(spans, ctx),
         _ => None,
     }
 }
@@ -151,5 +152,26 @@ fn cargo_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
             }
         }
     }
+    (!candidates.is_empty()).then_some(candidates)
+}
+
+fn zig_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    if spans[1] != "build" {
+        return None;
+    }
+
+    let out = run(
+        &[ctx.bin("zig"), "build".into(), "--list-steps".into()],
+        ctx,
+    )?;
+
+    let mut candidates = Vec::new();
+    for line in out.lines() {
+        let trimmed = line.trim_start();
+        let mut iter = trimmed.split_whitespace().peekable();
+        let name = iter.next()?;
+        candidates.push(Candidate::new(name, iter.collect::<Vec<&str>>().join(" ")));
+    }
+
     (!candidates.is_empty()).then_some(candidates)
 }
