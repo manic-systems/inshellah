@@ -97,7 +97,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         complete: jj::complete,
     },
     FunctionProvider {
-        commands: &["npm", "pnpm", "yarn", "make", "just", "cargo"],
+        commands: &["npm", "pnpm", "yarn", "make", "just", "cargo", "zig"],
         kind: Kind::Fallback,
         complete: project::complete,
     },

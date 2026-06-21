@@ -148,6 +148,7 @@ with `null`.
 | `npm` / `pnpm` / `yarn` | package.json scripts |
 | `make` / `just` | targets and recipes |
 | `cargo` | workspace targets for `--bin`, `--example`, and related slots |
+| `zig` | build.zig steps |
 | `kill` / `pkill` | pid and command pairs |
 
 ## macOS developer toolchain
