@@ -497,6 +497,60 @@ exit 0
 }
 
 #[test]
+fn complete_long_flag_false_positive_falls_through_to_dynamic() {
+    let root = unique_temp_dir("inshellah-long-flag-dynamic");
+    let bin_dir = root.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    write_executable(
+        &bin_dir,
+        "nix",
+        r#"#!/bin/sh
+if [ -n "${NIX_GET_COMPLETIONS:-}" ]; then
+  printf 'header\n--command\tRun a command\n'
+  exit 0
+fi
+exit 0
+"#,
+    );
+
+    let nix_develop = ManpageResult {
+        entries: vec![ManpageEntry {
+            switch: OwnedSwitch::Long("no-write-lock-file".to_string()),
+            param: None,
+            desc: "do not update the lock file".to_string(),
+        }],
+        subcommands: Vec::new(),
+        positional_choices: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "nix develop .", "help", &nix_develop).expect("nix develop cache");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["nix", "develop", ".", "--c"])
+        .env("PATH", path_with_bin(&bin_dir))
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(
+        stdout.contains(r#""value":"--command"#),
+        "stdout = {stdout}"
+    );
+    assert!(!stdout.contains("no-write-lock-file"), "stdout = {stdout}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn complete_does_not_scan_path_at_command_position() {
     let root = unique_temp_dir("inshellah-command-position-complete");
     let bin_dir = root.join("bin");

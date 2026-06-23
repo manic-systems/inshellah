@@ -5,7 +5,9 @@
 use std::fmt::Write as _;
 
 use crate::config::Config;
-use crate::parsers::manpage::{ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch};
+use crate::parsers::manpage::{
+    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
+};
 
 #[derive(Clone, Debug)]
 pub struct Candidate {
@@ -109,6 +111,60 @@ pub fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
             .all(|(&hay, &needle)| hay.eq_ignore_ascii_case(&needle))
 }
 
+fn long_flag_score(needle: &str, dashed: &str, bare_name: &str) -> i32 {
+    if needle.is_empty() {
+        return 1;
+    }
+    if needle == dashed {
+        return 1000;
+    }
+    if needle == "-" {
+        return 900;
+    }
+    if starts_with_ignore_ascii_case(dashed.as_bytes(), needle.as_bytes()) {
+        return 950 + (needle.len() as i32 * 100 / dashed.len() as i32);
+    }
+
+    let bare_needle = needle.trim_start_matches('-');
+    if bare_needle.is_empty() {
+        return 0;
+    }
+    let words: Vec<&str> = bare_name
+        .split('-')
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words
+        .iter()
+        .any(|word| starts_with_ignore_ascii_case(word.as_bytes(), bare_needle.as_bytes()))
+    {
+        return 850 + bare_needle.len() as i32;
+    }
+    if acronym_matches(bare_needle, &words) {
+        return 700 + bare_needle.len() as i32;
+    }
+    0
+}
+
+fn acronym_matches(needle: &str, words: &[&str]) -> bool {
+    let mut needle = needle.chars();
+    let Some(mut want) = needle.next() else {
+        return false;
+    };
+
+    for word in words {
+        let Some(first) = word.chars().next() else {
+            continue;
+        };
+        if want.eq_ignore_ascii_case(&first) {
+            match needle.next() {
+                Some(next) => want = next,
+                None => return true,
+            }
+        }
+    }
+    false
+}
+
 /// param placeholder convention: `<FILE>` mandatory, `[FILE]` optional.
 pub fn entry_completion_desc(e: &ManpageEntry) -> String {
     match &e.param {
@@ -172,7 +228,8 @@ pub fn generate_candidates(
             // become `(aka ...)`, like a switch's short/long pair.
             let mut best: Option<(i32, &str)> = None;
             let mut others: Vec<&str> = Vec::new();
-            for form in std::iter::once(sc.name.as_str()).chain(sc.aliases.iter().map(String::as_str))
+            for form in
+                std::iter::once(sc.name.as_str()).chain(sc.aliases.iter().map(String::as_str))
             {
                 let fs = fuzzy_score(last_token, form);
                 match best {
@@ -204,6 +261,8 @@ pub fn generate_candidates(
         let score_against = |dashed: &str, bare_name: &str| -> i32 {
             if fneedle.bare {
                 fuzzy_score(fneedle.needle, bare_name)
+            } else if dashed.starts_with("--") {
+                long_flag_score(fneedle.needle, dashed, bare_name)
             } else {
                 fuzzy_score(fneedle.needle, dashed)
             }
@@ -227,7 +286,7 @@ pub fn generate_candidates(
                     let short_bare = c.to_string();
                     let ls = score_against(&long_flag, l);
                     let ss = score_against(&short_flag, &short_bare);
-                    if ss > ls {
+                    if ss >= ls {
                         (short_flag, Some(long_flag), ss)
                     } else {
                         (long_flag, Some(short_flag), ls)
@@ -352,5 +411,33 @@ mod tests {
         let values: Vec<&str> = out.iter().map(|c| c.value.as_str()).collect();
         assert!(values.contains(&"--image"), "values = {values:?}");
         assert!(values.contains(&"--image-policy"), "values = {values:?}");
+    }
+
+    #[test]
+    fn long_flags_match_word_prefixes_and_acronyms_not_random_subsequences() {
+        let r = result_with_flags(vec![
+            ManpageEntry {
+                switch: OwnedSwitch::Long("no-write-lock-file".to_string()),
+                param: None,
+                desc: "do not update the lock file".to_string(),
+            },
+            ManpageEntry {
+                switch: OwnedSwitch::Long("command".to_string()),
+                param: None,
+                desc: "run a command".to_string(),
+            },
+        ]);
+        let cfg = Config::default();
+
+        let values_for = |needle: &str| {
+            generate_candidates(&r, 1, 1, needle, &[], true, &cfg)
+                .into_iter()
+                .map(|c| c.value)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(values_for("--c"), vec!["--command"]);
+        assert_eq!(values_for("--lock"), vec!["--no-write-lock-file"]);
+        assert_eq!(values_for("--wlf"), vec!["--no-write-lock-file"]);
     }
 }
