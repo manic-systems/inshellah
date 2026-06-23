@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah complete`.
 
+use std::collections::HashSet;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use inshellah::complete::{Candidate, generate_candidates};
 use inshellah::config::Config;
-use inshellah::dynamic::{dynamic_complete_with_path, dynamic_value_completions};
+use inshellah::dynamic::{
+    dynamic_complete_candidates_with_path, dynamic_complete_with_path, dynamic_value_completions,
+};
 use inshellah::indexer::{is_executable, resolve_and_cache, resolve_command_path_and_cache};
 use inshellah::parsers::manpage::{ManpageResult, OwnedSwitch};
 use inshellah::store::{self, default_store_path, lookup, subcommands_of};
@@ -180,7 +183,7 @@ pub fn run(
         }
         None => false,
     };
-    let candidates: Vec<String> = match &found {
+    let candidates: Vec<Candidate> = match &found {
         None => Vec::new(),
         Some((_, r, depth)) => generate_candidates(
             r,
@@ -190,15 +193,22 @@ pub fn run(
             &fallback_subcommands,
             typing_flag,
             cfg,
-        )
-        .into_iter()
-        .map(Candidate::into_json)
-        .collect(),
+        ),
     };
     // hand off at non-flag leaf positions so file and dynamic completers can
     // answer argument prefixes. a leading "-" keeps flags.
     let want_files = !typing_flag && !has_subs && (last_token.is_empty() || candidates.is_empty());
-    if want_files || candidates.is_empty() {
+    if !typing_flag
+        && let Some(dyn_candidates) =
+            dynamic_complete_candidates_with_path(&spans, explicit_cmd_path.as_deref(), cfg)
+    {
+        let combined = if candidates.is_empty() || want_files {
+            dyn_candidates
+        } else {
+            merge_completion_candidates(dyn_candidates, candidates, cfg.max_completions)
+        };
+        print_completion_candidate_values(combined);
+    } else if want_files || candidates.is_empty() {
         // spans are post-elevation, so `sudo nix ...` reaches this as
         // `[nix, ...]` and hits the nix branch.
         if let Some(dyn_candidates) =
@@ -209,7 +219,7 @@ pub fn run(
             println!("null");
         }
     } else {
-        print_completion_candidates(&candidates);
+        print_completion_candidate_values(candidates);
     }
 }
 
@@ -241,6 +251,29 @@ fn command_name_for_path(path: &Path) -> Option<String> {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn merge_completion_candidates(
+    first: Vec<Candidate>,
+    second: Vec<Candidate>,
+    max_completions: usize,
+) -> Vec<Candidate> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(first.len() + second.len());
+    for candidate in first.into_iter().chain(second) {
+        if seen.insert(candidate.value.clone()) {
+            out.push(candidate);
+            if max_completions > 0 && out.len() >= max_completions {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn print_completion_candidate_values(candidates: Vec<Candidate>) {
+    let candidates: Vec<String> = candidates.into_iter().map(Candidate::into_json).collect();
+    print_completion_candidates(&candidates);
 }
 
 // `null` is nushell's no-match form.
