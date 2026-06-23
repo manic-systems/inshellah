@@ -16,15 +16,25 @@ pub fn safe_env_vars() -> &'static [(std::ffi::OsString, std::ffi::OsString)] {
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
         std::env::vars_os()
-            .filter(|(k, _)| {
-                let s = k.to_string_lossy();
-                !(s == "DISPLAY"
-                    || s == "WAYLAND_DISPLAY"
-                    || s == "DBUS_SESSION_BUS_ADDRESS"
-                    || s == "XAUTHORITY")
-            })
+            .filter(|(k, _)| safe_env_key(&k.to_string_lossy()))
             .collect()
     })
+}
+
+fn safe_env_key(key: &str) -> bool {
+    !matches!(
+        key,
+        "DISPLAY"
+            | "WAYLAND_DISPLAY"
+            | "DBUS_SESSION_BUS_ADDRESS"
+            | "XAUTHORITY"
+            | "MIR_SOCKET"
+            | "SWAYSOCK"
+            | "I3SOCK"
+            | "HYPRLAND_INSTANCE_SIGNATURE"
+            | "XDG_CURRENT_DESKTOP"
+            | "DESKTOP_SESSION"
+    )
 }
 
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
