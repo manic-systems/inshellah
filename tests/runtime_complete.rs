@@ -18,9 +18,13 @@ fn unique_temp_dir(name: &str) -> PathBuf {
 }
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
+    write_executable(bin_dir, name, "#!/bin/sh\nexit 0\n");
+}
+
+fn write_executable(bin_dir: &Path, name: &str, script: &str) {
     fs::create_dir_all(bin_dir).expect("bin dir");
     let path = bin_dir.join(name);
-    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub executable");
+    fs::write(&path, script).expect("write executable");
     let mut perms = fs::metadata(&path).expect("metadata").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&path, perms).expect("chmod");
@@ -29,6 +33,39 @@ fn write_stub_executable(bin_dir: &Path, name: &str) {
 fn path_with_bin(bin_dir: &Path) -> String {
     let old_path = std::env::var_os("PATH").unwrap_or_default();
     format!("{}:{}", bin_dir.display(), old_path.to_string_lossy())
+}
+
+fn write_fake_nu(bin_dir: &Path, commands_json: &str) {
+    write_executable(
+        bin_dir,
+        "nu",
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' '{}'
+"#,
+            commands_json
+        ),
+    );
+}
+
+fn completion_values(stdout: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let trimmed = text.trim();
+    if trimmed == "null" || trimmed.is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .expect("completion JSON")
+        .as_array()
+        .expect("completion array")
+        .iter()
+        .map(|v| {
+            v.get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect()
 }
 
 #[test]
@@ -390,6 +427,70 @@ exit 2
     assert!(
         !stdout.contains("path-origin"),
         "dynamic provider invoked PATH git: {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn complete_nix_value_position_includes_dynamic_candidates_when_static_matches() {
+    let root = unique_temp_dir("inshellah-nix-static-dynamic");
+    let bin_dir = root.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    write_executable(
+        &bin_dir,
+        "nix",
+        r#"#!/bin/sh
+if [ -n "${NIX_GET_COMPLETIONS:-}" ]; then
+  printf 'header\nnixpkgs#zig\tZig compiler\n'
+  exit 0
+fi
+exit 0
+"#,
+    );
+
+    let nix_root = ManpageResult {
+        entries: Vec::new(),
+        subcommands: vec![ManpageSubcommand::new(
+            "develop".to_string(),
+            "Run a development shell".to_string(),
+        )],
+        positional_choices: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    let nix_develop = ManpageResult {
+        entries: Vec::new(),
+        subcommands: Vec::new(),
+        positional_choices: vec![ManpageSubcommand::new(
+            "nixpkgs#zinc".to_string(),
+            "cached installable".to_string(),
+        )],
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&cache_dir, "nix", "help", &nix_root).expect("nix cache");
+    write_result(&cache_dir, "nix develop", "help", &nix_develop).expect("nix develop cache");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .args(["complete", "--dir"])
+        .arg(&cache_dir)
+        .args(["nix", "develop", "nixpkgs#zi"])
+        .env("PATH", path_with_bin(&bin_dir))
+        .output()
+        .expect("run inshellah complete");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        completion_values(&output.stdout),
+        vec!["nixpkgs#zig".to_string(), "nixpkgs#zinc".to_string()],
+        "stdout = {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 
     let _ = fs::remove_dir_all(root);
@@ -1202,6 +1303,7 @@ fn runtime_manpage_resolution_supplements_from_help() {
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
     fs::create_dir_all(&man_dir).expect("man dir");
+    write_fake_nu(&bin_dir, r#"["nu"]"#);
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let demo = bin_dir.join("demo");
@@ -1309,6 +1411,7 @@ fn index_manpage_results_are_supplemented_from_help() {
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
     fs::create_dir_all(&man_dir).expect("man dir");
+    write_fake_nu(&bin_dir, r#"["nu"]"#);
 
     let demo = bin_dir.join("demo");
     fs::write(
@@ -1356,6 +1459,7 @@ man flag
         .arg("1000")
         .arg("--workers")
         .arg("1")
+        .env("PATH", path_with_bin(&bin_dir))
         .output()
         .expect("run inshellah index");
     assert!(
@@ -1574,6 +1678,85 @@ exit 2
     assert!(
         rewritten.contains("fresh") && !rewritten.contains("staleonly"),
         "cache should be rewritten with the fresh set; cache = {rewritten}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn index_fails_when_nushell_command_discovery_is_unavailable() {
+    let root = unique_temp_dir("inshellah-index-no-nu");
+    let prefix = root.join("prefix");
+    let bin_dir = prefix.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_executable(
+        &bin_dir,
+        "demo",
+        "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf 'Usage: demo\\n'; fi\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("index")
+        .arg(&prefix)
+        .arg("--dir")
+        .arg(&cache_dir)
+        .env("PATH", "")
+        .output()
+        .expect("run inshellah index");
+    assert!(
+        !output.status.success(),
+        "index should fail without nu; stdout = {}, stderr = {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Nushell native command discovery"),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn index_skips_commands_reported_by_nushell_discovery() {
+    let root = unique_temp_dir("inshellah-index-nu-skip");
+    let prefix = root.join("prefix");
+    let bin_dir = prefix.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_nu(&bin_dir, r#"["ls","nu"]"#);
+    write_executable(
+        &bin_dir,
+        "ls",
+        "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf 'Usage: ls\\nOptions:\\n  --demo demo\\n'; fi\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("index")
+        .arg(&prefix)
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("--timeout-ms")
+        .arg("1000")
+        .env("PATH", path_with_bin(&bin_dir))
+        .output()
+        .expect("run inshellah index");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !cache_dir
+            .join(format!("{}.json", filename_of_command("ls")))
+            .exists(),
+        "nushell native command should not be indexed"
+    );
+    assert!(
+        cache_dir.join("nushell-native-commands").exists(),
+        "discovered command set should be stored"
     );
 
     let _ = fs::remove_dir_all(root);

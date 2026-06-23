@@ -44,6 +44,16 @@ in
       description = "package to use for indexing completions";
     };
 
+    nushellPackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.nushell;
+      defaultText = lib.literalExpression "pkgs.nushell";
+      description = ''
+        nushell package to use at index time for discovering native nushell
+        commands that should not be indexed as external completions.
+      '';
+    };
+
     completionsPath = lib.mkOption {
       type = lib.types.str;
       default = "/share/inshellah";
@@ -275,8 +285,8 @@ in
         mkdir -p ${destDir}
 
         if [ -d "$out/bin" ] && [ -d "$out/share/man" ]; then
-          ${inshellah} index "$out" --dir ${destDir}${ignoreFlag}${helpOnlyFlag}${prefixFlag}${timeoutFlag}${workersFlag} \
-            2>/dev/null || true
+          PATH="${cfg.nushellPackage}/bin:$PATH" \
+            ${inshellah} index "$out" --dir ${destDir}${ignoreFlag}${helpOnlyFlag}${prefixFlag}${timeoutFlag}${workersFlag}
         fi
 
         find ${destDir} -maxdepth 1 -empty -delete

@@ -50,6 +50,15 @@ while [ "$i" -le 8 ]; do echo "  lvl${n}sub$i   level $n child $i"; i=$((i+1)); 
     }
     fs::set_permissions(&hydra, perms).expect("chmod");
 
+    let nu = bindir.join("nu");
+    fs::write(&nu, "#!/bin/sh\nprintf '%s\\n' '[\"nu\"]'\n").expect("write fake nu");
+    let mut perms = fs::metadata(&nu).unwrap().permissions();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    fs::set_permissions(&nu, perms).expect("chmod fake nu");
+
     let budget = 40usize;
     let started = Instant::now();
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
@@ -60,6 +69,7 @@ while [ "$i" -le 8 ]; do echo "  lvl${n}sub$i   level $n child $i"; i=$((i+1)); 
         .arg("--timeout-ms")
         .arg("300")
         .env("INSHELLAH_MAX_INDEX_NODES", budget.to_string())
+        .env("PATH", &bindir)
         .output()
         .expect("run inshellah index");
     let elapsed = started.elapsed();
@@ -87,7 +97,10 @@ while [ "$i" -le 8 ]; do echo "  lvl${n}sub$i   level $n child $i"; i=$((i+1)); 
         files <= budget + 5,
         "fan-out budget breached: {files} cache files written (budget {budget})"
     );
-    assert!(files > 1, "expected the tree to be partially indexed, got {files}");
+    assert!(
+        files > 1,
+        "expected the tree to be partially indexed, got {files}"
+    );
 
     // the cap must announce itself rather than silently truncate.
     let stderr = String::from_utf8_lossy(&output.stderr);
