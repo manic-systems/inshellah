@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::complete::Candidate;
 use crate::config::Config;
 
 mod providers;
@@ -51,6 +52,15 @@ pub fn dynamic_complete_with_path(
     explicit_cmd_path: Option<&Path>,
     cfg: &Config,
 ) -> Option<Vec<String>> {
+    dynamic_complete_candidates_with_path(spans, explicit_cmd_path, cfg)
+        .map(|candidates| candidates.into_iter().map(|c| c.into_json()).collect())
+}
+
+pub fn dynamic_complete_candidates_with_path(
+    spans: &[String],
+    explicit_cmd_path: Option<&Path>,
+    cfg: &Config,
+) -> Option<Vec<Candidate>> {
     if spans.is_empty() {
         return None;
     }
@@ -71,7 +81,7 @@ pub fn dynamic_complete_with_path(
     if filtered.is_empty() {
         None
     } else {
-        Some(filtered.into_iter().map(|c| c.into_json()).collect())
+        Some(filtered)
     }
 }
 

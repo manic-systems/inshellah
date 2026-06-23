@@ -13,36 +13,42 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
     let raw = run_with(&cmd_args, ctx, |cmd| {
         cmd.env("NIX_GET_COMPLETIONS", nix_index.to_string());
     })?;
-    let mut lines: Vec<String> = raw
+    let mut rows: Vec<Candidate> = raw
         .split('\n')
         .skip(1)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter_map(parse_nix_completion_line)
         .collect();
-    if lines.is_empty() {
+    if rows.is_empty() {
         return None;
     }
     // bare `nixpkgs#` makes nix return the whole attribute set (tens of
     // thousands of entries), bound it like every other provider to avoid
     // shipping and fuzzy-scoring megabytes per keystroke.
-    if ctx.limit != 0 && lines.len() > ctx.limit {
-        lines.truncate(ctx.limit);
+    if ctx.limit != 0 && rows.len() > ctx.limit {
+        rows.truncate(ctx.limit);
     }
-    let enrich = lines.len() < 6 && looks_like_flake_pkg(last);
+    let enrich = rows.len() < 6 && looks_like_flake_pkg(last);
     if !enrich {
-        return Some(
-            lines
-                .drain(..)
-                .map(|v| Candidate::new(v, String::new()))
-                .collect(),
-        );
+        return Some(rows);
     }
-    let mut out: Vec<Candidate> = Vec::with_capacity(lines.len());
-    for line in lines {
-        let desc = nix_eval_description(&line, ctx).unwrap_or_default();
-        out.push(Candidate::new(line, desc));
+    for row in &mut rows {
+        if row.description.is_empty() {
+            row.description = nix_eval_description(&row.value, ctx).unwrap_or_default();
+        }
     }
-    Some(out)
+    Some(rows)
+}
+
+fn parse_nix_completion_line(line: &str) -> Option<Candidate> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let (value, description) = line
+        .split_once('\t')
+        .map(|(value, description)| (value.trim(), description.trim()))
+        .unwrap_or((line, ""));
+    (!value.is_empty()).then(|| Candidate::new(value, description))
 }
 
 pub(crate) fn looks_like_flake_pkg(s: &str) -> bool {
