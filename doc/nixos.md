@@ -85,6 +85,9 @@ programs.inshellah = {
   # the inshellah package (set automatically by the flake module)
   package = pkgs.inshellah;
 
+  # nushell used during indexing to discover native commands to skip
+  nushellPackage = pkgs.nushell;
+
   # subdirectory of the system profile holding the index files
   # default: "/share/inshellah"
   completionsPath = "/share/inshellah";
@@ -236,7 +239,8 @@ searches automatically. to automate via home-manager:
 
 ```nix
 home.activation.inshellah-index = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-  ${pkgs.inshellah}/bin/inshellah index /etc/profiles/per-user/$USER 2>/dev/null || true
+  PATH="${pkgs.nushell}/bin:$PATH" \
+    ${pkgs.inshellah}/bin/inshellah index /etc/profiles/per-user/$USER
 '';
 ```
 
@@ -258,6 +262,7 @@ providers) and on-the-fly (`--help`), just without a prebuilt cache.
 **stale completions after update**: the index regenerates on every
 `nixos-rebuild`. if a command changed its flags, rebuild.
 
-**build-time errors**: indexing failures are non-fatal. check
-`journalctl` for the build log if completions are missing for a
-specific command.
+**build-time errors**: index-time discovery requires a working `nu`.
+`programs.inshellah.nushellPackage` controls which nushell package is
+used by the module. if discovery or indexing fails, the build fails rather
+than silently shipping an empty or incomplete index.

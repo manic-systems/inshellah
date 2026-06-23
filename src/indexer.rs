@@ -15,10 +15,10 @@ use crate::parsers::manpage::{
     ManpageResult, ManpageSubcommand, OwnedSwitch, extract_synopsis_command, parse_manpage_string,
     parse_manpage_with_subs, read_manpage_file,
 };
-use crate::parsers::nushell::is_nushell_builtin;
 use crate::pool::{ScrapePool, Submitter};
 use crate::resolver::{self, NodeClass, Outcome, Probe, resolve_node};
-use crate::store::{ensure_dir, parse_nu_completions, write_native, write_result};
+use crate::store::{ensure_dir, parse_nu_completions, write_file, write_native, write_result};
+use crate::subprocess::run_cmd;
 
 use self::probe::{Classify, classify_binary, remaining_ms, skip_name, try_native_completion};
 
@@ -139,7 +139,12 @@ pub fn load_ignorelist(path: &Path) -> HashSet<String> {
     out
 }
 
-fn list_binaries(bindirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
+const NUSHELL_NATIVE_COMMANDS_FILE: &str = "nushell-native-commands";
+
+fn list_binaries(
+    bindirs: &[PathBuf],
+    nushell_commands: &HashSet<String>,
+) -> Vec<(String, PathBuf)> {
     let mut all: Vec<(String, PathBuf)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for bd in bindirs {
@@ -151,7 +156,7 @@ fn list_binaries(bindirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if skip_name(name) || is_nushell_builtin(name) {
+            if skip_name(name) || nushell_commands.contains(name) {
                 continue;
             }
             if !is_executable(&path) {
@@ -164,6 +169,51 @@ fn list_binaries(bindirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
     }
     all.sort_by(|a, b| a.0.cmp(&b.0));
     all
+}
+
+fn discover_nushell_native_commands(timeout_ms: u64) -> std::io::Result<HashSet<String>> {
+    let script =
+        r#"scope commands | where type in [built-in keyword] | get name | sort | to json --raw"#;
+    let args = vec![
+        "nu".to_string(),
+        "--no-config-file".to_string(),
+        "--no-std-lib".to_string(),
+        "--commands".to_string(),
+        script.to_string(),
+    ];
+    let out = run_cmd(&args, timeout_ms).ok_or_else(|| {
+        std::io::Error::other(
+            "failed to run `nu` for Nushell native command discovery during indexing",
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(out.trim()).map_err(|e| {
+        std::io::Error::other(format!(
+            "failed to parse Nushell native command discovery output as JSON: {e}"
+        ))
+    })?;
+    let arr = value.as_array().ok_or_else(|| {
+        std::io::Error::other("Nushell native command discovery did not return a JSON array")
+    })?;
+    let mut commands = HashSet::new();
+    for item in arr {
+        let Some(name) = item.as_str() else {
+            return Err(std::io::Error::other(
+                "Nushell native command discovery returned a non-string command name",
+            ));
+        };
+        if !name.is_empty() {
+            commands.insert(name.to_string());
+        }
+    }
+    Ok(commands)
+}
+
+fn write_nushell_native_commands(dir: &Path, commands: &HashSet<String>) -> std::io::Result<()> {
+    let mut commands: Vec<&str> = commands.iter().map(String::as_str).collect();
+    commands.sort_unstable();
+    let data = serde_json::to_string(&commands)
+        .map_err(|e| std::io::Error::other(format!("serialize Nushell native commands: {e}")))?;
+    write_file(&dir.join(NUSHELL_NATIVE_COMMANDS_FILE), &data)
 }
 
 pub fn manpage_name_has_installed_command(name: &str, binary_names: &HashSet<String>) -> bool {
@@ -322,7 +372,9 @@ pub fn cmd_index(
     num_workers: usize,
 ) -> std::io::Result<()> {
     ensure_dir(dir)?;
-    let binaries = list_binaries(bindirs);
+    let nushell_commands = discover_nushell_native_commands(timeout_ms)?;
+    write_nushell_native_commands(dir, &nushell_commands)?;
+    let binaries = list_binaries(bindirs, &nushell_commands);
     let binary_names: HashSet<String> = binaries
         .iter()
         .filter(|(name, _)| !ignorelist.contains(name))
@@ -405,7 +457,7 @@ pub fn cmd_index(
         if help_only.contains(&name) {
             continue;
         }
-        if is_nushell_builtin(&name) {
+        if nushell_commands.contains(&name) {
             continue;
         }
         let mut source = "manpage";
