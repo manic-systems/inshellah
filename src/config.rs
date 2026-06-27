@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! complete-path knobs, read from INSHELLAH_* env (also set by the nixos module).
 
-pub const DEFAULT_TIMEOUT_MS: u64 = 200;
+pub const DEFAULT_TIMEOUT_MS: u64 = 1200;
 
 /// 0 disables the dynamic provider.
 pub const DEFAULT_DYNAMIC_TIMEOUT_MS: u64 = 5000;

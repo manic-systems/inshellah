@@ -26,7 +26,7 @@ Usage:
       --help-only FILE  skip manpages for listed commands, use --help instead
       --prefix PATHS    extra scrape prefixes, colon-separated (in addition
                         to the positional PREFIX args)
-      --timeout-ms N    per-subprocess timeout in milliseconds (default 200)
+      --timeout-ms N    per-subprocess timeout in milliseconds (default 1200)
       --workers N       parallel scrape workers (default: cpu count)
       (env INSHELLAH_MAX_INDEX_NODES caps subcommand nodes per root command;
        default 10000, bounds runaway recursion on pathological trees)

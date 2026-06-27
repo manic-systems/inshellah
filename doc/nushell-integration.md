@@ -49,7 +49,7 @@ inshellah index PREFIX... [--dir PATH] [--ignore FILE] [--help-only FILE]
     --help-only FILE  skip manpages for listed commands, use --help instead
     --prefix PATHS    extra scrape prefixes, colon-separated
     --workers N       worker-thread count
-    --timeout-ms N    per-subprocess timeout in ms (default: 200)
+    --timeout-ms N    per-subprocess timeout in ms (default: 1200)
 
 inshellah complete CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
     nushell custom completer. outputs JSON completion candidates.
