@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::parsers::manpage::{
-    ManpageResult, ManpageSubcommand, OwnedSwitch, extract_synopsis_command, parse_manpage_string,
-    parse_manpage_with_subs, read_manpage_file,
+    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedSwitch, extract_synopsis_command,
+    parse_manpage_string, parse_manpage_with_subs, read_manpage_file,
 };
 use crate::pool::{ScrapePool, Submitter};
 use crate::resolver::{self, NodeClass, Outcome, Probe, resolve_node};
-use crate::store::{ensure_dir, parse_nu_completions, write_file, write_native, write_result};
+use crate::store::{ensure_dir, parse_nu_completions, read_result, write_file, write_native, write_result};
 use crate::subprocess::run_cmd;
 
 use self::probe::{Classify, classify_binary, remaining_ms, skip_name, try_native_completion};
@@ -441,7 +441,16 @@ pub fn cmd_index(
             continue;
         }
         let base_cmd = cmd_name_of_manpage(&manpage_path);
+        if help_only.contains(&name) {
+            continue;
+        }
+        if nushell_commands.contains(&name) {
+            continue;
+        }
         if indexed.contains(&name) {
+            if merge_indexed_result(dir, &name, "manpage", &result)? {
+                continue;
+            }
             if name != base_cmd {
                 eprintln!(
                     "warning: {} extracted cmd \"{}\" (already indexed), skipping",
@@ -604,6 +613,51 @@ fn entry_has_short(result: &ManpageResult, short: char) -> bool {
     })
 }
 
+fn entry_overlaps(result: &ManpageResult, entry: &ManpageEntry) -> bool {
+    match &entry.switch {
+        OwnedSwitch::Both(short, long) => {
+            entry_has_short(result, *short) || entry_has_long(result, long)
+        }
+        OwnedSwitch::Long(long) => entry_has_long(result, long),
+        OwnedSwitch::Short(short) => entry_has_short(result, *short),
+    }
+}
+
+fn switches_overlap(a: &OwnedSwitch, b: &OwnedSwitch) -> bool {
+    match (a, b) {
+        (OwnedSwitch::Short(a), OwnedSwitch::Short(b))
+        | (OwnedSwitch::Short(a), OwnedSwitch::Both(b, _))
+        | (OwnedSwitch::Both(a, _), OwnedSwitch::Short(b)) => a == b,
+        (OwnedSwitch::Long(a), OwnedSwitch::Long(b))
+        | (OwnedSwitch::Long(a), OwnedSwitch::Both(_, b))
+        | (OwnedSwitch::Both(_, a), OwnedSwitch::Long(b)) => a.eq_ignore_ascii_case(b),
+        (OwnedSwitch::Both(a_short, a_long), OwnedSwitch::Both(b_short, b_long)) => {
+            a_short == b_short || a_long.eq_ignore_ascii_case(b_long)
+        }
+        (OwnedSwitch::Short(_), OwnedSwitch::Long(_))
+        | (OwnedSwitch::Long(_), OwnedSwitch::Short(_)) => false,
+    }
+}
+
+fn merge_entry_description(existing: &mut ManpageEntry, incoming: &ManpageEntry) -> bool {
+    let mut changed = false;
+    if existing.desc.is_empty() && !incoming.desc.is_empty() {
+        existing.desc = incoming.desc.clone();
+        changed = true;
+    }
+    changed
+}
+
+fn merge_matching_entry_descriptions(result: &mut ManpageResult, incoming: &ManpageEntry) -> bool {
+    let mut changed = false;
+    for existing in &mut result.entries {
+        if switches_overlap(&existing.switch, &incoming.switch) {
+            changed |= merge_entry_description(existing, incoming);
+        }
+    }
+    changed
+}
+
 fn fill_flag_alias_from_help(result: &mut ManpageResult, short: char, long: &str) -> bool {
     if !entry_has_long(result, long) {
         for entry in &mut result.entries {
@@ -633,18 +687,26 @@ fn supplement_result_from_help(result: &mut ManpageResult, help: &ManpageResult)
     }
 
     for help_entry in &help.entries {
+        let mut alias_changed = false;
         match &help_entry.switch {
             OwnedSwitch::Both(short, long) => {
                 if fill_flag_alias_from_help(result, *short, long) {
-                    changed = true;
-                    continue;
+                    alias_changed = true;
                 }
-                if entry_has_short(result, *short) || entry_has_long(result, long) {
+                if entry_overlaps(result, help_entry) {
+                    changed |= alias_changed;
+                    changed |= merge_matching_entry_descriptions(result, help_entry);
                     continue;
                 }
             }
-            OwnedSwitch::Long(long) if entry_has_long(result, long) => continue,
-            OwnedSwitch::Short(short) if entry_has_short(result, *short) => continue,
+            OwnedSwitch::Long(long) if entry_has_long(result, long) => {
+                changed |= merge_matching_entry_descriptions(result, help_entry);
+                continue;
+            }
+            OwnedSwitch::Short(short) if entry_has_short(result, *short) => {
+                changed |= merge_matching_entry_descriptions(result, help_entry);
+                continue;
+            }
             _ => {}
         }
         result.entries.push(help_entry.clone());
@@ -690,6 +752,48 @@ fn supplement_result_from_help(result: &mut ManpageResult, help: &ManpageResult)
         result.normalize();
     }
     changed
+}
+
+fn supplement_result_from_duplicate_manpage(
+    result: &mut ManpageResult,
+    manpage: &ManpageResult,
+) -> bool {
+    let before_positionals = result.positionals.clone();
+    let before_positional_choices = result.positional_choices.clone();
+    let changed = supplement_result_from_help(result, manpage);
+    result.positionals = before_positionals;
+    result.positional_choices = before_positional_choices;
+    changed
+}
+
+fn merge_sources(existing: &str, incoming: &str) -> String {
+    let mut parts: Vec<&str> = existing.split('+').filter(|p| !p.is_empty()).collect();
+    for part in incoming.split('+').filter(|p| !p.is_empty()) {
+        if !parts.contains(&part) {
+            parts.push(part);
+        }
+    }
+    if parts.is_empty() {
+        incoming.to_string()
+    } else {
+        parts.join("+")
+    }
+}
+
+fn merge_indexed_result(
+    dir: &Path,
+    name: &str,
+    incoming_source: &str,
+    incoming: &ManpageResult,
+) -> std::io::Result<bool> {
+    let Some((existing_source, mut existing)) = read_result(dir, name) else {
+        return Ok(false);
+    };
+    if supplement_result_from_duplicate_manpage(&mut existing, incoming) {
+        let source = merge_sources(&existing_source, incoming_source);
+        write_result(dir, name, &source, &existing)?;
+    }
+    Ok(true)
 }
 
 fn supplement_result_from_help_command(
