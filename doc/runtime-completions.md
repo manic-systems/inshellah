@@ -76,7 +76,7 @@ your shell before nushell starts.
 | `INSHELLAH_FLAG_ON_EMPTY` | `0` | when truthy (`1`/`true`/`yes`/`on`), also surface flags on an empty token — i.e. right after a space — alongside subcommands. otherwise an empty token hands off to file/dynamic completion. |
 | `INSHELLAH_DYNAMIC_TIMEOUT_MS` | `5000` | wall-clock budget in milliseconds shared by live provider subprocesses for one completion request. `0` disables this runtime timeout. on timeout the provider returns no candidates and inshellah prints `null` if nothing else can answer. |
 | `INSHELLAH_DYNAMIC_LIMIT` | `200` | cap passed to live providers that support native limits, such as `git for-each-ref --count`, `jj log -n`, and `docker ps --last`. `0` omits those provider-specific limit flags; providers without native caps ignore it. |
-| `INSHELLAH_TIMEOUT_MS` | `200` | per-subprocess timeout for on-the-fly `--help` resolution of uncached commands and subcommands. it also bounds the current `adb` value provider. an explicit `--timeout-ms` flag overrides it. this is separate from `INSHELLAH_DYNAMIC_TIMEOUT_MS`. |
+| `INSHELLAH_TIMEOUT_MS` | `1200` | per-subprocess timeout for on-the-fly `--help` resolution of uncached commands and subcommands. it also bounds the current `adb` value provider. an explicit `--timeout-ms` flag overrides it. this is separate from `INSHELLAH_DYNAMIC_TIMEOUT_MS`. |
 | `INSHELLAH_MAX_COMPLETIONS` | `0` | cap on candidates returned by indexed/static matching, and nushell's `max_results` when sourcing the bundled snippet. `0` imposes no inshellah cap; nushell's own default of 200 still applies. |
 
 ### flag triggering
