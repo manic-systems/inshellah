@@ -298,6 +298,11 @@ fn read_json_result(path: &Path) -> Option<(String, ManpageResult)> {
     Some((source, result_from_json(&v)))
 }
 
+pub fn read_result(dir: &Path, command: &str) -> Option<(String, ManpageResult)> {
+    let path = dir.join(format!("{}.json", filename_of_command(command)));
+    read_json_result(&path)
+}
+
 fn source_from_json_data(data: &str) -> String {
     serde_json::from_str::<Value>(data)
         .ok()
