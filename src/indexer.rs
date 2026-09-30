@@ -3,8 +3,11 @@
 
 mod probe;
 
-use std::collections::HashSet;
+use std::cell::Cell;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -241,6 +244,7 @@ struct ScrapeCtx {
     node_counts: Mutex<std::collections::HashMap<String, usize>>,
     // roots already warned about, so the budget warning fires once each
     truncated: Mutex<HashSet<String>>,
+    root_help: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Debug)]
@@ -327,6 +331,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
     if ctx.indexed.lock().contains(&full_cmd) {
         return;
     }
+    let is_root = job.sub_args.is_empty();
     let probe = RealProbe {
         path: &job.bin_path,
         mandirs: &ctx.mandirs,
@@ -335,14 +340,25 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         // pool bounds total work + per-subprocess timeouts, so no per-job budget
         deadline: Instant::now() + Duration::from_secs(86_400),
         skip_manpage: ctx.help_only.contains(&job.base_cmd) || ctx.help_only.contains(&full_cmd),
+        root_help: Cell::new(if is_root {
+            None
+        } else {
+            ctx.root_help.lock().get(&job.base_cmd).copied()
+        }),
+        echoed: Cell::new(false),
     };
 
     // classify only at top level
-    if job.sub_args.is_empty() && probe.classify() == NodeClass::Skip {
+    if is_root && probe.classify() == NodeClass::Skip {
         return;
     }
 
-    match resolve_one(&probe, &job.base_cmd, &job.sub_args) {
+    let outcome = resolve_one(&probe, &job.base_cmd, &job.sub_args);
+    if is_root && let Some(hash) = probe.root_help.get() {
+        ctx.root_help.lock().insert(job.base_cmd.clone(), hash);
+    }
+
+    match outcome {
         Outcome::Native { nu } => {
             if write_native(&ctx.cache_dir, &full_cmd, &nu).is_ok() {
                 ctx.indexed.lock().insert(full_cmd);
@@ -356,7 +372,9 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         } => {
             if write_result(&ctx.cache_dir, &full_cmd, source, &result).is_ok() {
                 ctx.indexed.lock().insert(full_cmd);
-                enqueue_child_jobs(ctx, &job, &children, submit);
+                if !probe.echoed.get() {
+                    enqueue_child_jobs(ctx, &job, &children, submit);
+                }
             }
         }
     }
@@ -400,6 +418,7 @@ pub fn cmd_index(
             .unwrap_or(DEFAULT_MAX_NODES_PER_ROOT),
         node_counts: Mutex::new(std::collections::HashMap::new()),
         truncated: Mutex::new(HashSet::new()),
+        root_help: Mutex::new(HashMap::new()),
     });
     let pool = ScrapePool::new(num_workers, {
         let ctx = ctx.clone();
@@ -561,33 +580,22 @@ fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str
     any
 }
 
-fn group_subcommands_from_help(
-    path: &Path,
-    sub_args: &[String],
-    timeout_ms: u64,
-) -> Option<Vec<ManpageSubcommand>> {
-    let text = if sub_args.is_empty() {
+fn run_help(path: &Path, sub_args: &[String], timeout_ms: u64) -> Option<String> {
+    if sub_args.is_empty() {
         try_help(path, timeout_ms)
     } else {
         let bin_s = path.to_string_lossy().to_string();
         try_help_args(&bin_s, sub_args, timeout_ms)
-    }?;
-    let help = parse_help_text(&text);
+    }
+}
+
+fn group_subcommands_from_help(text: &str) -> Option<Vec<ManpageSubcommand>> {
+    let help = parse_help_text(text);
     (!help.subcommands.is_empty()).then_some(help.subcommands)
 }
 
-fn help_result_for_command(
-    path: &Path,
-    sub_args: &[String],
-    timeout_ms: u64,
-) -> Option<ManpageResult> {
-    let text = if sub_args.is_empty() {
-        try_help(path, timeout_ms)
-    } else {
-        let bin_s = path.to_string_lossy().to_string();
-        try_help_args(&bin_s, sub_args, timeout_ms)
-    }?;
-    let result = parse_help_text(&text);
+fn help_result_for_command(text: &str, sub_args: &[String]) -> Option<ManpageResult> {
+    let result = parse_help_text(text);
     if let Some(leaf) = sub_args.last()
         && result
             .subcommands
@@ -796,15 +804,24 @@ fn merge_indexed_result(
     Ok(true)
 }
 
+fn supplement_result_from_help_text(
+    result: &mut ManpageResult,
+    text: &str,
+    sub_args: &[String],
+) -> bool {
+    help_result_for_command(text, sub_args)
+        .as_ref()
+        .is_some_and(|help| supplement_result_from_help(result, help))
+}
+
 fn supplement_result_from_help_command(
     result: &mut ManpageResult,
     path: &Path,
     sub_args: &[String],
     timeout_ms: u64,
 ) -> bool {
-    help_result_for_command(path, sub_args, timeout_ms)
-        .as_ref()
-        .is_some_and(|help| supplement_result_from_help(result, help))
+    run_help(path, sub_args, timeout_ms)
+        .is_some_and(|text| supplement_result_from_help_text(result, &text, sub_args))
 }
 
 // group command with a leftover `<command>`/`<subcommands>` placeholder and no
@@ -831,11 +848,27 @@ struct RealProbe<'a> {
     // indexer's `--help-only` list forces straight to `--help`; runtime
     // resolution never sets this.
     skip_manpage: bool,
+    root_help: Cell<Option<u64>>,
+    echoed: Cell<bool>,
 }
 
 impl RealProbe<'_> {
     fn step_timeout(&self) -> u64 {
         self.timeout_ms.min(remaining_ms(self.deadline))
+    }
+
+    // some tools print their root help for any verb; its verbs would fan out again.
+    fn help(&self, sub_args: &[String]) -> Option<String> {
+        let text = run_help(self.path, sub_args, self.step_timeout())?;
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let hash = hasher.finish();
+        if sub_args.is_empty() {
+            self.root_help.set(Some(hash));
+        } else if self.root_help.get() == Some(hash) {
+            self.echoed.set(true);
+        }
+        Some(text)
     }
 }
 
@@ -861,16 +894,12 @@ impl Probe for RealProbe<'_> {
     }
 
     fn help_text(&self, sub_args: &[String]) -> Option<String> {
-        if sub_args.is_empty() {
-            try_help(self.path, self.step_timeout())
-        } else {
-            let bin_s = self.path.to_string_lossy().to_string();
-            try_help_args(&bin_s, sub_args, self.step_timeout())
-        }
+        self.help(sub_args)
     }
 
     fn supplement_from_help(&self, result: &mut ManpageResult, sub_args: &[String]) -> bool {
-        supplement_result_from_help_command(result, self.path, sub_args, self.step_timeout())
+        self.help(sub_args)
+            .is_some_and(|text| supplement_result_from_help_text(result, &text, sub_args))
     }
 
     fn group_children(
@@ -884,7 +913,7 @@ impl Probe for RealProbe<'_> {
         if index_sibling_manpages(self.user_dir, self.mandirs, hyphenated) {
             return None;
         }
-        group_subcommands_from_help(self.path, sub_args, self.step_timeout())
+        group_subcommands_from_help(&self.help(sub_args)?)
     }
 }
 
@@ -918,6 +947,8 @@ pub fn resolve_command_path_and_cache(
         timeout_ms,
         deadline,
         skip_manpage: false,
+        root_help: Cell::new(None),
+        echoed: Cell::new(false),
     };
     let full = resolver::full_cmd(base_cmd, sub_args);
     match resolve_one(&probe, base_cmd, sub_args) {
