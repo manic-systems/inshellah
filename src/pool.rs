@@ -141,6 +141,35 @@ impl<J: Send + 'static> ScrapePool<J> {
     }
 }
 
+/// map `items` across `num_workers` threads, keeping input order in the output.
+pub fn par_map<T: Send, R: Send>(
+    items: Vec<T>,
+    num_workers: usize,
+    f: impl Fn(T) -> R + Sync,
+) -> Vec<R> {
+    let inputs: Vec<Mutex<Option<T>>> = items.into_iter().map(|t| Mutex::new(Some(t))).collect();
+    let outputs: Vec<Mutex<Option<R>>> = inputs.iter().map(|_| Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    thread::scope(|scope| {
+        for _ in 0..num_workers.max(1).min(inputs.len()) {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(input) = inputs.get(i) else {
+                        break;
+                    };
+                    let item = input.lock().take().expect("each index is claimed once");
+                    *outputs[i].lock() = Some(f(item));
+                }
+            });
+        }
+    });
+    outputs
+        .into_iter()
+        .map(|o| o.into_inner().expect("every claimed index stores a result"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

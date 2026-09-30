@@ -18,7 +18,7 @@ use crate::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedSwitch, extract_synopsis_command,
     parse_manpage_string, parse_manpage_with_subs, read_manpage_file,
 };
-use crate::pool::{ScrapePool, Submitter};
+use crate::pool::{ScrapePool, Submitter, par_map};
 use crate::resolver::{self, NodeClass, Outcome, Probe, resolve_node};
 use crate::store::{ensure_dir, parse_nu_completions, read_result, write_file, write_native, write_result};
 use crate::subprocess::run_cmd;
@@ -482,14 +482,25 @@ pub fn cmd_index(
         let blen = b.file_name().map(|s| s.len()).unwrap_or(0);
         alen.cmp(&blen).then_with(|| a.cmp(b))
     });
-    for manpage_path in manpages {
-        let Some((name, mut result, sub_sections)) = process_manpage(&manpage_path) else {
+    let processed = par_map(manpages.iter().collect(), num_workers, |path: &PathBuf| {
+        process_manpage(path)
+    });
+
+    // serial and in sort order so dedupe and overwrites match a sequential pass.
+    let mut plan = WritePlan::default();
+    let help_for = |name: &str| {
+        let (base_cmd, sub_args) = split_command_for_binary(name)?;
+        Some((binary_paths.get(base_cmd)?.clone(), sub_args))
+    };
+
+    for (manpage_path, processed) in manpages.iter().zip(processed) {
+        let Some((name, result, sub_sections)) = processed else {
             continue;
         };
         if !manpage_name_has_installed_command(&name, &binary_names) {
             continue;
         }
-        let base_cmd = cmd_name_of_manpage(&manpage_path);
+        let base_cmd = cmd_name_of_manpage(manpage_path);
         if help_only.contains(&name) {
             continue;
         }
@@ -497,6 +508,10 @@ pub fn cmd_index(
             continue;
         }
         if indexed.contains(&name) {
+            if let Some(write) = plan.get_mut(&name) {
+                write.duplicates.push(result);
+                continue;
+            }
             if merge_indexed_result(dir, &name, "manpage", &result)? {
                 continue;
             }
@@ -518,49 +533,50 @@ pub fn cmd_index(
         if nushell_commands.contains(&name) {
             continue;
         }
-        let mut source = "manpage";
-        if let Some((base_cmd, sub_args)) = split_command_for_binary(&name)
-            && let Some(path) = binary_paths.get(base_cmd)
-            && supplement_result_from_help_command(&mut result, path, &sub_args, timeout_ms)
-        {
-            source = "manpage+help";
-        }
-        write_result(dir, &name, source, &result)?;
         indexed.insert(name.clone());
-        for (sub_cmd, sub_result) in &sub_sections {
-            if indexed.contains(sub_cmd) {
+        plan.push(PlannedWrite {
+            help: help_for(&name),
+            stubs: sub_sections.is_empty(),
+            name,
+            result,
+            duplicates: Vec::new(),
+        });
+        for (sub_cmd, sub_result) in sub_sections {
+            if indexed.contains(&sub_cmd) {
                 continue;
             }
-            let mut sub_result = sub_result.clone();
-            let mut sub_source = "manpage";
-            if let Some((base_cmd, sub_args)) = split_command_for_binary(sub_cmd)
-                && let Some(path) = binary_paths.get(base_cmd)
-                && supplement_result_from_help_command(&mut sub_result, path, &sub_args, timeout_ms)
-            {
-                sub_source = "manpage+help";
-            }
-            write_result(dir, sub_cmd, sub_source, &sub_result)?;
             indexed.insert(sub_cmd.clone());
+            plan.push(PlannedWrite {
+                help: help_for(&sub_cmd),
+                stubs: false,
+                name: sub_cmd,
+                result: sub_result,
+                duplicates: Vec::new(),
+            });
         }
-        // COMMANDS-section subcommands lacking a SUBCOMMAND section or own
-        // manpage get a desc-only stub so the completer treats them as leaves.
-        // left out of `indexed` so a real per-subcommand manpage overwrites it.
-        if sub_sections.is_empty() {
-            for sc in &result.subcommands {
-                let sub_cmd = format!("{name} {}", sc.name);
-                if indexed.contains(&sub_cmd) {
-                    continue;
-                }
-                let stub = ManpageResult {
-                    entries: Vec::new(),
-                    subcommands: Vec::new(),
-                    positional_choices: Vec::new(),
-                    positionals: Default::default(),
-                    description: sc.desc.clone(),
-                };
-                write_result(dir, &sub_cmd, "manpage", &stub)?;
-            }
+    }
+
+    // COMMANDS-section subcommands lacking a SUBCOMMAND section or own
+    // manpage get a desc-only stub so the completer treats them as leaves.
+    // taken after the `--help` supplement, which often supplies the list.
+    let plan: Vec<PlannedWrite> = plan.writes.into_iter().flatten().collect();
+    let mut stubs: Vec<(String, String)> = Vec::new();
+    for written in par_map(plan, num_workers, |write| write.run(dir, timeout_ms)) {
+        stubs.extend(written?);
+    }
+    let mut stub_at: HashMap<String, usize> = HashMap::new();
+    for (at, (sub_cmd, _)) in stubs.iter().enumerate() {
+        stub_at.insert(sub_cmd.clone(), at);
+    }
+    for (at, (sub_cmd, description)) in stubs.into_iter().enumerate() {
+        if indexed.contains(&sub_cmd) || stub_at[&sub_cmd] != at {
+            continue;
         }
+        let stub = ManpageResult {
+            description,
+            ..ManpageResult::default()
+        };
+        write_result(dir, &sub_cmd, "manpage", &stub)?;
     }
 
     println!("indexed {} commands into {}", indexed.len(), dir.display());
@@ -832,6 +848,60 @@ fn merge_indexed_result(
         write_result(dir, name, &source, &existing)?;
     }
     Ok(true)
+}
+
+struct PlannedWrite {
+    name: String,
+    result: ManpageResult,
+    help: Option<(PathBuf, Vec<String>)>,
+    stubs: bool,
+    duplicates: Vec<ManpageResult>,
+}
+
+#[derive(Default)]
+struct WritePlan {
+    writes: Vec<Option<PlannedWrite>>,
+    at: HashMap<String, usize>,
+}
+
+impl WritePlan {
+    fn push(&mut self, write: PlannedWrite) {
+        if let Some(stale) = self.at.insert(write.name.clone(), self.writes.len()) {
+            self.writes[stale] = None;
+        }
+        self.writes.push(Some(write));
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut PlannedWrite> {
+        self.writes[*self.at.get(name)?].as_mut()
+    }
+}
+
+impl PlannedWrite {
+    fn run(mut self, dir: &Path, timeout_ms: u64) -> std::io::Result<Vec<(String, String)>> {
+        let mut source = String::from("manpage");
+        if let Some((path, sub_args)) = &self.help
+            && supplement_result_from_help_command(&mut self.result, path, sub_args, timeout_ms)
+        {
+            source = String::from("manpage+help");
+        }
+        let stubs = if self.stubs {
+            self.result
+                .subcommands
+                .iter()
+                .map(|sc| (format!("{} {}", self.name, sc.name), sc.desc.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for duplicate in &self.duplicates {
+            if supplement_result_from_duplicate_manpage(&mut self.result, duplicate) {
+                source = merge_sources(&source, "manpage");
+            }
+        }
+        write_result(dir, &self.name, &source, &self.result)?;
+        Ok(stubs)
+    }
 }
 
 fn supplement_result_from_help_text(
