@@ -99,8 +99,8 @@ in
       example = lib.literalExpression "[ pkgs.git pkgs.clang ]";
       description = ''
         additional packages to scrape for completions alongside the system
-        profile. each package's store path is passed to `inshellah index`
-        via `--prefix`, so it must contain bin/ and/or share/man/.
+        profile. each package is indexed on its own and merged in, so it must
+        contain bin/ and/or share/man/.
 
         useful on macOS, where the active developer toolchain (git, clang,
         …) lives outside the nix system profile behind /usr/bin shims:
@@ -274,19 +274,72 @@ in
         helpOnlyFlag = lib.optionalString (cfg.helpOnlyCommands != [ ]) " --help-only ${helpOnlyFile}";
         timeoutFlag = lib.optionalString (cfg.timeoutMs != null) " --timeout-ms ${toString cfg.timeoutMs}";
         workersFlag = lib.optionalString (cfg.workers != null) " --workers ${toString cfg.workers}";
-        # roll the explicit extra packages up into a single colon-separated
-        # --prefix so they're scraped alongside the system profile.
-        prefixFlag = lib.optionalString (cfg.extraScrapePackages != [ ]) (
-          " --prefix " + lib.concatStringsSep ":" (map toString cfg.extraScrapePackages)
+        indexFlags = "${helpOnlyFlag}${timeoutFlag}${workersFlag}";
+        flags = "${ignoreFlag}${indexFlags}";
+        installedOutputs =
+          pkg:
+          let
+            main = pkg.outputName or "out";
+            wanted = lib.unique ((pkg.meta.outputsToInstall or [ main ]) ++ [ "man" ]);
+          in
+          map (o: if o == main then pkg else pkg.${o}) (
+            lib.filter (o: lib.elem o (pkg.outputs or [ main ])) wanted
+          );
+        indexFor =
+          pkg:
+          let
+            prefixes = installedOutputs pkg;
+          in
+          {
+            inherit prefixes;
+            # some tools put their own bin/ on PATH before exec'ing `man` for
+            # `--help`, so `man` sits beside them as in the system profile.
+            index = pkgs.runCommand "inshellah-index-${pkg.name}" { } ''
+              mkdir -p $out profile/bin profile/share/man
+              for prefix in ${lib.escapeShellArgs prefixes}; do
+                if [ -d "$prefix/bin" ]; then
+                  for bin in "$prefix"/bin/*; do
+                    [ -e "profile/bin/$(basename "$bin")" ] || ln -s "$bin" profile/bin/
+                  done
+                fi
+                if [ -d "$prefix/share/man" ]; then
+                  cp -rsn "$prefix/share/man/." profile/share/man/
+                  chmod -R u+w profile/share/man
+                fi
+              done
+              [ -n "$(ls -A profile/bin)" ] || exit 0
+
+              touch ignore
+              ${lib.optionalString (cfg.ignoreCommands != [ ]) "cat ${ignoreFile} > ignore"}
+              for helper in ${pkgs.man}/bin/*; do
+                name=$(basename "$helper")
+                if [ ! -e "profile/bin/$name" ]; then
+                  ln -s "$helper" profile/bin/
+                  echo "$name" >> ignore
+                fi
+              done
+
+              PATH="${cfg.nushellPackage}/bin:$PATH" \
+                ${inshellah} index "$PWD/profile" --dir $out --ignore ignore${indexFlags}
+            '';
+          };
+        sourcesFile = pkgs.writeText "inshellah-sources" (
+          lib.concatMapStrings (
+            pkg:
+            let
+              inherit (indexFor pkg) prefixes index;
+            in
+            lib.concatMapStrings (prefix: "${prefix} ${index}\n") prefixes
+          ) (lib.filter lib.isDerivation (config.environment.systemPackages ++ cfg.extraScrapePackages))
         );
         snippetFile = pkgs.writeText "inshellah-completer.nu" cfg.snippet;
       in
       ''
         mkdir -p ${destDir}
 
-        if [ -d "$out/bin" ] && [ -d "$out/share/man" ]; then
+        if [ -d "$out/bin" ]; then
           PATH="${cfg.nushellPackage}/bin:$PATH" \
-            ${inshellah} index "$out" --dir ${destDir}${ignoreFlag}${helpOnlyFlag}${prefixFlag}${timeoutFlag}${workersFlag}
+            ${inshellah} merge "$out" --dir ${destDir} --sources ${sourcesFile}${flags}
         fi
 
         find ${destDir} -maxdepth 1 -empty -delete

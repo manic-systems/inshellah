@@ -30,6 +30,11 @@ Usage:
       --workers N       parallel scrape workers (default: cpu count)
       (env INSHELLAH_MAX_INDEX_NODES caps subcommand nodes per root command;
        default 10000, bounds runaway recursion on pathological trees)
+  inshellah merge PROFILE --dir PATH --sources FILE [--ignore FILE]
+                          [--help-only FILE] [--timeout-ms N] [--workers N]
+      Merge per-package indexes for a profile whose bin/ links into them.
+      FILE lists one `PACKAGE INDEX` pair per line, in priority order.
+      Manpages under PROFILE/share/man are then applied profile-wide.
   inshellah complete CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
       Nushell custom completer. Outputs JSON completion candidates.
       Falls back to --help resolution if command is not indexed.
@@ -75,6 +80,23 @@ enum Cli {
         help_only: Option<PathBuf>,
         #[pound(long = "prefix", value_name = "PATHS")]
         extra_prefixes: Vec<String>,
+        #[pound(long)]
+        timeout_ms: Option<String>,
+        #[pound(long)]
+        workers: Option<String>,
+    },
+    /// merge per-package indexes for a profile
+    Merge {
+        #[pound(positional, value_name = "PROFILE")]
+        profile: PathBuf,
+        #[pound(long)]
+        dir: PathBuf,
+        #[pound(long)]
+        sources: PathBuf,
+        #[pound(long)]
+        ignore: Option<PathBuf>,
+        #[pound(long)]
+        help_only: Option<PathBuf>,
         #[pound(long)]
         timeout_ms: Option<String>,
         #[pound(long)]
@@ -205,6 +227,29 @@ fn main() {
             );
             if let Err(e) = commands::index::run(args) {
                 eprintln!("index failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        Cli::Merge {
+            profile,
+            dir,
+            sources,
+            ignore,
+            help_only,
+            timeout_ms,
+            workers,
+        } => {
+            let args = commands::merge::Args {
+                profile,
+                dir,
+                sources,
+                ignore,
+                help_only,
+                timeout_ms,
+                workers,
+            };
+            if let Err(e) = commands::merge::run(args) {
+                eprintln!("merge failed: {e}");
                 std::process::exit(1);
             }
         }
