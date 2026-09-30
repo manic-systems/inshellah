@@ -147,6 +147,9 @@ pub fn load_ignorelist(path: &Path) -> HashSet<String> {
 
 const NUSHELL_NATIVE_COMMANDS_FILE: &str = "nushell-native-commands";
 
+// one call that fails the whole index, and cross builds run `nu` under qemu.
+const NUSHELL_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
+
 fn list_binaries(
     bindirs: &[PathBuf],
     nushell_commands: &HashSet<String>,
@@ -177,7 +180,7 @@ fn list_binaries(
     all
 }
 
-fn discover_nushell_native_commands(timeout_ms: u64) -> std::io::Result<HashSet<String>> {
+fn discover_nushell_native_commands() -> std::io::Result<HashSet<String>> {
     let script =
         r#"scope commands | where type in [built-in keyword] | get name | sort | to json --raw"#;
     let args = vec![
@@ -187,7 +190,7 @@ fn discover_nushell_native_commands(timeout_ms: u64) -> std::io::Result<HashSet<
         "--commands".to_string(),
         script.to_string(),
     ];
-    let out = run_cmd(&args, timeout_ms).ok_or_else(|| {
+    let out = run_cmd(&args, NUSHELL_DISCOVERY_TIMEOUT_MS).ok_or_else(|| {
         std::io::Error::other(
             "failed to run `nu` for Nushell native command discovery during indexing",
         )
@@ -422,7 +425,7 @@ pub fn cmd_index(
     num_workers: usize,
 ) -> std::io::Result<()> {
     ensure_dir(dir)?;
-    let nushell_commands = discover_nushell_native_commands(timeout_ms)?;
+    let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
     let binaries = list_binaries(bindirs, &nushell_commands);
     let profile = ProfileBinaries::new(&binaries, ignorelist);
@@ -456,7 +459,7 @@ pub fn cmd_merge(
     num_workers: usize,
 ) -> std::io::Result<()> {
     ensure_dir(dir)?;
-    let nushell_commands = discover_nushell_native_commands(timeout_ms)?;
+    let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
     let binaries = list_binaries(&[profile_dir.join("bin")], &nushell_commands);
     let profile = ProfileBinaries::new(&binaries, ignorelist);
