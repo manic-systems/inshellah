@@ -229,14 +229,22 @@ fn try_help_until(bin: &Path, timeout_ms: u64, deadline: Instant) -> Option<Stri
         }
         let mut args = vec![bin_s.clone()];
         args.extend(variant.iter().map(|s| s.to_string()));
+        let started = Instant::now();
         if let Some(out) = run_cmd(&args, attempt_ms) {
             let cleaned = fast_strip_ansi::strip_ansi_string(&out);
             if !cleaned.trim().is_empty() {
                 return Some(cleaned.to_string());
             }
+        } else if timed_out(started, attempt_ms) {
+            return None;
         }
     }
     None
+}
+
+// a hung `--help` hangs on `-h` too.
+fn timed_out(started: Instant, timeout_ms: u64) -> bool {
+    started.elapsed() >= Duration::from_millis(timeout_ms)
 }
 
 pub fn try_help(bin: &Path, timeout_ms: u64) -> Option<String> {
@@ -324,7 +332,11 @@ pub fn try_help_args(bin_s: &str, sub_args: &[String], timeout_ms: u64) -> Optio
     let mut primary_args: Vec<String> = vec![bin_s.to_string()];
     primary_args.extend(sub_args.iter().cloned());
     primary_args.push("--help".to_string());
+    let started = Instant::now();
     let primary = run_cmd(&primary_args, timeout_ms);
+    if primary.is_none() && timed_out(started, timeout_ms) {
+        return None;
+    }
     let primary_text = primary
         .as_deref()
         .map(|s| fast_strip_ansi::strip_ansi_string(s).into_owned());

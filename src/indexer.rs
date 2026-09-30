@@ -245,6 +245,16 @@ struct ScrapeCtx {
     // roots already warned about, so the budget warning fires once each
     truncated: Mutex<HashSet<String>>,
     root_help: Mutex<HashMap<String, u64>>,
+    subtree_health: Mutex<HashMap<String, SubtreeHealth>>,
+}
+
+// a loaded box times out healthy tools too, so only roots where nothing answered.
+const MAX_TIMEOUTS_PER_ROOT: u32 = 3;
+
+#[derive(Default)]
+struct SubtreeHealth {
+    timeouts: u32,
+    answered: bool,
 }
 
 #[derive(Debug)]
@@ -332,6 +342,15 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         return;
     }
     let is_root = job.sub_args.is_empty();
+    if !is_root
+        && ctx
+            .subtree_health
+            .lock()
+            .get(&job.base_cmd)
+            .is_some_and(|health| !health.answered && health.timeouts >= MAX_TIMEOUTS_PER_ROOT)
+    {
+        return;
+    }
     let probe = RealProbe {
         path: &job.bin_path,
         mandirs: &ctx.mandirs,
@@ -345,6 +364,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         } else {
             ctx.root_help.lock().get(&job.base_cmd).copied()
         }),
+        timed_out: Cell::new(false),
         echoed: Cell::new(false),
     };
 
@@ -356,6 +376,15 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
     let outcome = resolve_one(&probe, &job.base_cmd, &job.sub_args);
     if is_root && let Some(hash) = probe.root_help.get() {
         ctx.root_help.lock().insert(job.base_cmd.clone(), hash);
+    }
+    if !is_root {
+        let mut health = ctx.subtree_health.lock();
+        let health = health.entry(job.base_cmd.clone()).or_default();
+        if probe.timed_out.get() {
+            health.timeouts += 1;
+        } else if matches!(outcome, Outcome::Content { .. }) {
+            health.answered = true;
+        }
     }
 
     match outcome {
@@ -419,6 +448,7 @@ pub fn cmd_index(
         node_counts: Mutex::new(std::collections::HashMap::new()),
         truncated: Mutex::new(HashSet::new()),
         root_help: Mutex::new(HashMap::new()),
+        subtree_health: Mutex::new(HashMap::new()),
     });
     let pool = ScrapePool::new(num_workers, {
         let ctx = ctx.clone();
@@ -849,6 +879,7 @@ struct RealProbe<'a> {
     // resolution never sets this.
     skip_manpage: bool,
     root_help: Cell<Option<u64>>,
+    timed_out: Cell<bool>,
     echoed: Cell<bool>,
 }
 
@@ -859,7 +890,14 @@ impl RealProbe<'_> {
 
     // some tools print their root help for any verb; its verbs would fan out again.
     fn help(&self, sub_args: &[String]) -> Option<String> {
-        let text = run_help(self.path, sub_args, self.step_timeout())?;
+        let timeout_ms = self.step_timeout();
+        let started = Instant::now();
+        let Some(text) = run_help(self.path, sub_args, timeout_ms) else {
+            if started.elapsed() >= Duration::from_millis(timeout_ms) {
+                self.timed_out.set(true);
+            }
+            return None;
+        };
         let mut hasher = DefaultHasher::new();
         text.hash(&mut hasher);
         let hash = hasher.finish();
@@ -948,6 +986,7 @@ pub fn resolve_command_path_and_cache(
         deadline,
         skip_manpage: false,
         root_help: Cell::new(None),
+        timed_out: Cell::new(false),
         echoed: Cell::new(false),
     };
     let full = resolver::full_cmd(base_cmd, sub_args);
