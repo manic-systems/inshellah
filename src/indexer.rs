@@ -20,7 +20,10 @@ use crate::parsers::manpage::{
 };
 use crate::pool::{ScrapePool, Submitter, par_map};
 use crate::resolver::{self, NodeClass, Outcome, Probe, resolve_node};
-use crate::store::{ensure_dir, parse_nu_completions, read_result, write_file, write_native, write_result};
+use crate::store::{
+    command_of_filename, ensure_dir, parse_nu_completions, read_result, write_file, write_native,
+    write_result,
+};
 use crate::subprocess::run_cmd;
 
 use self::probe::{Classify, classify_binary, remaining_ms, skip_name, try_native_completion};
@@ -422,165 +425,338 @@ pub fn cmd_index(
     let nushell_commands = discover_nushell_native_commands(timeout_ms)?;
     write_nushell_native_commands(dir, &nushell_commands)?;
     let binaries = list_binaries(bindirs, &nushell_commands);
-    let binary_names: HashSet<String> = binaries
-        .iter()
-        .filter(|(name, _)| !ignorelist.contains(name))
-        .map(|(name, _)| name.clone())
-        .collect();
-    let binary_paths: std::collections::HashMap<String, PathBuf> = binaries
-        .iter()
-        .filter(|(name, _)| !ignorelist.contains(name))
-        .cloned()
-        .collect();
+    let profile = ProfileBinaries::new(&binaries, ignorelist);
+    let mut indexed = ScrapeCtx::new(dir, mandirs, help_only, timeout_ms)
+        .scrape(profile.paths.iter(), num_workers);
 
-    let ctx = Arc::new(ScrapeCtx {
-        cache_dir: dir.to_path_buf(),
-        mandirs: mandirs.to_vec(),
-        help_only: help_only.clone(),
-        indexed: Mutex::new(HashSet::new()),
+    ManpagePass {
+        dir,
+        mandirs,
+        profile: &profile,
+        help_only,
+        nushell_commands: &nushell_commands,
         timeout_ms,
-        // 0/unparseable -> default; never unbounded
-        node_budget: std::env::var("INSHELLAH_MAX_INDEX_NODES")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_MAX_NODES_PER_ROOT),
-        node_counts: Mutex::new(std::collections::HashMap::new()),
-        truncated: Mutex::new(HashSet::new()),
-        root_help: Mutex::new(HashMap::new()),
-        subtree_health: Mutex::new(HashMap::new()),
-    });
-    let pool = ScrapePool::new(num_workers, {
-        let ctx = ctx.clone();
-        move |job: PoolJob, submit: &Submitter<PoolJob>| {
-            process_pool_job(&ctx, job, submit);
-        }
-    });
-    for (name, path) in &binaries {
-        if ignorelist.contains(name) {
-            continue;
-        }
-        pool.submit(PoolJob {
-            bin_path: path.clone(),
-            base_cmd: name.clone(),
-            sub_args: Vec::new(),
-            depth: 0,
-        });
+        num_workers,
     }
-    pool.wait();
-    // no workers alive, so the Arc has a single strong ref
-    let mut indexed: HashSet<String> = Arc::try_unwrap(ctx)
-        .ok()
-        .map(|c| c.indexed.into_inner())
-        .unwrap_or_default();
-
-    // shorter filenames sort first so parents precede subpages (nix-env.1
-    // before nix-env-install.1)
-    let mut manpages = list_manpages(mandirs);
-    manpages.sort_by(|a, b| {
-        let alen = a.file_name().map(|s| s.len()).unwrap_or(0);
-        let blen = b.file_name().map(|s| s.len()).unwrap_or(0);
-        alen.cmp(&blen).then_with(|| a.cmp(b))
-    });
-    let processed = par_map(manpages.iter().collect(), num_workers, |path: &PathBuf| {
-        process_manpage(path)
-    });
-
-    // serial and in sort order so dedupe and overwrites match a sequential pass.
-    let mut plan = WritePlan::default();
-    let help_for = |name: &str| {
-        let (base_cmd, sub_args) = split_command_for_binary(name)?;
-        Some((binary_paths.get(base_cmd)?.clone(), sub_args))
-    };
-
-    for (manpage_path, processed) in manpages.iter().zip(processed) {
-        let Some((name, result, sub_sections)) = processed else {
-            continue;
-        };
-        if !manpage_name_has_installed_command(&name, &binary_names) {
-            continue;
-        }
-        let base_cmd = cmd_name_of_manpage(manpage_path);
-        if help_only.contains(&name) {
-            continue;
-        }
-        if nushell_commands.contains(&name) {
-            continue;
-        }
-        if indexed.contains(&name) {
-            if let Some(write) = plan.get_mut(&name) {
-                write.duplicates.push(result);
-                continue;
-            }
-            if merge_indexed_result(dir, &name, "manpage", &result)? {
-                continue;
-            }
-            if name != base_cmd {
-                eprintln!(
-                    "warning: {} extracted cmd \"{}\" (already indexed), skipping",
-                    manpage_path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(""),
-                    name
-                );
-            }
-            continue;
-        }
-        if help_only.contains(&name) {
-            continue;
-        }
-        if nushell_commands.contains(&name) {
-            continue;
-        }
-        indexed.insert(name.clone());
-        plan.push(PlannedWrite {
-            help: help_for(&name),
-            stubs: sub_sections.is_empty(),
-            name,
-            result,
-            duplicates: Vec::new(),
-        });
-        for (sub_cmd, sub_result) in sub_sections {
-            if indexed.contains(&sub_cmd) {
-                continue;
-            }
-            indexed.insert(sub_cmd.clone());
-            plan.push(PlannedWrite {
-                help: help_for(&sub_cmd),
-                stubs: false,
-                name: sub_cmd,
-                result: sub_result,
-                duplicates: Vec::new(),
-            });
-        }
-    }
-
-    // COMMANDS-section subcommands lacking a SUBCOMMAND section or own
-    // manpage get a desc-only stub so the completer treats them as leaves.
-    // taken after the `--help` supplement, which often supplies the list.
-    let plan: Vec<PlannedWrite> = plan.writes.into_iter().flatten().collect();
-    let mut stubs: Vec<(String, String)> = Vec::new();
-    for written in par_map(plan, num_workers, |write| write.run(dir, timeout_ms)) {
-        stubs.extend(written?);
-    }
-    let mut stub_at: HashMap<String, usize> = HashMap::new();
-    for (at, (sub_cmd, _)) in stubs.iter().enumerate() {
-        stub_at.insert(sub_cmd.clone(), at);
-    }
-    for (at, (sub_cmd, description)) in stubs.into_iter().enumerate() {
-        if indexed.contains(&sub_cmd) || stub_at[&sub_cmd] != at {
-            continue;
-        }
-        let stub = ManpageResult {
-            description,
-            ..ManpageResult::default()
-        };
-        write_result(dir, &sub_cmd, "manpage", &stub)?;
-    }
+    .run(&mut indexed)?;
 
     println!("indexed {} commands into {}", indexed.len(), dir.display());
     Ok(())
+}
+
+/// each command's files come from the package owning the profile's binary for
+/// its root, else from the first source that has them.
+pub fn cmd_merge(
+    profile_dir: &Path,
+    sources: &[(PathBuf, PathBuf)],
+    ignorelist: &HashSet<String>,
+    help_only: &HashSet<String>,
+    dir: &Path,
+    timeout_ms: u64,
+    num_workers: usize,
+) -> std::io::Result<()> {
+    ensure_dir(dir)?;
+    let nushell_commands = discover_nushell_native_commands(timeout_ms)?;
+    write_nushell_native_commands(dir, &nushell_commands)?;
+    let binaries = list_binaries(&[profile_dir.join("bin")], &nushell_commands);
+    let profile = ProfileBinaries::new(&binaries, ignorelist);
+    let mandirs = [profile_dir.join("share/man")];
+
+    let owner_of = |root: &str| -> Option<&Path> {
+        let target = fs::read_link(profile.paths.get(root)?).ok()?;
+        sources
+            .iter()
+            .find(|(package, _)| target.starts_with(package))
+            .map(|(_, index)| index.as_path())
+    };
+
+    let mut claimed = HashMap::<String, PathBuf>::new();
+    let mut owned = Vec::<(PathBuf, String, String)>::new();
+
+    let mut seen = HashSet::<&PathBuf>::new();
+
+    for (_, index) in sources {
+        if !seen.insert(index) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(index) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let (Some(stem), Some(ext)) = (
+                path.file_stem().and_then(|s| s.to_str()),
+                path.extension().and_then(|s| s.to_str()),
+            ) else {
+                continue;
+            };
+            if ext != "json" && ext != "nu" {
+                continue;
+            }
+            let cmd = command_of_filename(stem);
+            let root = cmd.split(' ').next().unwrap_or_default().to_string();
+            let owner = match owner_of(&root) {
+                Some(owner) => owner.to_path_buf(),
+                None => claimed
+                    .entry(root.clone())
+                    .or_insert_with(|| index.clone())
+                    .clone(),
+            };
+            if owner == *index {
+                owned.push((path, cmd, root));
+            }
+        }
+    }
+
+    // wrapper packages ship no manpage, so their index fell back to `--help`.
+    let rescrape: HashMap<&String, &PathBuf> = owned
+        .iter()
+        .filter(|(path, cmd, root)| {
+            cmd == root
+                && path.extension().is_some_and(|ext| ext == "json")
+                && find_manpage_path(&mandirs, cmd).is_some()
+                && path
+                    .parent()
+                    .and_then(|index| read_result(index, cmd))
+                    .is_some_and(|(source, _)| source == "help")
+        })
+        .filter_map(|(_, cmd, _)| profile.paths.get_key_value(cmd))
+        .collect();
+    for (path, _, root) in &owned {
+        if !rescrape.contains_key(root) {
+            fs::copy(path, dir.join(path.file_name().unwrap_or_default()))?;
+        }
+    }
+    let mut indexed: HashSet<String> = owned
+        .into_iter()
+        .filter(|(_, _, root)| !rescrape.contains_key(root))
+        .map(|(_, cmd, _)| cmd)
+        .collect();
+    indexed.extend(
+        ScrapeCtx::new(dir, &mandirs, help_only, timeout_ms)
+            .scrape(rescrape.into_iter(), num_workers),
+    );
+
+    ManpagePass {
+        dir,
+        mandirs: &mandirs,
+        profile: &profile,
+        help_only,
+        nushell_commands: &nushell_commands,
+        timeout_ms,
+        num_workers,
+    }
+    .run(&mut indexed)?;
+
+    println!("merged {} commands into {}", indexed.len(), dir.display());
+    Ok(())
+}
+
+impl ScrapeCtx {
+    fn new(dir: &Path, mandirs: &[PathBuf], help_only: &HashSet<String>, timeout_ms: u64) -> Self {
+        Self {
+            cache_dir: dir.to_path_buf(),
+            mandirs: mandirs.to_vec(),
+            help_only: help_only.clone(),
+            indexed: Mutex::new(HashSet::new()),
+            timeout_ms,
+            // 0/unparseable -> default; never unbounded
+            node_budget: std::env::var("INSHELLAH_MAX_INDEX_NODES")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(DEFAULT_MAX_NODES_PER_ROOT),
+            node_counts: Mutex::new(std::collections::HashMap::new()),
+            truncated: Mutex::new(HashSet::new()),
+            root_help: Mutex::new(HashMap::new()),
+            subtree_health: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn scrape<'a>(
+        self,
+        roots: impl Iterator<Item = (&'a String, &'a PathBuf)>,
+        num_workers: usize,
+    ) -> HashSet<String> {
+        let ctx = Arc::new(self);
+        let pool = ScrapePool::new(num_workers, {
+            let ctx = ctx.clone();
+            move |job: PoolJob, submit: &Submitter<PoolJob>| {
+                process_pool_job(&ctx, job, submit);
+            }
+        });
+        for (name, path) in roots {
+            pool.submit(PoolJob {
+                bin_path: path.clone(),
+                base_cmd: name.clone(),
+                sub_args: Vec::new(),
+                depth: 0,
+            });
+        }
+        pool.wait();
+        // no workers alive, so the Arc has a single strong ref
+        Arc::try_unwrap(ctx)
+            .ok()
+            .map(|c| c.indexed.into_inner())
+            .unwrap_or_default()
+    }
+}
+
+struct ProfileBinaries {
+    names: HashSet<String>,
+    paths: HashMap<String, PathBuf>,
+}
+
+impl ProfileBinaries {
+    fn new(binaries: &[(String, PathBuf)], ignorelist: &HashSet<String>) -> Self {
+        let paths: HashMap<String, PathBuf> = binaries
+            .iter()
+            .filter(|(name, _)| !ignorelist.contains(name))
+            .cloned()
+            .collect();
+        Self {
+            names: paths.keys().cloned().collect(),
+            paths,
+        }
+    }
+}
+
+struct ManpagePass<'a> {
+    dir: &'a Path,
+    mandirs: &'a [PathBuf],
+    profile: &'a ProfileBinaries,
+    help_only: &'a HashSet<String>,
+    nushell_commands: &'a HashSet<String>,
+    timeout_ms: u64,
+    num_workers: usize,
+}
+
+impl ManpagePass<'_> {
+    fn run(&self, indexed: &mut HashSet<String>) -> std::io::Result<()> {
+        let Self {
+            dir,
+            mandirs,
+            profile,
+            help_only,
+            nushell_commands,
+            timeout_ms,
+            num_workers,
+        } = *self;
+        let binary_names = &profile.names;
+        let binary_paths = &profile.paths;
+
+        // shorter filenames sort first so parents precede subpages (nix-env.1
+        // before nix-env-install.1)
+        let mut manpages = list_manpages(mandirs);
+        manpages.sort_by(|a, b| {
+            let alen = a.file_name().map(|s| s.len()).unwrap_or(0);
+            let blen = b.file_name().map(|s| s.len()).unwrap_or(0);
+            alen.cmp(&blen).then_with(|| a.cmp(b))
+        });
+        let processed = par_map(manpages.iter().collect(), num_workers, |path: &PathBuf| {
+            process_manpage(path)
+        });
+
+        // serial and in sort order so dedupe and overwrites match a sequential pass.
+        let mut plan = WritePlan::default();
+        let help_for = |name: &str| {
+            let (base_cmd, sub_args) = split_command_for_binary(name)?;
+            Some((binary_paths.get(base_cmd)?.clone(), sub_args))
+        };
+
+        for (manpage_path, processed) in manpages.iter().zip(processed) {
+            let Some((name, result, sub_sections)) = processed else {
+                continue;
+            };
+            if !manpage_name_has_installed_command(&name, binary_names) {
+                continue;
+            }
+            let base_cmd = cmd_name_of_manpage(manpage_path);
+            if help_only.contains(&name) {
+                continue;
+            }
+            if nushell_commands.contains(&name) {
+                continue;
+            }
+            if indexed.contains(&name) {
+                if let Some(write) = plan.get_mut(&name) {
+                    write.duplicates.push(result);
+                    continue;
+                }
+                if merge_indexed_result(dir, &name, "manpage", &result)? {
+                    continue;
+                }
+                if name != base_cmd {
+                    eprintln!(
+                        "warning: {} extracted cmd \"{}\" (already indexed), skipping",
+                        manpage_path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(""),
+                        name
+                    );
+                }
+                continue;
+            }
+            if help_only.contains(&name) {
+                continue;
+            }
+            if nushell_commands.contains(&name) {
+                continue;
+            }
+            indexed.insert(name.clone());
+            plan.push(PlannedWrite {
+                help: help_for(&name),
+                stubs: sub_sections.is_empty(),
+                name,
+                result,
+                duplicates: Vec::new(),
+            });
+            for (sub_cmd, sub_result) in sub_sections {
+                if indexed.contains(&sub_cmd) {
+                    continue;
+                }
+                indexed.insert(sub_cmd.clone());
+                plan.push(PlannedWrite {
+                    help: help_for(&sub_cmd),
+                    stubs: false,
+                    name: sub_cmd,
+                    result: sub_result,
+                    duplicates: Vec::new(),
+                });
+            }
+        }
+
+        // COMMANDS-section subcommands lacking a SUBCOMMAND section or own
+        // manpage get a desc-only stub so the completer treats them as leaves.
+        // taken after the `--help` supplement, which often supplies the list.
+        let plan: Vec<PlannedWrite> = plan.writes.into_iter().flatten().collect();
+        let mut stubs: Vec<(String, String)> = Vec::new();
+        for written in par_map(plan, num_workers, |write| write.run(dir, timeout_ms)) {
+            stubs.extend(written?);
+        }
+        let mut stub_at: HashMap<String, usize> = HashMap::new();
+        for (at, (sub_cmd, _)) in stubs.iter().enumerate() {
+            stub_at.insert(sub_cmd.clone(), at);
+        }
+        for (at, (sub_cmd, description)) in stubs.into_iter().enumerate() {
+            if indexed.contains(&sub_cmd) || stub_at[&sub_cmd] != at {
+                continue;
+            }
+            let hyphenated = sub_cmd.replace(' ', "-");
+            let mut result = find_manpage_path(mandirs, &hyphenated)
+                .and_then(|path| read_manpage_file(&path).ok())
+                .map(|contents| parse_manpage_string(&contents))
+                .filter(|parsed| !parsed.entries.is_empty() || !parsed.subcommands.is_empty())
+                .unwrap_or_default();
+            strip_subcmd_prefix(&mut result, &hyphenated);
+            if result.description.is_empty() {
+                result.description = description;
+            }
+            write_result(dir, &sub_cmd, "manpage", &result)?;
+        }
+        Ok(())
+    }
 }
 
 pub fn resolve_and_cache(

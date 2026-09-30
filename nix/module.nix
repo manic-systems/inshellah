@@ -99,8 +99,8 @@ in
       example = lib.literalExpression "[ pkgs.git pkgs.clang ]";
       description = ''
         additional packages to scrape for completions alongside the system
-        profile. each package's store path is passed to `inshellah index`
-        via `--prefix`, so it must contain bin/ and/or share/man/.
+        profile. each package is indexed on its own and merged in, so it must
+        contain bin/ and/or share/man/.
 
         useful on macOS, where the active developer toolchain (git, clang,
         …) lives outside the nix system profile behind /usr/bin shims:
@@ -274,19 +274,132 @@ in
         helpOnlyFlag = lib.optionalString (cfg.helpOnlyCommands != [ ]) " --help-only ${helpOnlyFile}";
         timeoutFlag = lib.optionalString (cfg.timeoutMs != null) " --timeout-ms ${toString cfg.timeoutMs}";
         workersFlag = lib.optionalString (cfg.workers != null) " --workers ${toString cfg.workers}";
-        # roll the explicit extra packages up into a single colon-separated
-        # --prefix so they're scraped alongside the system profile.
-        prefixFlag = lib.optionalString (cfg.extraScrapePackages != [ ]) (
-          " --prefix " + lib.concatStringsSep ":" (map toString cfg.extraScrapePackages)
+        indexFlags = "${helpOnlyFlag}${timeoutFlag}${workersFlag}";
+        flags = "${ignoreFlag}${indexFlags}";
+        installedOutputs =
+          pkg:
+          let
+            main = pkg.outputName or "out";
+            wanted = lib.unique ((pkg.meta.outputsToInstall or [ main ]) ++ [ "man" ]);
+          in
+          map (o: if o == main then pkg else pkg.${o}) (
+            lib.filter (o: lib.elem o (pkg.outputs or [ main ])) wanted
+          );
+        hostTools = {
+          inherit (pkgs) bash coreutils man;
+          inherit (pkgs.stdenv.hostPlatform) system;
+          nushell = cfg.nushellPackage;
+          inshellah = cfg.package;
+        };
+        buildTwin =
+          pkg:
+          let
+            byName = pkgs.buildPackages.${pkg.pname or ""} or null;
+            # aliases in the package set throw on access.
+            sameByName = builtins.tryEval (
+              lib.isDerivation byName
+              && byName.pname or null == pkg.pname
+              && byName.version or null == pkg.version or null
+            );
+          in
+          if pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform then
+            null
+          else if pkg ? __spliced.buildHost then
+            pkg.__spliced.buildHost
+          else if sameByName.success && sameByName.value then
+            byName
+          else
+            null;
+        buildTools =
+          let
+            nushell = buildTwin cfg.nushellPackage;
+            inshellah =
+              if cfg.package == defaultPackage then
+                pkgs.buildPackages.callPackage ./package.nix { }
+              else
+                buildTwin cfg.package;
+          in
+          if nushell == null || inshellah == null then
+            null
+          else
+            {
+              inherit (pkgs.buildPackages) bash coreutils man;
+              inherit (pkgs.stdenv.buildPlatform) system;
+              inherit nushell inshellah;
+            };
+        # some tools put their own bin/ on PATH before exec'ing `man` for
+        # `--help`, so `man` sits beside them as in the profile.
+        mkIndex =
+          name: tools: prefixes:
+          derivation {
+            name = "inshellah-index-${name}";
+            inherit (tools) system;
+            builder = "${tools.bash}/bin/bash";
+            PATH = lib.makeBinPath [ tools.coreutils ];
+            args = [
+              "-ec"
+              ''
+                mkdir -p $out profile/bin profile/share/man
+                for prefix in ${lib.escapeShellArgs prefixes}; do
+                  if [ -d "$prefix/bin" ]; then
+                    for bin in "$prefix"/bin/*; do
+                      [ -e "profile/bin/$(basename "$bin")" ] || ln -s "$bin" profile/bin/
+                    done
+                  fi
+                  if [ -d "$prefix/share/man" ]; then
+                    cp -rsn "$prefix/share/man/." profile/share/man/
+                    chmod -R u+w profile/share/man
+                  fi
+                done
+                [ -n "$(ls -A profile/bin)" ] || exit 0
+
+                touch ignore
+                ${lib.optionalString (cfg.ignoreCommands != [ ]) "cat ${ignoreFile} > ignore"}
+                for helper in ${tools.man}/bin/*; do
+                  name=$(basename "$helper")
+                  if [ ! -e "profile/bin/$name" ]; then
+                    ln -s "$helper" profile/bin/
+                    echo "$name" >> ignore
+                  fi
+                done
+
+                PATH="${tools.nushell}/bin:$PATH" \
+                  ${tools.inshellah}/bin/inshellah index "$PWD/profile" --dir $out --ignore ignore${indexFlags}
+              ''
+            ];
+          };
+        # a cross host scrapes each package's build-platform twin natively; one
+        # without a twin indexes on the host platform via a native builder.
+        indexFor =
+          pkg:
+          let
+            twin = buildTwin pkg;
+          in
+          {
+            prefixes = installedOutputs pkg;
+            index =
+              if twin != null && buildTools != null then
+                mkIndex pkg.name buildTools (installedOutputs twin)
+              else
+                mkIndex pkg.name hostTools (installedOutputs pkg);
+          };
+        sourcesFile = pkgs.writeText "inshellah-sources" (
+          lib.concatMapStrings (
+            pkg:
+            let
+              inherit (indexFor pkg) prefixes index;
+            in
+            lib.concatMapStrings (prefix: "${prefix} ${index}\n") prefixes
+          ) (lib.filter lib.isDerivation (config.environment.systemPackages ++ cfg.extraScrapePackages))
         );
         snippetFile = pkgs.writeText "inshellah-completer.nu" cfg.snippet;
       in
       ''
         mkdir -p ${destDir}
 
-        if [ -d "$out/bin" ] && [ -d "$out/share/man" ]; then
+        if [ -d "$out/bin" ]; then
           PATH="${cfg.nushellPackage}/bin:$PATH" \
-            ${inshellah} index "$out" --dir ${destDir}${ignoreFlag}${helpOnlyFlag}${prefixFlag}${timeoutFlag}${workersFlag}
+            ${inshellah} merge "$out" --dir ${destDir} --sources ${sourcesFile}${flags}
         fi
 
         find ${destDir} -maxdepth 1 -empty -delete

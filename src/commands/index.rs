@@ -74,7 +74,7 @@ pub fn run(args: Args) -> std::io::Result<()> {
     )
 }
 
-fn default_workers() -> usize {
+pub fn default_workers() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
