@@ -291,11 +291,16 @@ in
           nushell = cfg.nushellPackage;
           inshellah = cfg.package;
         };
+        # aliases warn once instantiated, long after tryEval has passed them
+        # as a twin, so skip them by name
+        aliases = import (
+          pkgs.path + "/pkgs/top-level/aliases.nix"
+        ) lib pkgs.buildPackages pkgs.buildPackages;
         buildTwin =
           pkg:
           let
-            byName = pkgs.buildPackages.${pkg.pname or ""} or null;
-            # aliases in the package set throw on access.
+            name = pkg.pname or "";
+            byName = if aliases ? ${name} then null else pkgs.buildPackages.${name} or null;
             sameByName = builtins.tryEval (
               lib.isDerivation byName
               && byName.pname or null == pkg.pname
