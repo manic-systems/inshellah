@@ -110,10 +110,15 @@
           '';
           mkShellCheck =
             name: inputs: phase:
-            pkgs.runCommand name { nativeBuildInputs = inputs; } ''
-              ${phase}
-              touch $out
-            '';
+            pkgs.runCommand name
+              {
+                nativeBuildInputs = inputs;
+                buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
+              }
+              ''
+                ${phase}
+                touch $out
+              '';
         in
         {
           # nushell is in the rust check inputs so the composed seam test
