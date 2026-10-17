@@ -49,8 +49,8 @@ to manually specify system dirs, use colon-separated `--dir`:
 ```nu
 $env.config.completions.external = {
     enable: true
-    completer: {|spans|
-        let completed = (inshellah complete ...$spans --dir $"($env.XDG_CACHE_HOME)/inshellah:/run/current-system/sw/share/inshellah" | complete)
+    completer: {|place|
+        let completed = (inshellah complete ...$place.command --dir $"($env.XDG_CACHE_HOME)/inshellah:/run/current-system/sw/share/inshellah" | complete)
         if $completed.exit_code == 0 {
             try { $completed.stdout | from json } catch { null }
         } else {

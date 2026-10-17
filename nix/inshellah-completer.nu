@@ -43,6 +43,6 @@ def inshellah-complete-spans [spans: list<string>] {
     }
 }
 
-let inshellah_complete = { |spans| inshellah-complete-spans $spans }
+let inshellah_complete = { |place| inshellah-complete-spans $place.command }
 
 $env.config.completions.external = {enable: true, max_results: $inshellah_max_results, completer: $inshellah_complete}

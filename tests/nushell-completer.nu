@@ -17,19 +17,19 @@ def assert-eq [actual expected msg: string] {
 let completer = $env.config.completions.external.completer
 
 '[{"value":"--demo","description":"from the static cache"}]' | save --force $env.INSHELLAH_STATIC_FILE
-let pass_through = do $completer [demo ""]
+let pass_through = do $completer {command: [demo ""]}
 assert-eq ($pass_through | get 0.value) "--demo" "shim returns the binary's JSON unchanged"
 
 "[]" | save --force $env.INSHELLAH_STATIC_FILE
-let empty_list = do $completer [demo ""]
+let empty_list = do $completer {command: [demo ""]}
 assert-eq $empty_list null "empty list collapses to null so nu's file completer can take over"
 
 "null" | save --force $env.INSHELLAH_STATIC_FILE
-let null_payload = do $completer [demo ""]
+let null_payload = do $completer {command: [demo ""]}
 assert-eq $null_payload null "literal null payload collapses to null"
 
 "not-json{" | save --force $env.INSHELLAH_STATIC_FILE
-let malformed = do $completer [demo ""]
+let malformed = do $completer {command: [demo ""]}
 assert-eq $malformed null "malformed JSON falls back to null without erroring"
 
 "" | save --force $env.INSHELLAH_STATIC_FILE
