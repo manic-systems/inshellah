@@ -112,7 +112,7 @@ enum Cli {
         dir: Option<String>,
         #[pound(long)]
         timeout_ms: Option<String>,
-        #[pound(positional, value_name = "SPAN")]
+        #[pound(trailing, value_name = "SPAN")]
         spans: Vec<String>,
     },
     /// print stored completion data
@@ -149,43 +149,6 @@ enum Cli {
     Help,
 }
 
-const COMPLETE_DASH_ARG_SENTINEL: &str = "__INSHELLAH_COMPLETE_DASH_ARG__";
-const COMPLETE_DOUBLE_DASH_SENTINEL: &str = "__INSHELLAH_LITERAL_DOUBLE_DASH__";
-
-fn normalize_cli_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut args: Vec<String> = args.into_iter().collect();
-    if args.first().is_some_and(|arg| arg == "complete") {
-        let mut i = 1;
-        while i < args.len() {
-            if args[i] == "--dir" || args[i] == "--timeout-ms" {
-                i += 2;
-                continue;
-            }
-            if args[i].starts_with("--dir=") || args[i].starts_with("--timeout-ms=") {
-                i += 1;
-                continue;
-            }
-            if args[i] == "--" {
-                args[i] = COMPLETE_DOUBLE_DASH_SENTINEL.to_string();
-            } else if args[i].starts_with('-') {
-                args[i] = format!("{COMPLETE_DASH_ARG_SENTINEL}{}", args[i]);
-            }
-            i += 1;
-        }
-    }
-    args
-}
-
-fn restore_complete_spans(spans: &mut [String]) {
-    for span in spans {
-        if span == COMPLETE_DOUBLE_DASH_SENTINEL {
-            *span = "--".to_string();
-        } else if let Some(rest) = span.strip_prefix(COMPLETE_DASH_ARG_SENTINEL) {
-            *span = rest.to_string();
-        }
-    }
-}
-
 fn main() {
     // rust ignores SIGPIPE, so a broken-pipe write becomes a BrokenPipe error
     // that `println!` panics on. restore the default so piping into `head` exits
@@ -205,8 +168,7 @@ fn main() {
         usage();
         return;
     }
-    let args = normalize_cli_args(raw_args);
-    match Cli::parse_from(args.iter().map(String::as_str)) {
+    match Cli::parse_from(raw_args.iter().map(String::as_str)) {
         Cli::Index {
             prefixes,
             dir,
@@ -268,9 +230,8 @@ fn main() {
         Cli::Complete {
             dir,
             timeout_ms,
-            mut spans,
+            spans,
         } => {
-            restore_complete_spans(&mut spans);
             let cfg = Config::from_env();
             let dirs = completion_dirs(dir.as_deref());
             let timeout_override = parse_timeout_ms(timeout_ms.as_deref());

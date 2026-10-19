@@ -249,7 +249,9 @@ in
               if [ "$has_dir" = 1 ]; then
                 exec ${cfg.package}/bin/inshellah "$@"
               else
-                exec ${cfg.package}/bin/inshellah "$@" --dir "''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}"
+                sub=$1
+                shift
+                exec ${cfg.package}/bin/inshellah "$sub" --dir "''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}" "$@"
               fi
               ;;
             *)
