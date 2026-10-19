@@ -9,10 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
-
-use parking_lot::Mutex;
 
 use crate::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedSwitch, extract_synopsis_command,
@@ -318,11 +316,19 @@ fn enqueue_child_jobs(
     }
     // per-root allowance keyed on base_cmd, so a full system scan stays
     // unbounded in breadth
-    let mut counts = ctx.node_counts.lock();
+    let mut counts = ctx
+        .node_counts
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let tally = counts.entry(job.base_cmd.clone()).or_insert(0);
     for name in children {
         if *tally >= ctx.node_budget {
-            if ctx.truncated.lock().insert(job.base_cmd.clone()) {
+            if ctx
+                .truncated
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(job.base_cmd.clone())
+            {
                 eprintln!(
                     "warning: {} subcommand tree hit the {}-node budget; truncating",
                     job.base_cmd, ctx.node_budget
@@ -344,7 +350,12 @@ fn enqueue_child_jobs(
 
 fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) {
     let full_cmd = job.full_cmd();
-    if ctx.indexed.lock().contains(&full_cmd) {
+    if ctx
+        .indexed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&full_cmd)
+    {
         return;
     }
     let is_root = job.sub_args.is_empty();
@@ -352,6 +363,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         && ctx
             .subtree_health
             .lock()
+            .unwrap_or_else(PoisonError::into_inner)
             .get(&job.base_cmd)
             .is_some_and(|health| !health.answered && health.timeouts >= MAX_TIMEOUTS_PER_ROOT)
     {
@@ -368,7 +380,11 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         root_help: Cell::new(if is_root {
             None
         } else {
-            ctx.root_help.lock().get(&job.base_cmd).copied()
+            ctx.root_help
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&job.base_cmd)
+                .copied()
         }),
         timed_out: Cell::new(false),
         echoed: Cell::new(false),
@@ -381,10 +397,16 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
 
     let outcome = resolve_one(&probe, &job.base_cmd, &job.sub_args);
     if is_root && let Some(hash) = probe.root_help.get() {
-        ctx.root_help.lock().insert(job.base_cmd.clone(), hash);
+        ctx.root_help
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(job.base_cmd.clone(), hash);
     }
     if !is_root {
-        let mut health = ctx.subtree_health.lock();
+        let mut health = ctx
+            .subtree_health
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let health = health.entry(job.base_cmd.clone()).or_default();
         if probe.timed_out.get() {
             health.timeouts += 1;
@@ -396,7 +418,10 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
     match outcome {
         Outcome::Native { nu } => {
             if write_native(&ctx.cache_dir, &full_cmd, &nu).is_ok() {
-                ctx.indexed.lock().insert(full_cmd);
+                ctx.indexed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(full_cmd);
             }
         }
         Outcome::Empty => {}
@@ -406,7 +431,10 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
             children,
         } => {
             if write_result(&ctx.cache_dir, &full_cmd, source, &result).is_ok() {
-                ctx.indexed.lock().insert(full_cmd);
+                ctx.indexed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(full_cmd);
                 if !probe.echoed.get() {
                     enqueue_child_jobs(ctx, &job, &children, submit);
                 }
@@ -600,7 +628,11 @@ impl ScrapeCtx {
         // no workers alive, so the Arc has a single strong ref
         Arc::try_unwrap(ctx)
             .ok()
-            .map(|c| c.indexed.into_inner())
+            .map(|c| {
+                c.indexed
+                    .into_inner()
+                    .unwrap_or_else(PoisonError::into_inner)
+            })
             .unwrap_or_default()
     }
 }

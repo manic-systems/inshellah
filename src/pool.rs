@@ -4,16 +4,14 @@
 //! `Submitter`; when in-flight hits zero the pool shuts down and `wait` returns.
 //!
 //! queue-back (not spawn-in-place) keeps workers fed on lopsided help trees
-//! (one binary has 30 subs, another 1). a parking_lot condvar parks idle
+//! (one binary has 30 subs, another 1). a condvar parks idle
 //! workers; queue + in-flight + close state share one mutex so a wakeup can't
 //! be missed.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-
-use parking_lot::{Condvar, Mutex};
 
 struct State<J> {
     queue: VecDeque<J>,
@@ -33,14 +31,14 @@ struct Inner<J> {
 
 impl<J> Inner<J> {
     fn submit(&self, job: J) {
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.in_flight += 1;
         state.queue.push_back(job);
         self.notify.notify_one();
     }
 
     fn next(&self) -> Option<J> {
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if let Some(job) = state.queue.pop_front() {
                 return Some(job);
@@ -48,12 +46,15 @@ impl<J> Inner<J> {
             if state.closed && state.in_flight == 0 {
                 return None;
             }
-            self.notify.wait(&mut state);
+            state = self
+                .notify
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 
     fn complete(&self) {
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.in_flight -= 1;
         if state.closed && state.in_flight == 0 {
             // last in-flight after wait() closed submission; wake workers to exit.
@@ -129,7 +130,11 @@ impl<J: Send + 'static> ScrapePool<J> {
     /// block until all jobs complete, then join workers.
     pub fn wait(self) {
         {
-            let mut state = self.inner.state.lock();
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             state.closed = true;
             // wake workers to drain or exit; the close flag shares this lock,
             // so it can't race a worker entering the wait.
@@ -158,15 +163,23 @@ pub fn par_map<T: Send, R: Send>(
                     let Some(input) = inputs.get(i) else {
                         break;
                     };
-                    let item = input.lock().take().expect("each index is claimed once");
-                    *outputs[i].lock() = Some(f(item));
+                    let item = input
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take()
+                        .expect("each index is claimed once");
+                    *outputs[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(f(item));
                 }
             });
         }
     });
     outputs
         .into_iter()
-        .map(|o| o.into_inner().expect("every claimed index stores a result"))
+        .map(|o| {
+            o.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .expect("every claimed index stores a result")
+        })
         .collect()
 }
 
@@ -182,14 +195,14 @@ mod tests {
         let pool = ScrapePool::new(4, {
             let collected = collected.clone();
             move |n: u32, _: &Submitter<u32>| {
-                collected.lock().push(n);
+                collected.lock().unwrap().push(n);
             }
         });
         for i in 0..100u32 {
             pool.submit(i);
         }
         pool.wait();
-        let mut got = collected.lock().clone();
+        let mut got = collected.lock().unwrap().clone();
         got.sort();
         assert_eq!(got, (0..100).collect::<Vec<_>>());
     }
@@ -200,7 +213,7 @@ mod tests {
         let pool = ScrapePool::new(2, {
             let collected = collected.clone();
             move |n: u32, sub: &Submitter<u32>| {
-                collected.lock().push(n);
+                collected.lock().unwrap().push(n);
                 if n < 10 && n % 2 == 1 {
                     sub.submit(n + 1);
                 }
@@ -210,7 +223,7 @@ mod tests {
             pool.submit(i);
         }
         pool.wait();
-        let mut got = collected.lock().clone();
+        let mut got = collected.lock().unwrap().clone();
         got.sort();
         assert_eq!(got, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
