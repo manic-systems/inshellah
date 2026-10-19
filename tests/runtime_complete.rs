@@ -1675,8 +1675,12 @@ exit 2
     let cache_file = cache_dir.join(format!("{}.json", filename_of_command("fakerefresh")));
 
     // backdate the entry well past a 1s ttl (deterministic, no sleep).
-    let old = filetime::FileTime::from_unix_time(1_000_000_000, 0);
-    filetime::set_file_mtime(&cache_file, old).expect("backdate cache mtime");
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&cache_file)
+        .and_then(|file| file.set_modified(old))
+        .expect("backdate cache mtime");
 
     let old_path = std::env::var_os("PATH").unwrap_or_default();
     let path_env = format!("{}:{}", bin_dir.display(), old_path.to_string_lossy());

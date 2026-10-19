@@ -816,8 +816,12 @@ mod tests {
         // an ancient json beside a fresh nu: the age must follow the newer file.
         write_result(&dir, "multi", "manpage", &ManpageResult::default()).unwrap();
         let json = dir.join(format!("{}.json", filename_of_command("multi")));
-        let ancient = filetime::FileTime::from_unix_time(1_000_000_000, 0);
-        filetime::set_file_mtime(&json, ancient).unwrap();
+        let ancient = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&json)
+            .and_then(|file| file.set_modified(ancient))
+            .unwrap();
         write_native(&dir, "multi", "export extern \"multi\" [\n  --flag\n]\n").unwrap();
 
         let age = user_cache_age(&dir, "multi").expect("cache file should exist");
