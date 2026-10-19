@@ -72,6 +72,7 @@ your shell before nushell starts.
 
 | variable | default | effect |
 |---|---|---|
+| `INSHELLAH_DIR` | `$XDG_CACHE_HOME/inshellah` | colon-separated completion dirs, the writable user cache first, used when `--dir` is not given. |
 | `INSHELLAH_FLAG_TRIGGERS` | `-` | characters that surface flag completions when a partial token begins with one of them. set to `-+` to also trigger on `+`; whitespace is ignored. an empty value disables prefix-triggered flags (leaving only `INSHELLAH_FLAG_ON_EMPTY`). |
 | `INSHELLAH_FLAG_ON_EMPTY` | `0` | when truthy (`1`/`true`/`yes`/`on`), also surface flags on an empty token — i.e. right after a space — alongside subcommands. otherwise an empty token hands off to file/dynamic completion. |
 | `INSHELLAH_DYNAMIC_TIMEOUT_MS` | `5000` | wall-clock budget in milliseconds shared by live provider subprocesses for one completion request. `0` disables this runtime timeout. on timeout the provider returns no candidates and inshellah prints `null` if nothing else can answer. |

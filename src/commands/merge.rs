@@ -5,37 +5,37 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use inshellah::config::DEFAULT_TIMEOUT_MS;
-use inshellah::indexer::{cmd_merge, load_ignorelist};
+use pound::Parse;
 
-use super::index::default_workers;
+use inshellah::indexer::cmd_merge;
 
+use super::index::Scrape;
+
+#[derive(Parse, Debug)]
 pub struct Args {
+    /// profile whose bin/ links into the package indexes
+    #[pound(value_name = "PROFILE")]
     pub profile: PathBuf,
+    /// output directory
+    #[pound(long)]
     pub dir: PathBuf,
+    /// file of `PACKAGE INDEX` lines, in priority order
+    #[pound(long)]
     pub sources: PathBuf,
-    pub ignore: Option<PathBuf>,
-    pub help_only: Option<PathBuf>,
-    pub timeout_ms: Option<String>,
-    pub workers: Option<String>,
+    #[pound(flatten)]
+    pub scrape: Scrape,
 }
 
 pub fn run(args: Args) -> io::Result<()> {
     let sources = read_sources(&args.sources)?;
-    let load = |path: &Option<PathBuf>| path.as_deref().map(load_ignorelist).unwrap_or_default();
     cmd_merge(
         &args.profile,
         &sources,
-        &load(&args.ignore),
-        &load(&args.help_only),
+        &args.scrape.ignorelist(),
+        &args.scrape.help_only_list(),
         &args.dir,
-        args.timeout_ms
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_TIMEOUT_MS),
-        args.workers
-            .and_then(|n| n.parse::<usize>().ok())
-            .map(|n| n.max(1))
-            .unwrap_or_else(default_workers),
+        args.scrape.timeout_ms(),
+        args.scrape.workers(),
     )
 }
 

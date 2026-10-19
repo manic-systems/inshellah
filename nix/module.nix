@@ -237,27 +237,8 @@ in
         systemDir = "/run/current-system/sw${cfg.completionsPath}";
         dirPaths = lib.concatStringsSep ":" ([ systemDir ] ++ cfg.extraDirs);
         wrapped = pkgs.writeShellScriptBin "inshellah" ''
-          case "''${1:-}" in
-            complete|query|dump|purge)
-              has_dir=0
-              for arg in "$@"; do
-                if [ "$arg" = "--dir" ]; then
-                  has_dir=1
-                  break
-                fi
-              done
-              if [ "$has_dir" = 1 ]; then
-                exec ${cfg.package}/bin/inshellah "$@"
-              else
-                sub=$1
-                shift
-                exec ${cfg.package}/bin/inshellah "$sub" --dir "''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}" "$@"
-              fi
-              ;;
-            *)
-              exec ${cfg.package}/bin/inshellah "$@"
-              ;;
-          esac
+          export INSHELLAH_DIR="''${INSHELLAH_DIR:-''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}}"
+          exec ${cfg.package}/bin/inshellah "$@"
         '';
       in
       [

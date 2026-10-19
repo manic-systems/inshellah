@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use pound::Parse;
+
 use inshellah::indexer::is_executable;
 use inshellah::store::default_store_path;
 
@@ -17,20 +19,24 @@ pub fn find_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn split_colon_paths<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<PathBuf> {
-    values
-        .into_iter()
-        .flat_map(|value| value.split(':'))
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect()
+#[derive(Parse, Debug)]
+pub struct Dirs {
+    /// colon-separated completion dirs, the first one the writable cache
+    #[pound(
+        long = "dir",
+        value_name = "PATHS",
+        delimiter = ':',
+        env = "INSHELLAH_DIR"
+    )]
+    paths: Vec<PathBuf>,
 }
 
-pub fn completion_dirs(dir: Option<&str>) -> Vec<PathBuf> {
-    dir.map(|d| d.split(':').map(PathBuf::from).collect())
-        .unwrap_or_else(|| vec![default_store_path()])
-}
-
-pub fn parse_timeout_ms(timeout_ms: Option<&str>) -> Option<u64> {
-    timeout_ms.and_then(|n| n.parse::<u64>().ok())
+impl Dirs {
+    pub fn resolve(self) -> Vec<PathBuf> {
+        if self.paths.is_empty() {
+            vec![default_store_path()]
+        } else {
+            self.paths
+        }
+    }
 }

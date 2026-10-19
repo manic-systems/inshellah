@@ -1,149 +1,96 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah index`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use pound::Parse;
 
 use inshellah::config::DEFAULT_TIMEOUT_MS;
 use inshellah::indexer::{cmd_index, load_ignorelist};
 use inshellah::store::default_store_path;
 
-use super::common::split_colon_paths;
-
+#[derive(Parse, Debug)]
 pub struct Args {
+    /// directory holding bin/ and share/man/
+    #[pound(value_name = "PREFIX")]
     pub prefixes: Vec<PathBuf>,
+    /// extra colon-separated prefixes
+    #[pound(long = "prefix", value_name = "PATHS", delimiter = ':')]
+    pub extra_prefixes: Vec<PathBuf>,
+    /// output directory, $XDG_CACHE_HOME/inshellah when unset
+    #[pound(long)]
     pub dir: Option<PathBuf>,
-    pub ignore: Option<PathBuf>,
-    pub help_only: Option<PathBuf>,
-    pub timeout_ms: u64,
-    pub workers: usize,
+    #[pound(flatten)]
+    pub scrape: Scrape,
 }
 
-impl Args {
-    pub fn from_parts(
-        mut prefixes: Vec<PathBuf>,
-        dir: Option<PathBuf>,
-        ignore: Option<PathBuf>,
-        help_only: Option<PathBuf>,
-        extra_prefixes: Vec<String>,
-        timeout_ms: Option<&str>,
-        workers: Option<&str>,
-    ) -> Self {
-        prefixes.extend(split_colon_paths(extra_prefixes.iter().map(String::as_str)));
-        Self {
-            prefixes,
-            dir,
-            ignore,
-            help_only,
-            timeout_ms: timeout_ms
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(DEFAULT_TIMEOUT_MS),
-            workers: workers
-                .and_then(|n| n.parse::<usize>().ok())
-                .map(|n| n.max(1))
-                .unwrap_or_else(default_workers),
-        }
+#[derive(Parse, Debug)]
+pub struct Scrape {
+    /// file listing commands to skip entirely
+    #[pound(long)]
+    pub ignore: Option<PathBuf>,
+    /// file listing commands to scrape with --help, skipping manpages
+    #[pound(long)]
+    pub help_only: Option<PathBuf>,
+    /// per-subprocess timeout in milliseconds
+    #[pound(long, value_name = "MS")]
+    pub timeout_ms: Option<u64>,
+    /// parallel scrape workers, the cpu count when unset
+    #[pound(long, min = 1)]
+    pub workers: Option<usize>,
+}
+
+impl Scrape {
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)
+    }
+
+    pub fn workers(&self) -> usize {
+        self.workers
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+    }
+
+    pub fn ignorelist(&self) -> HashSet<String> {
+        self.ignore
+            .as_deref()
+            .map(load_ignorelist)
+            .unwrap_or_default()
+    }
+
+    pub fn help_only_list(&self) -> HashSet<String> {
+        self.help_only
+            .as_deref()
+            .map(load_ignorelist)
+            .unwrap_or_default()
     }
 }
 
 pub fn run(args: Args) -> std::io::Result<()> {
-    if args.prefixes.is_empty() {
+    let prefixes: Vec<PathBuf> = args
+        .prefixes
+        .into_iter()
+        .chain(args.extra_prefixes)
+        .collect();
+    if prefixes.is_empty() {
         eprintln!("error: index requires at least one PREFIX");
         std::process::exit(1);
     }
+
     let dir = args.dir.unwrap_or_else(default_store_path);
-    let ignorelist = args
-        .ignore
-        .as_deref()
-        .map(load_ignorelist)
-        .unwrap_or_default();
-    let help_only = args
-        .help_only
-        .as_deref()
-        .map(load_ignorelist)
-        .unwrap_or_default();
-    let bindirs: Vec<PathBuf> = args.prefixes.iter().map(|p| p.join("bin")).collect();
-    let mandirs: Vec<PathBuf> = args.prefixes.iter().map(|p| man_dir_of_prefix(p)).collect();
+    let bindirs: Vec<PathBuf> = prefixes.iter().map(|p| p.join("bin")).collect();
+    let mandirs: Vec<PathBuf> = prefixes.iter().map(|p| man_dir_of_prefix(p)).collect();
     cmd_index(
         &bindirs,
         &mandirs,
-        &ignorelist,
-        &help_only,
+        &args.scrape.ignorelist(),
+        &args.scrape.help_only_list(),
         &dir,
-        args.timeout_ms,
-        args.workers,
+        args.scrape.timeout_ms(),
+        args.scrape.workers(),
     )
-}
-
-pub fn default_workers() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
 }
 
 fn man_dir_of_prefix(prefix: &Path) -> PathBuf {
     prefix.join("share/man")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pound::Parse;
-
-    #[derive(Parse, Debug)]
-    #[pound(name = "inshellah index")]
-    struct IndexCli {
-        #[pound(positional, value_name = "PREFIX")]
-        prefixes: Vec<PathBuf>,
-        #[pound(long)]
-        dir: Option<PathBuf>,
-        #[pound(long)]
-        ignore: Option<PathBuf>,
-        #[pound(long)]
-        help_only: Option<PathBuf>,
-        #[pound(long = "prefix", value_name = "PATHS")]
-        extra_prefixes: Vec<String>,
-        #[pound(long)]
-        timeout_ms: Option<String>,
-        #[pound(long)]
-        workers: Option<String>,
-    }
-
-    impl From<IndexCli> for Args {
-        fn from(parsed: IndexCli) -> Self {
-            Args::from_parts(
-                parsed.prefixes,
-                parsed.dir,
-                parsed.ignore,
-                parsed.help_only,
-                parsed.extra_prefixes,
-                parsed.timeout_ms.as_deref(),
-                parsed.workers.as_deref(),
-            )
-        }
-    }
-
-    fn parse_index_args(args: &[String]) -> Args {
-        IndexCli::parse_from(args.iter().map(String::as_str)).into()
-    }
-
-    #[test]
-    fn index_prefix_flag_appends_colon_separated_prefixes() {
-        let args = [
-            "/sys".to_string(),
-            "--prefix".to_string(),
-            "/a:/b/c".to_string(),
-            "--prefix".to_string(),
-            "/d".to_string(),
-        ];
-        let parsed = parse_index_args(&args);
-        assert_eq!(
-            parsed.prefixes,
-            vec![
-                PathBuf::from("/sys"),
-                PathBuf::from("/a"),
-                PathBuf::from("/b/c"),
-                PathBuf::from("/d"),
-            ]
-        );
-    }
 }
