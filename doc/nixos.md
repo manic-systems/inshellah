@@ -214,7 +214,7 @@ snippet's nushell `max_results`.
 | `docker` / `podman` | containers and image refs by subcommand |
 | `kubectl` | resource names from the selected cluster and namespace |
 | `git` | refs and worktree paths |
-| `jj` | revisions, operations, bookmarks, remotes, files, and workspaces |
+| `jj` | jj's own completer via `COMPLETE=fish`, ahead of the static index |
 | `npm` / `pnpm` / `yarn` | package.json scripts |
 | `make` / `just` | targets and recipes |
 | `cargo` | workspace targets for `--bin`, `--example`, and related slots |

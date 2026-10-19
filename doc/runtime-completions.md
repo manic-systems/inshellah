@@ -75,8 +75,8 @@ your shell before nushell starts.
 | `INSHELLAH_FLAG_TRIGGERS` | `-` | characters that surface flag completions when a partial token begins with one of them. set to `-+` to also trigger on `+`; whitespace is ignored. an empty value disables prefix-triggered flags (leaving only `INSHELLAH_FLAG_ON_EMPTY`). |
 | `INSHELLAH_FLAG_ON_EMPTY` | `0` | when truthy (`1`/`true`/`yes`/`on`), also surface flags on an empty token — i.e. right after a space — alongside subcommands. otherwise an empty token hands off to file/dynamic completion. |
 | `INSHELLAH_DYNAMIC_TIMEOUT_MS` | `5000` | wall-clock budget in milliseconds shared by live provider subprocesses for one completion request. `0` disables this runtime timeout. on timeout the provider returns no candidates and inshellah prints `null` if nothing else can answer. |
-| `INSHELLAH_DYNAMIC_LIMIT` | `200` | cap passed to live providers that support native limits, such as `git for-each-ref --count`, `jj log -n`, and `docker ps --last`. `0` omits those provider-specific limit flags; providers without native caps ignore it. |
-| `INSHELLAH_TIMEOUT_MS` | `1200` | per-subprocess timeout for on-the-fly `--help` resolution of uncached commands and subcommands. it also bounds the current `adb` value provider. an explicit `--timeout-ms` flag overrides it. this is separate from `INSHELLAH_DYNAMIC_TIMEOUT_MS`. |
+| `INSHELLAH_DYNAMIC_LIMIT` | `200` | cap passed to live providers that support native limits, such as `git for-each-ref --count` and `docker ps --last`. `0` omits those provider-specific limit flags; providers without native caps ignore it. |
+| `INSHELLAH_TIMEOUT_MS` | `1200` | per-subprocess timeout for on-the-fly `--help` resolution of uncached commands and subcommands. it also bounds the `adb` and `jj` providers. an explicit `--timeout-ms` flag overrides it. this is separate from `INSHELLAH_DYNAMIC_TIMEOUT_MS`. |
 | `INSHELLAH_MAX_COMPLETIONS` | `0` | cap on candidates returned by indexed/static matching, and nushell's `max_results` when sourcing the bundled snippet. `0` imposes no inshellah cap; nushell's own default of 200 still applies. |
 
 ### flag triggering
@@ -128,7 +128,9 @@ inshellah index /usr /usr/local
 
 live providers are narrow value completers. they run only after the
 static index has handled command structure and either reaches a known
-value slot or has no leaf candidates to offer. unsupported commands,
+value slot or has no leaf candidates to offer. `adb` and `jj` are the
+exceptions, answering first and falling back to the static index only
+when they come up empty. unsupported commands,
 empty provider output, parse failures, and provider timeouts all hand off
 with `null`.
 
@@ -144,7 +146,7 @@ with `null`.
 | `docker` / `podman` | containers and image refs by subcommand |
 | `kubectl` | resource names from the selected cluster and namespace |
 | `git` | refs and worktree paths |
-| `jj` | revisions, operations, bookmarks, remotes, files, and workspaces |
+| `jj` | jj's own completer via `COMPLETE=fish`, ahead of the static index |
 | `npm` / `pnpm` / `yarn` | package.json scripts |
 | `make` / `just` | targets and recipes |
 | `cargo` | workspace targets for `--bin`, `--example`, and related slots |

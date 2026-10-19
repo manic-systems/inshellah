@@ -87,7 +87,6 @@ pub fn dynamic_complete_candidates_with_path(
 
 #[cfg(test)]
 mod tests {
-    use super::providers::jj::{is_revset_symbol_prefix, split_revset_trailing_name};
     use super::providers::kubectl::kubectl_scope;
     use super::providers::nix::looks_like_flake_pkg;
     use super::shared::{Candidate, filter_candidates};
@@ -162,32 +161,6 @@ mod tests {
         ];
         let scope = kubectl_scope(&spans);
         assert!(scope.all);
-    }
-
-    #[test]
-    fn revset_split_plain_symbol_has_no_prefix() {
-        assert_eq!(split_revset_trailing_name("main"), ("", "main"));
-        assert_eq!(split_revset_trailing_name(""), ("", ""));
-    }
-
-    #[test]
-    fn revset_split_compound_keeps_prefix() {
-        assert_eq!(split_revset_trailing_name("main & dev"), ("main & ", "dev"));
-        assert_eq!(split_revset_trailing_name("ancestors("), ("ancestors(", ""));
-        assert_eq!(split_revset_trailing_name("a..b"), ("a..", "b"));
-        assert_eq!(split_revset_trailing_name("x|y~z"), ("x|y~", "z"));
-    }
-
-    #[test]
-    fn revset_symbol_prefix_accepts_remote_and_rejects_leading_sep() {
-        assert!(is_revset_symbol_prefix(""));
-        assert!(is_revset_symbol_prefix("main"));
-        assert!(is_revset_symbol_prefix("main@"));
-        assert!(is_revset_symbol_prefix("main@origin"));
-        assert!(is_revset_symbol_prefix("feature/x"));
-        assert!(!is_revset_symbol_prefix("@"));
-        assert!(!is_revset_symbol_prefix("a@@b"));
-        assert!(!is_revset_symbol_prefix("a b"));
     }
 
     #[test]

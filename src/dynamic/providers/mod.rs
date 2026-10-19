@@ -93,7 +93,7 @@ const PROVIDERS: &[FunctionProvider] = &[
     },
     FunctionProvider {
         commands: &["jj"],
-        kind: Kind::Fallback,
+        kind: Kind::Value,
         complete: jj::complete,
     },
     FunctionProvider {

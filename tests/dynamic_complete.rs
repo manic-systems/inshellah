@@ -128,46 +128,11 @@ esac
 "#;
 
 const FAKE_JJ: &str = r#"#!/bin/sh
-case "${1:-}" in
-  log)
-    printf 'k\tworking change\nm\tmain change\n'
-    ;;
-  bookmark)
-    if [ "${2:-}" = list ]; then
-      case "$*" in
-        *--all-remotes*)
-          printf 'main@origin\tmain change\nfeature@upstream\tfeature change\nmain@git\tmain change\n'
-          ;;
-        *)
-          printf 'main\tmain change\nfeature\tfeature change\nfeature\tfeature change\n'
-          ;;
-      esac
-    fi
-    ;;
-  tag)
-    if [ "${2:-}" = list ]; then
-      printf 'v1.0\nv2.0\n'
-    fi
-    ;;
-  git)
-    if [ "${2:-}" = remote ] && [ "${3:-}" = list ]; then
-      printf 'origin https://example.com/repo.git\nupstream https://example.com/upstream.git\n'
-    fi
-    ;;
-  op|operation)
-    if [ "${2:-}" = log ]; then
-      printf 'abc123\tcheckout working copy\n'
-    fi
-    ;;
-  file)
-    if [ "${2:-}" = list ]; then
-      printf 'src/main.rs\nREADME.md\n'
-    fi
-    ;;
-  workspace)
-    if [ "${2:-}" = list ]; then
-      printf 'default\nlinked\n'
-    fi
+[ "${COMPLETE:-}" = fish ] || exit 1
+printf '%s\n' "$@" > "$INSHELLAH_JJ_ARGS_FILE"
+case "$*" in
+  *"log -r main.."*)
+    printf 'main..main\tmain change\n\nmain..feature\t feature change\n'
     ;;
 esac
 "#;
@@ -221,6 +186,7 @@ impl Harness {
         let mut aux_files = BTreeMap::new();
         aux_files.insert("KUBECTL_ARGS_FILE".into(), root.join("kubectl-args.txt"));
         aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), root.join("git-args.txt"));
+        aux_files.insert("INSHELLAH_JJ_ARGS_FILE".into(), root.join("jj-args.txt"));
         Harness {
             bin_dir,
             cache_dir,
@@ -579,139 +545,20 @@ fn git_explicit_path_after_elevation_uses_dynamic_provider() {
 // === jj ===
 
 #[test]
-fn jj_top_level_includes_common_verbs() {
-    let h = Harness::new("dyn-jj-top");
-    let (stdout, _, _) = h.run(&["jj", ""], &[]);
-    let cands = parse_output(&stdout).expect("top-level verbs");
-    let values = Harness::values(&cands);
-    assert!(values.iter().any(|v| v == "bookmark"));
-    assert!(values.iter().any(|v| v == "config"));
-    assert!(values.iter().any(|v| v == "git"));
-}
-
-#[test]
-fn jj_aliases_route_to_canonical_value_providers() {
-    let h = Harness::new("dyn-jj-aliases");
-
-    let (desc, _, _) = h.run(&["jj", "desc", ""], &[]);
-    let desc = parse_output(&desc).expect("desc revisions");
-    assert!(Harness::values(&desc).iter().any(|v| v == "main"));
-
-    let (ci, _, _) = h.run(&["jj", "ci", ""], &[]);
-    let ci = parse_output(&ci).expect("ci files");
-    assert_eq!(Harness::values(&ci), vec!["src/main.rs", "README.md"]);
-}
-
-#[test]
-fn jj_bookmark_delete_dedupes_local_bookmarks() {
-    let h = Harness::new("dyn-jj-bookmark-delete");
-    let (stdout, _, _) = h.run(&["jj", "bookmark", "delete", ""], &[]);
-    let cands = parse_output(&stdout).expect("bookmarks");
-    assert_eq!(Harness::values(&cands), vec!["main", "feature"]);
+fn jj_defers_to_native_completer() {
+    let h = Harness::new("dyn-jj-native");
+    let (stdout, _, _) = h.run(&["jj", "-R", "repo", "log", "-r", "main.."], &[]);
+    let cands = parse_output(&stdout).expect("native candidates");
+    assert_eq!(Harness::values(&cands), vec!["main..main", "main..feature"]);
     assert_eq!(
         Harness::descriptions(&cands),
         vec!["main change", "feature change"]
     );
-}
-
-#[test]
-fn jj_bookmark_track_completes_remote_bookmarks_excluding_at_git() {
-    let h = Harness::new("dyn-jj-bookmark-track");
-    let (stdout, _, _) = h.run(&["jj", "bookmark", "track", ""], &[]);
-    let cands = parse_output(&stdout).expect("remote bookmarks");
     assert_eq!(
-        Harness::values(&cands),
-        vec!["main@origin", "feature@upstream"]
-    );
-    assert_eq!(
-        Harness::descriptions(&cands),
-        vec!["main change", "feature change"]
-    );
-}
-
-#[test]
-fn jj_git_push_bookmark_completes_local_bookmarks() {
-    let h = Harness::new("dyn-jj-push-bookmark");
-    let (stdout, _, _) = h.run(&["jj", "git", "push", "--bookmark", ""], &[]);
-    let cands = parse_output(&stdout).expect("push bookmark names");
-    assert_eq!(Harness::values(&cands), vec!["main", "feature"]);
-
-    let (short, _, _) = h.run(&["jj", "git", "push", "-b", ""], &[]);
-    let short = parse_output(&short).expect("push bookmark with short flag");
-    assert_eq!(Harness::values(&short), vec!["main", "feature"]);
-}
-
-#[test]
-fn jj_tag_delete_completes_tags() {
-    let h = Harness::new("dyn-jj-tag");
-    let (stdout, _, _) = h.run(&["jj", "tag", "delete", ""], &[]);
-    let cands = parse_output(&stdout).expect("tags");
-    assert_eq!(Harness::values(&cands), vec!["v1.0", "v2.0"]);
-}
-
-#[test]
-fn jj_git_fetch_completes_remotes() {
-    let h = Harness::new("dyn-jj-fetch");
-    let (stdout, _, _) = h.run(&["jj", "git", "fetch", ""], &[]);
-    let cands = parse_output(&stdout).expect("remotes");
-    assert_eq!(Harness::values(&cands), vec!["origin", "upstream"]);
-}
-
-#[test]
-fn jj_git_remote_subcommands_and_removal_target() {
-    let h = Harness::new("dyn-jj-remote");
-    let (verbs, _, _) = h.run(&["jj", "git", "remote", ""], &[]);
-    let cands = parse_output(&verbs).expect("verbs");
-    assert_eq!(
-        Harness::values(&cands),
-        vec!["add", "list", "remove", "rename", "set-url"]
+        h.read_aux("INSHELLAH_JJ_ARGS_FILE"),
+        "--\njj\n-R\nrepo\nlog\n-r\nmain..\n"
     );
 
-    let (targets, _, _) = h.run(&["jj", "git", "remote", "remove", ""], &[]);
-    let targets = parse_output(&targets).expect("targets");
-    assert_eq!(Harness::values(&targets), vec!["origin", "upstream"]);
-}
-
-#[test]
-fn jj_rebase_destination_completes_revisions() {
-    let h = Harness::new("dyn-jj-rebase");
-    let (stdout, _, _) = h.run(&["jj", "rebase", "-d", ""], &[]);
-    let cands = parse_output(&stdout).expect("revisions");
-    assert_eq!(
-        Harness::values(&cands),
-        vec![
-            "main",
-            "feature",
-            "v1.0",
-            "v2.0",
-            "k",
-            "m",
-            "main@origin",
-            "feature@upstream",
-        ]
-    );
-}
-
-#[test]
-fn jj_op_restore_completes_operations() {
-    let h = Harness::new("dyn-jj-op");
-    let (stdout, _, _) = h.run(&["jj", "op", "restore", ""], &[]);
-    let cands = parse_output(&stdout).expect("operations");
-    assert_eq!(Harness::values(&cands), vec!["abc123"]);
-}
-
-#[test]
-fn jj_file_show_completes_repo_files() {
-    let h = Harness::new("dyn-jj-file");
-    let (stdout, _, _) = h.run(&["jj", "file", "show", ""], &[]);
-    let cands = parse_output(&stdout).expect("files");
-    assert_eq!(Harness::values(&cands), vec!["src/main.rs", "README.md"]);
-}
-
-#[test]
-fn jj_workspace_forget_completes_workspaces() {
-    let h = Harness::new("dyn-jj-workspace");
-    let (stdout, _, _) = h.run(&["jj", "workspace", "forget", ""], &[]);
-    let cands = parse_output(&stdout).expect("workspaces");
-    assert_eq!(Harness::values(&cands), vec!["default", "linked"]);
+    let (empty, _, _) = h.run(&["jj", "nothing", ""], &[]);
+    assert!(parse_output(&empty).is_none());
 }

@@ -125,7 +125,7 @@ in
       example = 2000;
       description = ''
         timeout in milliseconds for live dynamic completions in the nushell
-        shim. this bounds runtime calls such as nix, jj, kubectl, and systemctl.
+        shim. this bounds runtime calls such as nix, kubectl, and systemctl.
         set to 0 to disable the runtime timeout.
       '';
     };
