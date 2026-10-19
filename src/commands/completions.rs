@@ -1,66 +1,70 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah completions`.
 
-pub fn run() {
-    // inshellah's own surface is small enough that explicit externs beat the
-    // parser-driven generator aimed at arbitrary cmds.
-    print!(
-        r#"module inshellah-completions {{
-export extern "inshellah" [
-    --help(-h)                      # show help
-]
+use std::fmt::Write as _;
 
-export extern "inshellah index" [
-    ...prefix: path
-    --dir: path                     # completion output directory
-    --ignore: path                  # file of commands to skip
-    --help-only: path               # file of commands to scrape with --help only
-    --prefix: string                # extra colon-separated scrape prefixes
-    --timeout-ms: int               # per-subprocess timeout in milliseconds
-    --workers: int                  # parallel scrape workers
-]
+use pound::{ArgSpec, Command, CommandSpec, Hint};
 
-export extern "inshellah complete" [
-    cmd: string
-    ...args: string
-    --dir: string                   # writable cache plus read-only dirs
-    --timeout-ms: int               # on-the-fly scrape timeout in milliseconds
-]
+pub fn run(spec: &'static CommandSpec) {
+    let mut out = String::from("module inshellah-completions {\n");
+    write_extern(&mut out, &Command::root(spec));
+    out.push_str("}\n\nuse inshellah-completions *\n");
+    print!("{out}");
+}
 
-export extern "inshellah query" [
-    cmd: string
-    ...subcommand: string
-    --dir: string                   # completion directories to read
-]
+fn write_extern(out: &mut String, cmd: &Command<'_>) {
+    let name = cmd
+        .path()
+        .iter()
+        .chain([&cmd.spec().name])
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    writeln!(out, "export extern \"{name}\" [").expect("write to String");
 
-export extern "inshellah dump" [
-    --dir: string                   # completion directories to read
-]
+    for arg in cmd.positionals() {
+        let param = arg.metavar().to_lowercase().replace('-', "_");
+        let shape = if arg.multi {
+            format!("...{param}")
+        } else if arg.required {
+            param
+        } else {
+            format!("{param}?")
+        };
+        write_param(out, &format!("{shape}: {}", nu_type(arg)), arg.help);
+    }
 
-export extern "inshellah diff" [
-    cmd?: string
-    ...subcommand: string
-    --dir: path                     # extra man directory to inspect
-    --timeout-ms: int               # help scrape timeout in milliseconds
-    --scan: path                    # scan a prefix for source divergence
-]
+    for arg in cmd.options() {
+        let mut param = match (arg.long, arg.short) {
+            (Some(long), Some(short)) => format!("--{long}(-{short})"),
+            (Some(long), None) => format!("--{long}"),
+            (None, Some(short)) => format!("-{short}"),
+            (None, None) => continue,
+        };
+        if arg.takes_value() {
+            write!(param, ": {}", nu_type(&arg)).expect("write to String");
+        }
+        write_param(out, &param, arg.help);
+    }
 
-export extern "inshellah purge" [
-    --dir: string                   # writable cache plus read-only dirs
-]
+    out.push_str("]\n\n");
+    for sub in cmd.subcommands().filter(|sub| !sub.hidden()) {
+        write_extern(out, &sub);
+    }
+}
 
-export extern "inshellah manpage" [
-    file: path
-]
+fn write_param(out: &mut String, param: &str, help: &str) {
+    if help.is_empty() {
+        writeln!(out, "    {param}").expect("write to String");
+    } else {
+        writeln!(out, "    {param:<32}# {help}").expect("write to String");
+    }
+}
 
-export extern "inshellah manpage-dir" [
-    dir: path
-]
-
-export extern "inshellah completions" []
-}}
-
-use inshellah-completions *
-"#
-    );
+// a delimited list such as `a:b` is not one path, so nushell must not expand it as one
+fn nu_type(arg: &ArgSpec) -> &'static str {
+    match arg.hint {
+        Hint::Path if arg.delimiter.is_none() => "path",
+        _ => "string",
+    }
 }

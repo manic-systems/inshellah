@@ -162,6 +162,6 @@ fn main() {
             let mut dirs = dirs.resolve();
             commands::purge::run(&dirs.swap_remove(0));
         }
-        Cli::Completions => commands::completions::run(),
+        Cli::Completions => commands::completions::run(Cli::SPEC),
     }
 }
