@@ -524,7 +524,9 @@ pub fn cmd_merge(
             if ext != "json" && ext != "nu" {
                 continue;
             }
-            let cmd = command_of_filename(stem);
+            let Some(cmd) = command_of_filename(stem) else {
+                continue;
+            };
             let root = cmd.split(' ').next().unwrap_or_default().to_string();
             let owner = match owner_of(&root) {
                 Some(owner) => owner.to_path_buf(),
