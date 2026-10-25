@@ -192,6 +192,16 @@ fn run_cmd_inner(
         }
     }
 
+    // a child can close both pipes and keep running, so the deadline still
+    // applies after eof.
+    while !timed_out && !capped && matches!(child.try_wait(), Ok(None)) {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
     if timed_out || capped {
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
