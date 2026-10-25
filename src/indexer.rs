@@ -250,6 +250,7 @@ struct ScrapeCtx {
     truncated: Mutex<HashSet<String>>,
     root_help: Mutex<HashMap<String, u64>>,
     subtree_health: Mutex<HashMap<String, SubtreeHealth>>,
+    write_error: Mutex<Option<std::io::Error>>,
 }
 
 // a loaded box times out healthy tools too, so only roots where nothing answered.
@@ -417,12 +418,8 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
 
     match outcome {
         Outcome::Native { nu } => {
-            if write_native(&ctx.cache_dir, &full_cmd, &nu).is_ok() {
-                ctx.indexed
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(full_cmd);
-            }
+            let written = write_native(&ctx.cache_dir, &full_cmd, &nu);
+            ctx.record_write(full_cmd, written);
         }
         Outcome::Empty => {}
         Outcome::Content {
@@ -430,14 +427,9 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
             source,
             children,
         } => {
-            if write_result(&ctx.cache_dir, &full_cmd, source, &result).is_ok() {
-                ctx.indexed
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(full_cmd);
-                if !probe.echoed.get() {
-                    enqueue_child_jobs(ctx, &job, &children, submit);
-                }
+            let written = write_result(&ctx.cache_dir, &full_cmd, source, &result);
+            if ctx.record_write(full_cmd, written) && !probe.echoed.get() {
+                enqueue_child_jobs(ctx, &job, &children, submit);
             }
         }
     }
@@ -458,7 +450,7 @@ pub fn cmd_index(
     let binaries = list_binaries(bindirs, &nushell_commands);
     let profile = ProfileBinaries::new(&binaries, ignorelist);
     let mut indexed = ScrapeCtx::new(dir, mandirs, help_only, timeout_ms)
-        .scrape(profile.paths.iter(), num_workers);
+        .scrape(profile.paths.iter(), num_workers)?;
 
     ManpagePass {
         dir,
@@ -567,7 +559,7 @@ pub fn cmd_merge(
         .collect();
     indexed.extend(
         ScrapeCtx::new(dir, &mandirs, help_only, timeout_ms)
-            .scrape(rescrape.into_iter(), num_workers),
+            .scrape(rescrape.into_iter(), num_workers)?,
     );
 
     ManpagePass {
@@ -603,6 +595,29 @@ impl ScrapeCtx {
             truncated: Mutex::new(HashSet::new()),
             root_help: Mutex::new(HashMap::new()),
             subtree_health: Mutex::new(HashMap::new()),
+            write_error: Mutex::new(None),
+        }
+    }
+
+    fn record_write(&self, full_cmd: String, written: std::io::Result<()>) -> bool {
+        match written {
+            Ok(()) => {
+                self.indexed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(full_cmd);
+                true
+            }
+            Err(e) => {
+                let mut first = self
+                    .write_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                first.get_or_insert_with(|| {
+                    std::io::Error::new(e.kind(), format!("caching {full_cmd}: {e}"))
+                });
+                false
+            }
         }
     }
 
@@ -610,7 +625,7 @@ impl ScrapeCtx {
         self,
         roots: impl Iterator<Item = (&'a String, &'a PathBuf)>,
         num_workers: usize,
-    ) -> HashSet<String> {
+    ) -> std::io::Result<HashSet<String>> {
         let ctx = Arc::new(self);
         let pool = ScrapePool::new(num_workers, {
             let ctx = ctx.clone();
@@ -628,14 +643,20 @@ impl ScrapeCtx {
         }
         pool.wait();
         // no workers alive, so the Arc has a single strong ref
-        Arc::try_unwrap(ctx)
-            .ok()
-            .map(|c| {
-                c.indexed
-                    .into_inner()
-                    .unwrap_or_else(PoisonError::into_inner)
-            })
-            .unwrap_or_default()
+        let Ok(ctx) = Arc::try_unwrap(ctx) else {
+            return Ok(HashSet::new());
+        };
+        if let Some(e) = ctx
+            .write_error
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            return Err(e);
+        }
+        Ok(ctx
+            .indexed
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner))
     }
 }
 
