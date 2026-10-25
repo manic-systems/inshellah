@@ -248,14 +248,30 @@ pub fn write_result(
     source: &str,
     result: &ManpageResult,
 ) -> io::Result<()> {
-    let path = dir.join(format!("{}.json", filename_of_command(command)));
-    write_file(&path, &json_of_result(source, result))
+    let base = filename_of_command(command);
+    write_file(
+        &dir.join(format!("{base}.json")),
+        &json_of_result(source, result),
+    )?;
+
+    // lookup prefers .nu, so a leftover one would shadow the json just written.
+    remove_if_present(&dir.join(format!("{base}.nu")))
 }
 
 /// store a native-nushell completion blob the binary supplied itself.
 pub fn write_native(dir: &Path, command: &str, data: &str) -> io::Result<()> {
-    let path = dir.join(format!("{}.nu", filename_of_command(command)));
-    write_file(&path, data)
+    let base = filename_of_command(command);
+    write_file(&dir.join(format!("{base}.nu")), data)?;
+    // the manpage pass merges into an existing json, and that write would
+    // then drop this file.
+    remove_if_present(&dir.join(format!("{base}.json")))
+}
+
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 fn read_file(path: &Path) -> Option<String> {
@@ -621,14 +637,6 @@ mod tests {
     fn lookup_ignores_empty_native_result_before_json() {
         let dir = unique_dir("empty-native");
         fs::create_dir_all(&dir).unwrap();
-        write_file(
-            &dir.join(format!("{}.nu", filename_of_command("demo"))),
-            r#"export extern "other" [
-  --native
-]
-"#,
-        )
-        .unwrap();
         let result = ManpageResult {
             entries: vec![ManpageEntry {
                 switch: OwnedSwitch::Long("json".to_string()),
@@ -641,6 +649,14 @@ mod tests {
             description: String::new(),
         };
         write_result(&dir, "demo", "help", &result).unwrap();
+        write_file(
+            &dir.join(format!("{}.nu", filename_of_command("demo"))),
+            r#"export extern "other" [
+  --native
+]
+"#,
+        )
+        .unwrap();
 
         let found = lookup(std::slice::from_ref(&dir), "demo").unwrap();
         assert!(
@@ -667,26 +683,6 @@ mod tests {
         let age = user_cache_age(&dir, "command").expect("cache file should exist");
         assert!(age.as_secs() < 60, "age too large: {age:?}");
         assert!(user_cache_age(&dir, "nonexistent-command").is_none());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn user_cache_age_tracks_the_newest_candidate() {
-        let dir = unique_dir("cache-age-newest");
-        fs::create_dir_all(&dir).unwrap();
-        // an ancient json beside a fresh nu: the age must follow the newer file.
-        write_result(&dir, "multi", "manpage", &ManpageResult::default()).unwrap();
-        let json = dir.join(format!("{}.json", filename_of_command("multi")));
-        let ancient = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
-        fs::File::options()
-            .write(true)
-            .open(&json)
-            .and_then(|file| file.set_modified(ancient))
-            .unwrap();
-        write_native(&dir, "multi", "export extern \"multi\" [\n  --flag\n]\n").unwrap();
-
-        let age = user_cache_age(&dir, "multi").expect("cache file should exist");
-        assert!(age.as_secs() < 60, "expected newest-file age, got {age:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 
