@@ -161,8 +161,8 @@ pub fn run(
                 timeout_ms,
             )
         };
-        if resolved.is_some() {
-            found = find_result(&lookup_tokens);
+        if let Some(result) = resolved {
+            found = Some((resolve_tokens.join(" "), result, resolve_depth));
             slot = lookup_path_tokens(&dirs, &cmd_name, complete_rest).1;
         }
     }
