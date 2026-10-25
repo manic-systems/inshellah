@@ -62,6 +62,27 @@ pub(crate) fn kubectl_scope(spans: &[String]) -> KubeScope {
     }
 }
 
+fn cluster_args(spans: &[String]) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut iter = spans.iter();
+    while let Some(span) = iter.next() {
+        let (flag, inline) = match span.split_once('=') {
+            Some((flag, value)) => (flag, Some(value)),
+            None => (span.as_str(), None),
+        };
+        if !matches!(flag, "--context" | "--kubeconfig") {
+            continue;
+        }
+        if let Some(value) = inline
+            .or_else(|| iter.next().map(String::as_str))
+            .filter(|v| !v.is_empty())
+        {
+            args.extend([flag.to_string(), value.to_string()]);
+        }
+    }
+    args
+}
+
 fn kubectl_names(kind: &str, spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if kind.is_empty() || kind.starts_with('-') {
         return None;
@@ -73,6 +94,7 @@ fn kubectl_names(kind: &str, spans: &[String], ctx: &DynCtx) -> Option<Vec<Candi
         "custom-columns=NAME:.metadata.name"
     };
     let mut args: Vec<String> = vec![ctx.bin("kubectl"), "get".into(), kind.into()];
+    args.extend(cluster_args(spans));
     args.extend(scope.args.iter().cloned());
     args.extend(
         ["--no-headers", "-o", columns]
