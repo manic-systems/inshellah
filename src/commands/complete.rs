@@ -88,7 +88,7 @@ pub fn run(
     } else {
         &rest[..rest.len() - 1]
     };
-    let mut lookup_tokens = lookup_path_tokens(&dirs, &cmd_name, complete_rest);
+    let (mut lookup_tokens, mut slot) = lookup_path_tokens(&dirs, &cmd_name, complete_rest);
     if last_token.is_empty()
         && !rest.is_empty()
         && !lookup_tokens.last().is_some_and(|t| t.is_empty())
@@ -163,10 +163,11 @@ pub fn run(
         };
         if resolved.is_some() {
             found = find_result(&lookup_tokens);
+            slot = lookup_path_tokens(&dirs, &cmd_name, complete_rest).1;
         }
     }
 
-    let typing_flag = cfg.triggers_flags(&last_token);
+    let typing_flag = slot == ArgSlot::Free && cfg.triggers_flags(&last_token);
     let fallback_subcommands = match &found {
         Some((matched_name, r, _)) if r.subcommands.is_empty() => {
             subcommands_of(&dirs, matched_name)
@@ -184,8 +185,7 @@ pub fn run(
         None => false,
     };
     let candidates: Vec<Candidate> = match &found {
-        None => Vec::new(),
-        Some((_, r, depth)) => generate_candidates(
+        Some((_, r, depth)) if slot == ArgSlot::Free => generate_candidates(
             r,
             *depth,
             resolve_depth,
@@ -194,10 +194,13 @@ pub fn run(
             typing_flag,
             cfg,
         ),
+        _ => Vec::new(),
     };
     // hand off at non-flag leaf positions so file and dynamic completers can
     // answer argument prefixes. a leading "-" keeps flags.
-    let want_files = !typing_flag && !has_subs && (last_token.is_empty() || candidates.is_empty());
+    let want_files = !typing_flag
+        && (slot != ArgSlot::Free
+            || (!has_subs && (last_token.is_empty() || candidates.is_empty())));
     if !typing_flag
         && let Some(dyn_candidates) =
             dynamic_complete_candidates_with_path(&spans, explicit_cmd_path.as_deref(), cfg)
@@ -324,7 +327,15 @@ fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
     })
 }
 
-fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> Vec<String> {
+/// the slot the token under the cursor fills.
+#[derive(Clone, Copy, PartialEq)]
+enum ArgSlot {
+    Free,
+    FlagValue,
+    AfterDoubleDash,
+}
+
+fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> (Vec<String>, ArgSlot) {
     let mut tokens = vec![cmd_name.to_string()];
     let mut current = lookup(dirs, cmd_name);
     let mut skip_next_value = false;
@@ -337,6 +348,9 @@ fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> Vec<
         if skip_next_value {
             skip_next_value = false;
             continue;
+        }
+        if token == "--" {
+            return (tokens, ArgSlot::AfterDoubleDash);
         }
         if token.starts_with('-') {
             if current
@@ -364,7 +378,12 @@ fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> Vec<
         current = lookup(dirs, &name).or(current);
     }
 
-    tokens
+    let slot = if skip_next_value {
+        ArgSlot::FlagValue
+    } else {
+        ArgSlot::Free
+    };
+    (tokens, slot)
 }
 
 /// canonical child name for a token that matches one of `result`'s subcommand
