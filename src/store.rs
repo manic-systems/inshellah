@@ -208,14 +208,6 @@ fn json_entry(entry: &ManpageEntry) -> String {
 }
 
 fn json_subcommand(sc: &ManpageSubcommand) -> String {
-    // omit aliases when absent so non-aliased caches stay byte-identical.
-    if sc.aliases.is_empty() {
-        return format!(
-            r#"{{"name":{},"desc":{}}}"#,
-            json_string(&sc.name),
-            json_string(&sc.desc)
-        );
-    }
     let aliases = sc
         .aliases
         .iter()
