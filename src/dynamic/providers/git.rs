@@ -5,6 +5,7 @@ use crate::{
         Slot,
         shared::{
             DynCtx,
+            Words,
             parse_tabular,
             run,
         },
@@ -117,21 +118,27 @@ const GIT_WORKTREE_VERBS: &[&str] = &[
     "add", "list", "lock", "move", "prune", "remove", "repair", "unlock",
 ];
 
-pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    match git_completion(spans, ctx.slot)? {
+pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let mut git = vec![ctx.bin("git")];
+    for flag in ["-C", "--git-dir", "--work-tree"] {
+        if let Some(value) = words.global_value(&[flag]) {
+            git.extend([flag.to_owned(), value.to_owned()]);
+        }
+    }
+    match git_completion(words, ctx.slot)? {
         GitCompletion::Static {
             values,
             description,
         } => Some(static_candidates(values, description)),
-        GitCompletion::Refs => git_refs(ctx),
-        GitCompletion::Branches => git_branches(ctx),
-        GitCompletion::Tags => git_tags(ctx),
-        GitCompletion::Remotes => git_remotes(ctx),
-        GitCompletion::Stashes => git_stashes(ctx),
-        GitCompletion::StatusPaths => git_status_paths(ctx),
-        GitCompletion::TrackedPaths => git_tracked_paths(ctx),
-        GitCompletion::Submodules => git_submodules(ctx),
-        GitCompletion::Worktrees => git_worktrees(ctx),
+        GitCompletion::Refs => git_refs(&git, ctx),
+        GitCompletion::Branches => git_branches(&git, ctx),
+        GitCompletion::Tags => git_tags(&git, ctx),
+        GitCompletion::Remotes => git_remotes(&git, ctx),
+        GitCompletion::Stashes => git_stashes(&git, ctx),
+        GitCompletion::StatusPaths => git_status_paths(&git, ctx),
+        GitCompletion::TrackedPaths => git_tracked_paths(&git, ctx),
+        GitCompletion::Submodules => git_submodules(&git, ctx),
+        GitCompletion::Worktrees => git_worktrees(&git, ctx),
     }
 }
 
@@ -159,16 +166,10 @@ fn static_candidates(values: &'static [&'static str], description: &'static str)
         .collect()
 }
 
-fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
-    let span_len = spans.len();
-    let sub = spans.get(1).map_or("", String::as_str);
+fn git_completion(words: &Words, slot: Slot) -> Option<GitCompletion> {
+    let sub = words.arg(0);
     let prev = slot.value_flag().unwrap_or("");
-    let positionals_after_sub: Vec<&str> = spans
-        .iter()
-        .skip(2)
-        .filter(|span| !span.is_empty() && !span.starts_with('-'))
-        .map(String::as_str)
-        .collect();
+    let args_after_sub = words.arg_count().saturating_sub(1);
 
     if sub == "restore" && (prev == "--source" || prev == "-s") {
         return Some(GitCompletion::Refs);
@@ -176,7 +177,7 @@ fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
     if !slot.positional() {
         return None;
     }
-    if span_len <= 2 {
+    if words.arg_count() == 0 {
         return Some(GitCompletion::Static {
             values:      GIT_TOP_VERBS,
             description: "git subcommand",
@@ -192,81 +193,46 @@ fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
         _ => None,
     };
     if let Some((values, description)) = nested {
-        if span_len <= 3 {
+        if args_after_sub == 0 {
             return Some(GitCompletion::Static {
                 values,
                 description,
             });
         }
-        return nested_verb_completion(sub, spans, &positionals_after_sub);
+        return nested_verb_completion(sub, words);
     }
-    if matches!(sub, "fetch" | "push" | "pull") && span_len >= 3 {
-        if positionals_after_sub.is_empty() {
-            return Some(GitCompletion::Remotes);
-        }
-        return Some(GitCompletion::Refs);
+
+    match sub {
+        "fetch" | "push" | "pull" if args_after_sub == 0 => Some(GitCompletion::Remotes),
+        "fetch" | "push" | "pull" => Some(GitCompletion::Refs),
+        "tag" if words.has(&["-d", "--delete", "-v", "--verify"]) => Some(GitCompletion::Tags),
+        "tag" if args_after_sub >= 1 => Some(GitCompletion::Refs),
+        "tag" => Some(GitCompletion::Tags),
+        "add" | "restore" => Some(GitCompletion::StatusPaths),
+        "rm" => Some(GitCompletion::TrackedPaths),
+        "mv" => (args_after_sub == 0).then_some(GitCompletion::TrackedPaths),
+        "checkout" if ["-b", "-B", "--orphan"].contains(&prev) => None,
+        "switch" if ["-c", "-C", "--create", "--force-create", "--orphan"].contains(&prev) => None,
+        "switch" => Some(GitCompletion::Branches),
+        _ if GIT_BRANCH_VERBS.contains(&sub) => Some(GitCompletion::Branches),
+        _ if GIT_REF_VERBS.contains(&sub) => Some(GitCompletion::Refs),
+        _ => None,
     }
-    if sub == "tag" && span_len >= 3 {
-        let delete_or_verify = ["-d", "--delete", "-v", "--verify"]
-            .iter()
-            .any(|flag| spans.iter().any(|span| span == flag));
-        if delete_or_verify {
-            return Some(GitCompletion::Tags);
-        }
-        if span_len >= 4 {
-            return Some(GitCompletion::Refs);
-        }
-        return Some(GitCompletion::Tags);
-    }
-    if matches!(sub, "add" | "restore") && span_len >= 3 {
-        return Some(GitCompletion::StatusPaths);
-    }
-    if sub == "rm" && span_len >= 3 {
-        return Some(GitCompletion::TrackedPaths);
-    }
-    if sub == "mv" && span_len >= 3 {
-        return positionals_after_sub
-            .is_empty()
-            .then_some(GitCompletion::TrackedPaths);
-    }
-    if sub == "checkout" && span_len >= 3 {
-        if ["-b", "-B", "--orphan"].contains(&prev) {
-            return None;
-        }
-        return Some(GitCompletion::Refs);
-    }
-    if sub == "switch" && span_len >= 3 {
-        if ["-c", "-C", "--create", "--force-create", "--orphan"].contains(&prev) {
-            return None;
-        }
-        return Some(GitCompletion::Branches);
-    }
-    if GIT_BRANCH_VERBS.contains(&sub) && span_len >= 3 {
-        return Some(GitCompletion::Branches);
-    }
-    if GIT_REF_VERBS.contains(&sub) && span_len >= 3 {
-        return Some(GitCompletion::Refs);
-    }
-    None
 }
 
-fn nested_verb_completion(
-    sub: &str,
-    spans: &[String],
-    positionals_after_sub: &[&str],
-) -> Option<GitCompletion> {
-    let verb = spans.get(2).map_or("", String::as_str);
+fn nested_verb_completion(sub: &str, words: &Words) -> Option<GitCompletion> {
+    let verb = words.arg(1);
     match sub {
         "worktree" if ["remove", "move", "lock", "unlock", "repair"].contains(&verb) => {
             Some(GitCompletion::Worktrees)
         },
-        "worktree" if verb == "add" && spans.len() >= 5 => Some(GitCompletion::Refs),
+        "worktree" if verb == "add" && words.arg_count() >= 3 => Some(GitCompletion::Refs),
         "remote" if GIT_REMOTE_VERBS.contains(&verb) && verb != "add" => {
             Some(GitCompletion::Remotes)
         },
         "stash"
             if ["show", "drop", "pop", "apply", "store"].contains(&verb)
-                || (verb == "branch" && positionals_after_sub.len() >= 2) =>
+                || (verb == "branch" && words.arg_count() >= 3) =>
         {
             Some(GitCompletion::Stashes)
         },
@@ -278,8 +244,15 @@ fn nested_verb_completion(
     }
 }
 
-fn git_refs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec![ctx.bin("git"), "for-each-ref".into()];
+fn command(git: &[String], args: &[&str]) -> Vec<String> {
+    git.iter()
+        .cloned()
+        .chain(args.iter().map(|arg| (*arg).to_owned()))
+        .collect()
+}
+
+fn git_refs(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let mut args = command(git, &["for-each-ref"]);
     args.extend(ctx.limit_args("--count"));
     args.push("--format=%(refname:short)%09%(objecttype)%09%(contents:subject)".into());
     args.extend(
@@ -296,8 +269,8 @@ fn git_refs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     }))
 }
 
-fn git_branches(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec![ctx.bin("git"), "for-each-ref".into()];
+fn git_branches(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let mut args = command(git, &["for-each-ref"]);
     args.extend(ctx.limit_args("--count"));
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/heads".into());
@@ -310,8 +283,8 @@ fn git_branches(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     }))
 }
 
-fn git_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec![ctx.bin("git"), "for-each-ref".into()];
+fn git_tags(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let mut args = command(git, &["for-each-ref"]);
     args.extend(ctx.limit_args("--count"));
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/tags".into());
@@ -324,8 +297,8 @@ fn git_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     }))
 }
 
-fn git_remotes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let out = run(&[ctx.bin("git"), "remote".into()], ctx)?;
+fn git_remotes(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let out = run(&command(git, &["remote"]), ctx)?;
     let mut candidates = Vec::new();
     for line in out.lines() {
         let trimmed = line.trim();
@@ -337,8 +310,8 @@ fn git_remotes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn git_stashes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args: Vec<String> = vec![ctx.bin("git"), "stash".into(), "list".into()];
+fn git_stashes(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let mut args = command(git, &["stash", "list"]);
     args.extend(ctx.limit_args("-n"));
     let out = run(&args, ctx)?;
     let mut candidates = Vec::new();
@@ -356,16 +329,8 @@ fn git_stashes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn git_status_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let out = run(
-        &[
-            ctx.bin("git"),
-            "status".into(),
-            "--porcelain".into(),
-            "-uall".into(),
-        ],
-        ctx,
-    )?;
+fn git_status_paths(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let out = run(&command(git, &["status", "--porcelain", "-uall"]), ctx)?;
     let mut candidates = Vec::new();
     for line in out.lines() {
         let Some(raw) = line.get(3..) else {
@@ -381,8 +346,8 @@ fn git_status_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn git_tracked_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let out = run(&[ctx.bin("git"), "ls-files".into()], ctx)?;
+fn git_tracked_paths(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let out = run(&command(git, &["ls-files"]), ctx)?;
     let mut candidates = Vec::new();
     for line in out.lines() {
         if line.is_empty() {
@@ -393,16 +358,15 @@ fn git_tracked_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn git_submodules(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+fn git_submodules(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run(
-        &[
-            ctx.bin("git"),
-            "config".into(),
-            "--file".into(),
-            ".gitmodules".into(),
-            "--get-regexp".into(),
-            "^submodule\\..*\\.path$".into(),
-        ],
+        &command(git, &[
+            "config",
+            "--file",
+            ".gitmodules",
+            "--get-regexp",
+            "^submodule\\..*\\.path$",
+        ]),
         ctx,
     )?;
     let mut candidates = Vec::new();
@@ -416,16 +380,8 @@ fn git_submodules(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn git_worktrees(ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let out = run(
-        &[
-            ctx.bin("git"),
-            "worktree".into(),
-            "list".into(),
-            "--porcelain".into(),
-        ],
-        ctx,
-    )?;
+fn git_worktrees(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let out = run(&command(git, &["worktree", "list", "--porcelain"]), ctx)?;
     let mut candidates = Vec::new();
     for line in out.lines() {
         if let Some(rest) = line.strip_prefix("worktree ") {

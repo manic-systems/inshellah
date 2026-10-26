@@ -33,6 +33,112 @@ pub struct DynCtx<'span> {
     pub cmd_name:          &'span str,
     pub explicit_cmd_path: Option<&'span Path>,
     pub slot:              Slot<'span>,
+    /// flags the static cache knows take a value.
+    pub value_flags:       &'span [String],
+}
+
+/// the words before the cursor, split into positionals and flags.
+pub struct Words<'span> {
+    spans:       &'span [String],
+    positionals: Vec<&'span str>,
+    flags:       Vec<(&'span str, Option<&'span str>)>,
+    /// how many of `flags` came before the first positional.
+    leading:     usize,
+}
+
+impl<'span> Words<'span> {
+    pub fn parse<TakesValue>(spans: &'span [String], takes_value: TakesValue) -> Self
+    where
+        TakesValue: Fn(&str) -> bool,
+    {
+        let before = spans.split_last().map_or(&[][..], |(_, before)| before);
+        let mut words = before.iter().skip(1).map(String::as_str);
+        let mut positionals = Vec::new();
+        let mut flags = Vec::new();
+        let mut after_dashes = false;
+        let mut leading = None;
+
+        while let Some(word) = words.next() {
+            if word.is_empty() {
+                continue;
+            }
+            if after_dashes || word == "-" || !word.starts_with('-') {
+                leading.get_or_insert(flags.len());
+                positionals.push(word);
+            } else if word == "--" {
+                after_dashes = true;
+            } else if let Some((flag, value)) = word.split_once('=')
+                && flag.starts_with("--")
+            {
+                flags.push((flag, Some(value)));
+            } else {
+                let value = if takes_value(word) {
+                    words.next()
+                } else {
+                    None
+                };
+                flags.push((word, value));
+            }
+        }
+        Self {
+            spans,
+            positionals,
+            leading: leading.unwrap_or(flags.len()),
+            flags,
+        }
+    }
+
+    pub const fn spans(&self) -> &'span [String] {
+        self.spans
+    }
+
+    pub fn command(&self) -> &'span str {
+        self.spans.first().map_or("", String::as_str)
+    }
+
+    pub fn current(&self) -> &'span str {
+        self.spans.last().map_or("", String::as_str)
+    }
+
+    /// positional `idx`, counting the first word after the command as 0.
+    pub fn arg(&self, idx: usize) -> &'span str {
+        self.positionals.get(idx).copied().unwrap_or("")
+    }
+
+    /// positionals typed before the cursor word.
+    pub const fn arg_count(&self) -> usize {
+        self.positionals.len()
+    }
+
+    pub fn has(&self, names: &[&str]) -> bool {
+        self.flags.iter().any(|(flag, _)| names.contains(flag))
+    }
+
+    pub fn value(&self, names: &[&str]) -> Option<&'span str> {
+        flag_in(&self.flags, names).map(|(_, value)| value)
+    }
+
+    /// value of a flag typed before the subcommand, so still the global flag.
+    pub fn global_value(&self, names: &[&str]) -> Option<&'span str> {
+        self.global_flag(names).map(|(_, value)| value)
+    }
+
+    /// the last-typed alias in `names` before the subcommand, with its value.
+    pub fn global_flag(&self, names: &[&str]) -> Option<(&'span str, &'span str)> {
+        flag_in(&self.flags[..self.leading], names)
+    }
+}
+
+fn flag_in<'span>(
+    flags: &[(&'span str, Option<&'span str>)],
+    names: &[&str],
+) -> Option<(&'span str, &'span str)> {
+    flags
+        .iter()
+        .rev()
+        .find(|(flag, _)| names.contains(flag))
+        .and_then(|(flag, value)| Some((*flag, (*value)?)))
+        .filter(|(_, value)| !value.is_empty())
 }
 
 impl DynCtx<'_> {

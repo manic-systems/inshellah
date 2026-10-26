@@ -8,10 +8,13 @@ use std::{
 
 use crate::{
     complete::Candidate,
-    dynamic::shared::DynCtx,
+    dynamic::shared::{
+        DynCtx,
+        Words,
+    },
 };
 
-pub(super) fn complete(_spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+pub(super) fn complete(_words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !ctx.slot.positional() && ctx.slot.value_flag() != Some("-J") {
         return None;
     }

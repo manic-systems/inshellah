@@ -7,12 +7,14 @@ use crate::{
     dynamic::shared::{
         DynCtx,
         Matching,
+        Words,
         filter_candidates,
         run_with,
     },
 };
 
-pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let spans = words.spans();
     if let Some(candidates) = native(spans, ctx) {
         return Some(candidates);
     }

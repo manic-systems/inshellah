@@ -3,10 +3,12 @@ use crate::{
     complete::Candidate,
     dynamic::shared::{
         DynCtx,
+        Words,
         run_with,
     },
 };
-pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let spans = words.spans();
     if spans.len() < 2 {
         return None;
     }

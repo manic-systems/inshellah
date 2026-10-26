@@ -3,33 +3,32 @@ use crate::{
     complete::Candidate,
     dynamic::shared::{
         DynCtx,
+        Words,
         run,
     },
 };
-pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !ctx.slot.positional() {
         return None;
     }
-    let sub = spans.get(1).map_or("", String::as_str);
+    let sub = words.arg(0);
     let resource_verbs = [
         "get", "describe", "delete", "edit", "scale", "annotate", "label",
     ];
-    if resource_verbs.contains(&sub) && spans.len() >= 4 {
-        let kind = spans.get(2).map_or("", String::as_str);
-        return kubectl_names(kind, spans, ctx);
+    if resource_verbs.contains(&sub) && words.arg_count() >= 2 {
+        return kubectl_names(words.arg(1), words, ctx);
     }
-    if (sub == "logs" || sub == "exec" || sub == "port-forward") && spans.len() >= 3 {
-        return kubectl_names("pods", spans, ctx);
+    if matches!(sub, "logs" | "exec" | "port-forward") && words.arg_count() >= 1 {
+        return kubectl_names("pods", words, ctx);
     }
-    if sub == "rollout" && spans.len() >= 5 {
-        let action = spans.get(2).map_or("", String::as_str);
-        let kind = spans.get(3).map_or("", String::as_str);
-        if matches!(
-            action,
+    if sub == "rollout"
+        && words.arg_count() >= 3
+        && matches!(
+            words.arg(1),
             "history" | "pause" | "restart" | "resume" | "status" | "undo"
-        ) {
-            return kubectl_names(kind, spans, ctx);
-        }
+        )
+    {
+        return kubectl_names(words.arg(2), words, ctx);
     }
     None
 }
@@ -39,77 +38,44 @@ pub struct KubeScope {
     pub all:  bool,
 }
 
-pub fn kubectl_scope(spans: &[String]) -> KubeScope {
-    let all_namespaces = spans
-        .iter()
-        .any(|span| span == "-A" || span == "--all-namespaces");
-    if all_namespaces {
+pub fn kubectl_scope(words: &Words) -> KubeScope {
+    if words.has(&["-A", "--all-namespaces"]) {
         return KubeScope {
             args: vec!["--all-namespaces".into()],
             all:  true,
         };
     }
-    let mut namespace: Option<String> = None;
-    let mut i = 0_usize;
-    while i < spans.len() {
-        let span = &spans[i];
-        if let Some(rest) = span.strip_prefix("--namespace=") {
-            namespace = Some(rest.to_owned());
-        } else if (span == "-n" || span == "--namespace") && i + 1 < spans.len() {
-            namespace = Some(spans[i + 1].clone());
-            i += 1;
-        }
-        i += 1;
-    }
-    match namespace {
-        Some(ns) if !ns.is_empty() => {
-            KubeScope {
-                args: vec!["-n".into(), ns],
-                all:  false,
-            }
-        },
-        _ => {
-            KubeScope {
-                args: Vec::new(),
-                all:  false,
-            }
-        },
-    }
+    let args = words
+        .value(&["-n", "--namespace"])
+        .map(|namespace| vec!["-n".to_owned(), namespace.to_owned()])
+        .unwrap_or_default();
+    KubeScope { args, all: false }
 }
 
-fn cluster_args(spans: &[String]) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut iter = spans.iter();
-    while let Some(span) = iter.next() {
-        let (flag, inline) = match span.split_once('=') {
-            Some((flag, value)) => (flag, Some(value)),
-            None => (span.as_str(), None),
-        };
-        if !matches!(flag, "--context" | "--kubeconfig") {
-            continue;
-        }
-        if let Some(value) = inline
-            .or_else(|| iter.next().map(String::as_str))
-            .filter(|value| !value.is_empty())
-        {
-            args.extend([flag.to_owned(), value.to_owned()]);
-        }
-    }
-    args
+fn cluster_args(words: &Words) -> Vec<String> {
+    ["--context", "--kubeconfig"]
+        .into_iter()
+        .filter_map(|flag| {
+            words
+                .value(&[flag])
+                .map(|value| [flag.to_owned(), value.to_owned()])
+        })
+        .flatten()
+        .collect()
 }
 
-fn kubectl_names(kind: &str, spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if kind.is_empty() || kind.starts_with('-') {
+fn kubectl_names(kind: &str, words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    if kind.is_empty() {
         return None;
     }
-    let scope = kubectl_scope(spans);
+    let scope = kubectl_scope(words);
     let columns = if scope.all {
         "custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name"
     } else {
         "custom-columns=NAME:.metadata.name"
     };
     let mut args: Vec<String> = vec![ctx.bin("kubectl"), "get".into(), kind.into()];
-    args.extend(cluster_args(spans));
+    args.extend(cluster_args(words));
     args.extend(scope.args.iter().cloned());
     args.extend(
         ["--no-headers", "-o", columns]

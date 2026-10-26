@@ -3,6 +3,7 @@ use crate::{
     complete::Candidate,
     dynamic::shared::{
         DynCtx,
+        Words,
         run,
     },
 };
@@ -13,15 +14,28 @@ const DOCKER_CONTAINER_VERBS: &[&str] = &[
 const DOCKER_IMAGE_VERBS: &[&str] = &[
     "run", "rmi", "tag", "push", "pull", "history", "save", "create",
 ];
+const ENDPOINT_FLAGS: &[&[&str]] = &[
+    &["-H", "--host"],
+    &["-c", "--context", "--connection"],
+    &["--config"],
+    &["--url"],
+    &["--identity"],
+];
 
-pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !ctx.slot.positional() {
         return None;
     }
-    let cmd = ctx.bin(spans[0].as_str());
-    let sub = spans.get(1).map_or("", String::as_str);
+    let mut base = vec![ctx.bin(words.command())];
+    for aliases in ENDPOINT_FLAGS {
+        if let Some((flag, value)) = words.global_flag(aliases) {
+            base.extend([flag.to_owned(), value.to_owned()]);
+        }
+    }
+    let sub = words.arg(0);
     if DOCKER_CONTAINER_VERBS.contains(&sub) {
-        let mut args = vec![cmd, "ps".into()];
+        let mut args = base;
+        args.push("ps".into());
         args.extend(ctx.limit_args("--last"));
         args.extend(
             ["--format", "{{.Names}}\t{{.Image}}"]
@@ -38,12 +52,12 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
         }
         (!candidates.is_empty()).then_some(candidates)
     } else if DOCKER_IMAGE_VERBS.contains(&sub) {
-        let args: Vec<String> = vec![
-            cmd,
-            "images".into(),
-            "--format".into(),
-            "{{.Repository}}:{{.Tag}}\t{{.Size}}".into(),
-        ];
+        let mut args = base;
+        args.extend(
+            ["images", "--format", "{{.Repository}}:{{.Tag}}\t{{.Size}}"]
+                .into_iter()
+                .map(str::to_owned),
+        );
         let out = run(&args, ctx)?;
         let mut candidates = Vec::new();
         for line in out.lines() {

@@ -3,14 +3,15 @@ use crate::{
     complete::Candidate,
     dynamic::shared::{
         DynCtx,
+        Words,
         run,
     },
 };
-pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !ctx.slot.positional() {
         return None;
     }
-    let by_pid = spans[0] == "kill";
+    let by_pid = words.command() == "kill";
     let out = run(
         &[
             "ps".into(),

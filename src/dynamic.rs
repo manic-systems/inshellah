@@ -89,6 +89,7 @@ pub fn dynamic_value_completions(
         cmd_name,
         explicit_cmd_path,
         slot: Slot::from_spans(&spans),
+        value_flags: &[],
     };
     providers::value_completions(&spans, &ctx)
 }
@@ -100,14 +101,21 @@ pub fn dynamic_complete_with_path(
     explicit_cmd_path: Option<&Path>,
     cfg: &Config,
 ) -> Option<Vec<String>> {
-    dynamic_complete_candidates_with_path(spans, explicit_cmd_path, Slot::from_spans(spans), cfg)
-        .map(|(candidates, _)| candidates.into_iter().map(Candidate::into_json).collect())
+    dynamic_complete_candidates_with_path(
+        spans,
+        explicit_cmd_path,
+        Slot::from_spans(spans),
+        &[],
+        cfg,
+    )
+    .map(|(candidates, _)| candidates.into_iter().map(Candidate::into_json).collect())
 }
 
 pub fn dynamic_complete_candidates_with_path(
     spans: &[String],
     explicit_cmd_path: Option<&Path>,
     slot: Slot<'_>,
+    value_flags: &[String],
     cfg: &Config,
 ) -> Option<(Vec<Candidate>, Files)> {
     if spans.is_empty() {
@@ -124,6 +132,7 @@ pub fn dynamic_complete_candidates_with_path(
         cmd_name: &spans[0],
         explicit_cmd_path,
         slot,
+        value_flags,
     };
     let (raw, files, matching) = providers::dispatch(spans, &ctx)?;
     let last = spans.last().map_or("", String::as_str);
@@ -140,6 +149,7 @@ mod tests {
         },
         shared::{
             Matching,
+            Words,
             filter_candidates,
         },
         *,
@@ -198,7 +208,7 @@ mod tests {
             "prod".into(),
             String::new(),
         ];
-        let scope = kubectl_scope(&spans);
+        let scope = kubectl_scope(&Words::parse(&spans, |flag| flag == "-n"));
         assert!(!scope.all);
         assert_eq!(scope.args, vec!["-n".to_owned(), "prod".to_owned()]);
     }
@@ -212,7 +222,7 @@ mod tests {
             "-A".into(),
             String::new(),
         ];
-        let scope = kubectl_scope(&spans);
+        let scope = kubectl_scope(&Words::parse(&spans, |_| false));
         assert!(scope.all);
     }
 

@@ -38,6 +38,7 @@ use inshellah::{
         manpage::{
             ManpageEntry,
             ManpageResult,
+            OwnedSwitch,
         },
         nushell::nushell_type_of_param,
     },
@@ -188,6 +189,7 @@ pub fn run(
                     ArgSlot::AfterDoubleDash => Slot::Positional,
                     ArgSlot::Free => Slot::from_spans(&spans),
                 },
+                &value_flags(&dirs, &cmd_name, found.as_ref()),
                 cfg,
             )
         })
@@ -349,6 +351,27 @@ fn flag_value_choices(
     let candidates = choice_candidates(&param.choices, typed, &prefix, cfg);
     let takes_path = nushell_type_of_param(&param.name) == "path";
     (!candidates.is_empty() || !takes_path).then_some(candidates)
+}
+
+/// value-taking flags of the root command and the resolved subcommand.
+fn value_flags(
+    dirs: &[PathBuf],
+    cmd_name: &str,
+    found: Option<&(String, ManpageResult, usize)>,
+) -> Vec<String> {
+    let root = lookup(dirs, cmd_name);
+    let nodes = root.iter().chain(found.map(|(_, result, _)| result));
+    nodes
+        .flat_map(|result| &result.entries)
+        .filter(|entry| entry.takes_next_word())
+        .flat_map(|entry| {
+            match &entry.switch {
+                OwnedSwitch::Short(short) => vec![format!("-{short}")],
+                OwnedSwitch::Long(long) => vec![format!("--{long}")],
+                OwnedSwitch::Both(short, long) => vec![format!("-{short}"), format!("--{long}")],
+            }
+        })
+        .collect()
 }
 
 fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {

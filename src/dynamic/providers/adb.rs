@@ -18,6 +18,7 @@ use crate::{
     },
     dynamic::shared::{
         DynCtx,
+        Words,
         find_in_path,
         run_scrape,
     },
@@ -43,7 +44,8 @@ enum AdbDeviceCompletion<'args> {
 
 /// value completions for adb selectors and package args, or None to let static
 /// flag completion answer. `spans[0]` is the command.
-pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let spans = words.spans();
     let rest = &spans[1..];
     let path = resolve_adb(ctx)?;
     if let Some(completion) = adb_device_completion(rest, ctx) {

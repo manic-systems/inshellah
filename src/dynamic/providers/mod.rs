@@ -6,6 +6,7 @@ use crate::{
         shared::{
             DynCtx,
             Matching,
+            Words,
         },
     },
 };
@@ -21,7 +22,7 @@ pub mod project;
 pub mod ssh;
 pub mod systemd;
 
-type CompleteFn = fn(&[String], &DynCtx<'_>) -> Option<Vec<Candidate>>;
+type CompleteFn = fn(&Words<'_>, &DynCtx<'_>) -> Option<Vec<Candidate>>;
 
 /// where a provider sits relative to static completion. `Value` preempts static
 /// flags; `Fallback` answers only when static produced nothing.
@@ -40,11 +41,13 @@ trait Provider {
 }
 
 struct FunctionProvider {
-    commands: &'static [&'static str],
-    kind:     Kind,
-    files:    Files,
-    matching: Matching,
-    complete: CompleteFn,
+    commands:    &'static [&'static str],
+    kind:        Kind,
+    files:       Files,
+    matching:    Matching,
+    /// global flags whose value is the next word, beyond what the cache knows.
+    value_flags: &'static [&'static str],
+    complete:    CompleteFn,
 }
 
 impl Provider for FunctionProvider {
@@ -65,27 +68,32 @@ impl Provider for FunctionProvider {
     }
 
     fn complete(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
-        (self.complete)(spans, ctx)
+        let words = Words::parse(spans, |flag| {
+            self.value_flags.contains(&flag) || ctx.value_flags.iter().any(|known| known == flag)
+        });
+        (self.complete)(&words, ctx)
     }
 }
 
 const PROVIDERS: &[FunctionProvider] = &[
     FunctionProvider {
-        commands: &["adb"],
-        kind:     Kind::Value,
-        files:    Files::Replace,
-        matching: Matching::Value,
-        complete: adb::complete,
+        commands:    &["adb"],
+        kind:        Kind::Value,
+        files:       Files::Replace,
+        matching:    Matching::Value,
+        value_flags: &[],
+        complete:    adb::complete,
     },
     FunctionProvider {
-        commands: &["nix"],
-        kind:     Kind::Fallback,
-        files:    Files::Alongside,
-        matching: Matching::Value,
-        complete: nix::complete,
+        commands:    &["nix"],
+        kind:        Kind::Fallback,
+        files:       Files::Alongside,
+        matching:    Matching::Value,
+        value_flags: &[],
+        complete:    nix::complete,
     },
     FunctionProvider {
-        commands: &[
+        commands:    &[
             "systemctl",
             "journalctl",
             "coredumpctl",
@@ -93,66 +101,140 @@ const PROVIDERS: &[FunctionProvider] = &[
             "machinectl",
             "networkctl",
         ],
-        kind:     Kind::Fallback,
-        files:    Files::Replace,
-        matching: Matching::Value,
-        complete: systemd::complete,
+        kind:        Kind::Fallback,
+        files:       Files::Replace,
+        matching:    Matching::Value,
+        value_flags: &[
+            "-H",
+            "--host",
+            "-M",
+            "--machine",
+            "-t",
+            "--type",
+            "-p",
+            "--property",
+            "--state",
+            "-n",
+            "--lines",
+            "-o",
+            "--output",
+            "--root",
+            "-s",
+            "--signal",
+            "--kill-whom",
+            "-u",
+            "--unit",
+            "--user-unit",
+        ],
+        complete:    systemd::complete,
     },
     FunctionProvider {
-        commands: &["ssh", "sftp"],
-        kind:     Kind::Fallback,
-        files:    Files::Replace,
-        matching: Matching::Value,
-        complete: ssh::complete,
+        commands:    &["ssh", "sftp"],
+        kind:        Kind::Fallback,
+        files:       Files::Replace,
+        matching:    Matching::Value,
+        value_flags: &[],
+        complete:    ssh::complete,
     },
     FunctionProvider {
-        commands: &["scp"],
-        kind:     Kind::Fallback,
-        files:    Files::Alongside,
-        matching: Matching::Value,
-        complete: ssh::complete,
+        commands:    &["scp"],
+        kind:        Kind::Fallback,
+        files:       Files::Alongside,
+        matching:    Matching::Value,
+        value_flags: &[],
+        complete:    ssh::complete,
     },
     FunctionProvider {
-        commands: &["docker", "podman"],
-        kind:     Kind::Fallback,
-        files:    Files::Replace,
-        matching: Matching::Value,
-        complete: containers::complete,
+        commands:    &["docker", "podman"],
+        kind:        Kind::Fallback,
+        files:       Files::Replace,
+        matching:    Matching::Value,
+        value_flags: &[
+            "-H",
+            "--host",
+            "-c",
+            "--context",
+            "--config",
+            "--connection",
+            "--url",
+            "--identity",
+            "-l",
+            "--log-level",
+        ],
+        complete:    containers::complete,
     },
     FunctionProvider {
-        commands: &["kubectl"],
-        kind:     Kind::Fallback,
-        files:    Files::Replace,
-        matching: Matching::Value,
-        complete: kubectl::complete,
+        commands:    &["kubectl"],
+        kind:        Kind::Fallback,
+        files:       Files::Replace,
+        matching:    Matching::Value,
+        value_flags: &[
+            "-n",
+            "--namespace",
+            "--context",
+            "--kubeconfig",
+            "--cluster",
+            "--user",
+            "-s",
+            "--server",
+            "-l",
+            "--selector",
+            "-o",
+            "--output",
+            "-f",
+            "--filename",
+            "-c",
+            "--container",
+        ],
+        complete:    kubectl::complete,
     },
     FunctionProvider {
-        commands: &["git"],
-        kind:     Kind::Fallback,
-        files:    Files::Alongside,
-        matching: Matching::Value,
-        complete: git::complete,
+        commands:    &["git"],
+        kind:        Kind::Fallback,
+        files:       Files::Alongside,
+        matching:    Matching::Value,
+        value_flags: &["-C", "-c", "--git-dir", "--work-tree", "--namespace"],
+        complete:    git::complete,
     },
     FunctionProvider {
-        commands: &["jj"],
-        kind:     Kind::Value,
-        files:    Files::Replace,
-        matching: Matching::Value,
-        complete: jj::complete,
+        commands:    &["jj"],
+        kind:        Kind::Value,
+        files:       Files::Replace,
+        matching:    Matching::Value,
+        value_flags: &[],
+        complete:    jj::complete,
     },
     FunctionProvider {
-        commands: &["npm", "pnpm", "yarn", "make", "just", "cargo", "zig"],
-        kind:     Kind::Fallback,
-        files:    Files::Replace,
-        matching: Matching::Value,
-        complete: project::complete,
+        commands:    &["npm", "pnpm", "yarn", "make", "just", "cargo", "zig"],
+        kind:        Kind::Fallback,
+        files:       Files::Replace,
+        matching:    Matching::Value,
+        value_flags: &[
+            "-p",
+            "--package",
+            "--manifest-path",
+            "-C",
+            "--prefix",
+            "--dir",
+            "--cwd",
+            "-f",
+            "--file",
+            "--makefile",
+            "--directory",
+            "--justfile",
+            "-d",
+            "--working-directory",
+            "--build-file",
+        ],
+        complete:    project::complete,
     },
     FunctionProvider {
-        commands: &["kill", "pkill"],
-        kind:     Kind::Fallback,
-        files:    Files::Replace,
-        matching: Matching::ValueOrDescription,
-        complete: process::complete,
+        commands:    &["kill", "pkill"],
+        kind:        Kind::Fallback,
+        files:       Files::Replace,
+        matching:    Matching::ValueOrDescription,
+        value_flags: &[],
+        complete:    process::complete,
     },
 ];
 

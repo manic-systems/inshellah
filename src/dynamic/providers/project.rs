@@ -3,6 +3,7 @@ use std::{
     collections::HashSet,
     fmt,
     fs,
+    path::Path,
 };
 
 use serde_core::de::{
@@ -17,32 +18,33 @@ use crate::{
     complete::Candidate,
     dynamic::shared::{
         DynCtx,
+        Words,
         run,
     },
 };
 
-pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
-    match spans[0].as_str() {
-        "cargo" => cargo_completions(ctx),
+pub(super) fn complete(words: &Words, ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
+    match words.command() {
+        "cargo" => cargo_completions(words, ctx),
         _ if !ctx.slot.positional() => None,
-        "npm" | "pnpm" | "yarn" => npm_like_completions(spans, ctx),
-        "make" => make_completions(spans, ctx),
-        "just" => just_completions(spans, ctx),
-        "zig" => zig_completions(spans, ctx),
+        "npm" | "pnpm" | "yarn" => npm_like_completions(words),
+        "make" => make_completions(words),
+        "just" => just_completions(words, ctx),
+        "zig" => zig_completions(words, ctx),
         _ => None,
     }
 }
 
-fn npm_like_completions(spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let cmd = spans[0].as_str();
-    let sub = spans.get(1).map_or("", String::as_str);
-    let span_len = spans.len();
-    let wants = (cmd == "yarn" && span_len == 2)
-        || ((sub == "run" || sub == "run-script") && span_len == 3);
+fn npm_like_completions(words: &Words) -> Option<Vec<Candidate>> {
+    let wants = (words.command() == "yarn" && words.arg_count() == 0)
+        || (matches!(words.arg(0), "run" | "run-script") && words.arg_count() == 1);
     if !wants {
         return None;
     }
-    let contents = fs::read_to_string("package.json").ok()?;
+    let dir = words
+        .value(&["--prefix", "-C", "--dir", "--cwd"])
+        .unwrap_or(".");
+    let contents = fs::read_to_string(Path::new(dir).join("package.json")).ok()?;
     let Package(scripts) = serde_json::from_str(&contents).ok()?;
     let Scripts(candidates) = scripts?;
     (!candidates.is_empty()).then_some(candidates)
@@ -118,11 +120,16 @@ impl<'de> Deserialize<'de> for Scripts {
     }
 }
 
-fn make_completions(spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if spans.len() > 2 {
-        return None;
-    }
-    let contents = fs::read_to_string("Makefile").ok()?;
+fn make_completions(words: &Words) -> Option<Vec<Candidate>> {
+    let dir = Path::new(words.value(&["-C", "--directory"]).unwrap_or("."));
+    let contents = match words.value(&["-f", "--file", "--makefile"]) {
+        Some(file) => fs::read_to_string(dir.join(file)).ok()?,
+        None => {
+            ["GNUmakefile", "makefile", "Makefile"]
+                .iter()
+                .find_map(|name| fs::read_to_string(dir.join(name)).ok())?
+        },
+    };
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     for line in contents.lines() {
@@ -144,14 +151,18 @@ fn make_completions(spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn just_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if spans.len() > 2 {
+fn just_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    if words.arg_count() > 0 {
         return None;
     }
-    let out = run(
-        &[ctx.bin("just"), "--list".into(), "--unsorted".into()],
-        ctx,
-    )?;
+    let mut args = vec![ctx.bin("just")];
+    for (long, short) in [("--justfile", "-f"), ("--working-directory", "-d")] {
+        if let Some(value) = words.value(&[long, short]) {
+            args.extend([long.to_owned(), value.to_owned()]);
+        }
+    }
+    args.extend(["--list".to_owned(), "--unsorted".to_owned()]);
+    let out = run(&args, ctx)?;
     let mut candidates = Vec::new();
     // skip the "Available recipes:" header. lines are `name [args]  # desc`,
     // ASCII names only.
@@ -174,7 +185,7 @@ fn just_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn cargo_completions(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+fn cargo_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let prev = ctx.slot.value_flag().unwrap_or("");
     let target_flags = ["--bin", "--example", "--test", "--bench"];
     let want_package = prev == "-p" || prev == "--package";
@@ -182,16 +193,15 @@ fn cargo_completions(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !want_package && !want_target {
         return None;
     }
-    let out = run(
-        &[
-            ctx.bin("cargo"),
-            "metadata".into(),
-            "--no-deps".into(),
-            "--format-version".into(),
-            "1".into(),
-        ],
-        ctx,
-    )?;
+    let mut args = vec![ctx.bin("cargo")];
+    if let Some(dir) = words.value(&["-C"]) {
+        args.extend(["-C".to_owned(), dir.to_owned()]);
+    }
+    args.extend(["metadata", "--no-deps", "--format-version", "1"].map(str::to_owned));
+    if let Some(manifest) = words.value(&["--manifest-path"]) {
+        args.extend(["--manifest-path".to_owned(), manifest.to_owned()]);
+    }
+    let out = run(&args, ctx)?;
     let parsed: serde_json::Value = serde_json::from_str(&out).ok()?;
     let packages = parsed.get("packages")?.as_array()?;
     let mut seen = HashSet::new();
@@ -244,15 +254,16 @@ fn cargo_completions(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn zig_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if spans.get(1).map(String::as_str) != Some("build") {
+fn zig_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    if words.arg(0) != "build" {
         return None;
     }
 
-    let out = run(
-        &[ctx.bin("zig"), "build".into(), "--list-steps".into()],
-        ctx,
-    )?;
+    let mut args = vec![ctx.bin("zig"), "build".into(), "--list-steps".into()];
+    if let Some(file) = words.value(&["--build-file"]) {
+        args.extend(["--build-file".to_owned(), file.to_owned()]);
+    }
+    let out = run(&args, ctx)?;
 
     let mut candidates = Vec::new();
     for line in out.lines() {
