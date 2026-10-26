@@ -231,6 +231,10 @@ fn json_positional(name: &str, positional: &Positional) -> String {
     )
 }
 
+pub fn json_strings(items: &[&str]) -> String {
+    json_list(items, |item| json_string(item))
+}
+
 fn json_list<T, F>(items: &[T], render: F) -> String
 where
     F: Fn(&T) -> String,

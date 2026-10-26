@@ -75,6 +75,7 @@ use crate::{
     store::{
         command_of_filename,
         ensure_dir,
+        json_strings,
         read_result,
         write_file,
         write_native,
@@ -268,9 +269,10 @@ fn discover_nushell_native_commands() -> io::Result<HashSet<String>> {
 fn write_nushell_native_commands(dir: &Path, commands: &HashSet<String>) -> io::Result<()> {
     let mut sorted: Vec<&str> = commands.iter().map(String::as_str).collect();
     sorted.sort_unstable();
-    let data = serde_json::to_string(&sorted)
-        .map_err(|err| io::Error::other(format!("serialize Nushell native commands: {err}")))?;
-    write_file(&dir.join(NUSHELL_NATIVE_COMMANDS_FILE), &data)
+    write_file(
+        &dir.join(NUSHELL_NATIVE_COMMANDS_FILE),
+        &json_strings(&sorted),
+    )
 }
 
 pub fn manpage_name_has_installed_command<S>(name: &str, binary_names: &HashSet<String, S>) -> bool
