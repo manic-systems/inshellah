@@ -2,7 +2,9 @@
 //! `inshellah index`.
 
 use std::collections::HashSet;
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
+use std::thread::available_parallelism;
 
 use pound::Parse;
 
@@ -18,9 +20,9 @@ pub struct Args {
     /// extra colon-separated prefixes
     #[pound(long = "prefix", value_name = "PATHS", delimiter = ':')]
     pub extra_prefixes: Vec<PathBuf>,
-    /// output directory, $XDG_CACHE_HOME/inshellah when unset
-    #[pound(long)]
-    pub dir: Option<PathBuf>,
+    /// output directory
+    #[pound(long, default = { default_store_path().display() })]
+    pub dir: PathBuf,
     #[pound(flatten)]
     pub scrape: Scrape,
 }
@@ -34,23 +36,14 @@ pub struct Scrape {
     #[pound(long)]
     pub help_only: Option<PathBuf>,
     /// per-subprocess timeout in milliseconds
-    #[pound(long, value_name = "MS")]
-    pub timeout_ms: Option<u64>,
-    /// parallel scrape workers, the cpu count when unset
-    #[pound(long, min = 1)]
-    pub workers: Option<usize>,
+    #[pound(long, value_name = "MS", default = { DEFAULT_TIMEOUT_MS })]
+    pub timeout_ms: u64,
+    /// parallel scrape workers
+    #[pound(long, min = 1, default = { available_parallelism().map_or(4, NonZero::get) })]
+    pub workers: usize,
 }
 
 impl Scrape {
-    pub fn timeout_ms(&self) -> u64 {
-        self.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)
-    }
-
-    pub fn workers(&self) -> usize {
-        self.workers
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
-    }
-
     pub fn ignorelist(&self) -> HashSet<String> {
         self.ignore
             .as_deref()
@@ -77,7 +70,6 @@ pub fn run(args: Args) -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    let dir = args.dir.unwrap_or_else(default_store_path);
     let bindirs: Vec<PathBuf> = prefixes.iter().map(|p| p.join("bin")).collect();
     let mandirs: Vec<PathBuf> = prefixes.iter().map(|p| man_dir_of_prefix(p)).collect();
     cmd_index(
@@ -85,9 +77,9 @@ pub fn run(args: Args) -> std::io::Result<()> {
         &mandirs,
         &args.scrape.ignorelist(),
         &args.scrape.help_only_list(),
-        &dir,
-        args.scrape.timeout_ms(),
-        args.scrape.workers(),
+        &args.dir,
+        args.scrape.timeout_ms,
+        args.scrape.workers,
     )
 }
 

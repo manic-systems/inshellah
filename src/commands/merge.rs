@@ -34,8 +34,8 @@ pub fn run(args: Args) -> io::Result<()> {
         &args.scrape.ignorelist(),
         &args.scrape.help_only_list(),
         &args.dir,
-        args.scrape.timeout_ms(),
-        args.scrape.workers(),
+        args.scrape.timeout_ms,
+        args.scrape.workers,
     )
 }
 

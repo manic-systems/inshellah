@@ -14,5 +14,5 @@ fast-strip-ansi = "0.13.1"
 flate2 = "1.1.9"
 libc = "0.2.186"
 nom = "8.0.0"
-pound = "0.5.2"
+pound = "0.6.1"
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
