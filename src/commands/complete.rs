@@ -237,7 +237,8 @@ fn executable_span_path(span: &str) -> Option<PathBuf> {
     if !span.contains('/') {
         return None;
     }
-    let path = PathBuf::from(span);
+    // the scrape runner's cwd is /tmp, so a relative path would resolve there.
+    let path = std::path::absolute(span).ok()?;
     is_executable(&path).then_some(path)
 }
 
