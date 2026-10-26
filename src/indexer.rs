@@ -1036,19 +1036,34 @@ fn switches_overlap(left: &OwnedSwitch, right: &OwnedSwitch) -> bool {
     }
 }
 
-fn merge_entry_description(existing: &mut ManpageEntry, incoming: &ManpageEntry) -> bool {
-    let changed = existing.desc.is_empty() && !incoming.desc.is_empty();
+fn merge_entry_details(existing: &mut ManpageEntry, incoming: &ManpageEntry) -> bool {
+    let mut changed = existing.desc.is_empty() && !incoming.desc.is_empty();
     if changed {
         existing.desc.clone_from(&incoming.desc);
+    }
+    if let Some(incoming_param) = &incoming.param
+        && !incoming_param.choices.is_empty()
+    {
+        match &mut existing.param {
+            Some(param) if param.choices.is_empty() => {
+                param.choices.clone_from(&incoming_param.choices);
+                changed = true;
+            },
+            Some(_) => {},
+            None => {
+                existing.param = Some(incoming_param.clone());
+                changed = true;
+            },
+        }
     }
     changed
 }
 
-fn merge_matching_entry_descriptions(result: &mut ManpageResult, incoming: &ManpageEntry) -> bool {
+fn merge_matching_entry_details(result: &mut ManpageResult, incoming: &ManpageEntry) -> bool {
     let mut changed = false;
     for existing in &mut result.entries {
         if switches_overlap(&existing.switch, &incoming.switch) {
-            changed |= merge_entry_description(existing, incoming);
+            changed |= merge_entry_details(existing, incoming);
         }
     }
     changed
@@ -1089,16 +1104,16 @@ fn supplement_result_from_help(result: &mut ManpageResult, help: &ManpageResult)
                 }
                 if entry_overlaps(result, help_entry) {
                     changed |= alias_changed;
-                    changed |= merge_matching_entry_descriptions(result, help_entry);
+                    changed |= merge_matching_entry_details(result, help_entry);
                     continue;
                 }
             },
             OwnedSwitch::Long(long) if entry_has_long(result, long) => {
-                changed |= merge_matching_entry_descriptions(result, help_entry);
+                changed |= merge_matching_entry_details(result, help_entry);
                 continue;
             },
             OwnedSwitch::Short(short) if entry_has_short(result, *short) => {
-                changed |= merge_matching_entry_descriptions(result, help_entry);
+                changed |= merge_matching_entry_details(result, help_entry);
                 continue;
             },
             OwnedSwitch::Long(_) | OwnedSwitch::Short(_) => {},

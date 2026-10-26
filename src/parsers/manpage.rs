@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! parse unix manpages (groff/mdoc) into a structured result.
 
+mod choices;
 mod commands;
 mod desc;
 pub mod groff;
@@ -36,10 +37,36 @@ pub enum OwnedSwitch {
     Both(char, String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamKind {
+    Mandatory,
+    /// `--flag[=X]`, the value has to be attached.
+    Optional,
+    /// `--flag [<X>]`, the value may follow as its own word.
+    OptionalWord,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OwnedParam {
-    Mandatory(String),
-    Optional(String),
+pub struct ParamChoice {
+    pub value: String,
+    pub desc:  String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedParam {
+    pub kind:    ParamKind,
+    pub name:    String,
+    pub choices: Vec<ParamChoice>,
+}
+
+impl OwnedParam {
+    pub const fn new(kind: ParamKind, name: String) -> Self {
+        Self {
+            kind,
+            name,
+            choices: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +74,15 @@ pub struct ManpageEntry {
     pub switch: OwnedSwitch,
     pub param:  Option<OwnedParam>,
     pub desc:   String,
+}
+
+impl ManpageEntry {
+    /// a `[=X]` value has to be attached, so it never takes the next word.
+    pub fn takes_next_word(&self) -> bool {
+        self.param.as_ref().is_some_and(|param| {
+            matches!(param.kind, ParamKind::Mandatory | ParamKind::OptionalWord)
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,10 +121,34 @@ impl ManpageResult {
     /// canonicalise so the cache holds one shape. runs once at the end of every
     /// parse path.
     pub fn normalize(&mut self) {
+        for entry in &mut self.entries {
+            if let Some(param) = &mut entry.param
+                && param.choices.is_empty()
+            {
+                param.choices = choices::mine(&param.name, &entry.desc);
+            }
+            if entry.desc.contains('\n') {
+                entry.desc = entry
+                    .desc
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
+        }
         let entries = mem::take(&mut self.entries);
         self.entries = dedup_entries(merge_short_long_pairs(entries));
         for entry in &mut self.entries {
             clamp_description(&mut entry.desc);
+        }
+        for choice in self
+            .entries
+            .iter_mut()
+            .filter_map(|entry| entry.param.as_mut())
+            .flat_map(|param| &mut param.choices)
+        {
+            clamp_description(&mut choice.desc);
         }
         for sc in self
             .subcommands
@@ -697,7 +757,7 @@ mod tests {
         let entries = vec![
             ManpageEntry {
                 switch: OwnedSwitch::Short('o'),
-                param:  Some(OwnedParam::Mandatory("FILE".to_owned())),
+                param:  Some(OwnedParam::new(ParamKind::Mandatory, "FILE".to_owned())),
                 desc:   "write command output to file".to_owned(),
             },
             entry(
@@ -708,7 +768,7 @@ mod tests {
         let merged = merge_short_long_pairs(entries);
         assert_eq!(merged.len(), 1);
         match &merged[0].param {
-            Some(OwnedParam::Mandatory(param)) => assert_eq!(param, "FILE"),
+            Some(param) if param.kind == ParamKind::Mandatory => assert_eq!(param.name, "FILE"),
             other => panic!("expected param carried over, got {other:?}"),
         }
     }

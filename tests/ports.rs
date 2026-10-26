@@ -12,10 +12,9 @@ use inshellah::{
         help::help_parser,
         manpage::{
             ManpageResult,
-            OwnedParam as Param,
-            OwnedParam,
             OwnedSwitch as Switch,
             OwnedSwitch,
+            ParamKind,
             groff::strip_groff_escapes,
             parse_manpage_string,
             sections::extract_synopsis_command,
@@ -57,7 +56,9 @@ fn gnu_eq_param() {
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];
     assert!(matches!(&entry.switch, Switch::Long(long) if *long == "block-size"));
-    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "SIZE"));
+    assert!(
+        matches!(&entry.param, Some(param) if param.kind == ParamKind::Mandatory && param.name == "SIZE")
+    );
 }
 
 #[test]
@@ -66,7 +67,9 @@ fn gnu_opt_param() {
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];
     assert!(matches!(&entry.switch, Switch::Long(long) if *long == "color"));
-    assert!(matches!(&entry.param, Some(Param::Optional(param)) if *param == "WHEN"));
+    assert!(
+        matches!(&entry.param, Some(param) if param.kind == ParamKind::Optional && param.name == "WHEN")
+    );
 }
 
 #[test]
@@ -74,7 +77,9 @@ fn underscore_param() {
     let result = parse("      --time-style=TIME_STYLE  time/date format\n");
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];
-    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "TIME_STYLE"));
+    assert!(
+        matches!(&entry.param, Some(param) if param.kind == ParamKind::Mandatory && param.name == "TIME_STYLE")
+    );
 }
 
 #[test]
@@ -118,7 +123,9 @@ fn clap_short_sections() {
     assert_eq!(result.entries.len(), 3);
     let entry = &result.entries[0];
     assert!(matches!(&entry.switch, Switch::Both('e', long) if *long == "regexp"));
-    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "PATTERN"));
+    assert!(
+        matches!(&entry.param, Some(param) if param.kind == ParamKind::Mandatory && param.name == "PATTERN")
+    );
 }
 
 #[test]
@@ -140,7 +147,9 @@ fn clap_long_angle_param() {
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];
     assert!(matches!(&entry.switch, Switch::Long(long) if *long == "nonprintable-notation"));
-    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "notation"));
+    assert!(
+        matches!(&entry.param, Some(param) if param.kind == ParamKind::Mandatory && param.name == "notation")
+    );
 }
 
 #[test]
@@ -149,7 +158,9 @@ fn space_upper_param() {
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];
     assert!(matches!(&entry.switch, Switch::Both('f', long) if *long == "foo"));
-    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "FOO"));
+    assert!(
+        matches!(&entry.param, Some(param) if param.kind == ParamKind::Mandatory && param.name == "FOO")
+    );
 }
 
 #[test]
@@ -160,7 +171,9 @@ fn go_cobra_flags() {
     assert_eq!(result.entries.len(), 3);
     let host = &result.entries[1];
     assert!(matches!(&host.switch, Switch::Both('H', long) if *long == "host"));
-    assert!(matches!(&host.param, Some(Param::Mandatory(param)) if *param == "string"));
+    assert!(
+        matches!(&host.param, Some(param) if param.kind == ParamKind::Mandatory && param.name == "string")
+    );
 }
 
 #[test]
@@ -296,7 +309,7 @@ Written by someone.
     assert!(!result.entries[0].desc.is_empty());
     assert!(matches!(&result.entries[2].switch, OwnedSwitch::Long(long) if long == "block-size"));
     assert!(
-        matches!(&result.entries[2].param, Some(OwnedParam::Mandatory(param)) if param == "SIZE")
+        matches!(&result.entries[2].param, Some(param) if param.kind == ParamKind::Mandatory && param.name == "SIZE")
     );
 }
 
@@ -382,7 +395,7 @@ Print a short usage summary and exit.
         .expect("expected --service(-s)");
     assert!(matches!(
         &service.param,
-        Some(OwnedParam::Mandatory(param)) if param == "service"
+        Some(param) if param.kind == ParamKind::Mandatory && param.name == "service"
     ));
     assert!(
         !result.entries
@@ -564,7 +577,7 @@ This option may be given multiple times.
     assert!(result.entries[0].param.is_some());
     assert!(matches!(&result.entries[1].switch, OwnedSwitch::Both('I', long) if long == "include"));
     assert!(
-        matches!(&result.entries[1].param, Some(OwnedParam::Mandatory(param)) if param == "path")
+        matches!(&result.entries[1].param, Some(param) if param.kind == ParamKind::Mandatory && param.name == "path")
     );
 }
 

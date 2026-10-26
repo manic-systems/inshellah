@@ -1,6 +1,6 @@
 use inshellah::parsers::manpage::{
-    OwnedParam,
     OwnedSwitch,
+    ParamKind,
     parse_manpage_string,
     parse_manpage_with_subs,
 };
@@ -216,8 +216,8 @@ fn text_rs_strategy_extracts_ripgrep_style_flags() {
         OwnedSwitch::Both('e', ref long) if long == "regexp"
     ));
     assert!(matches!(
-        result.entries[0].param,
-        Some(OwnedParam::Mandatory(ref param)) if param == "PATTERN"
+        &result.entries[0].param,
+        Some(param) if param.kind == ParamKind::Mandatory && param.name == "PATTERN"
     ));
     assert!(
         result.entries[0]

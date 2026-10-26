@@ -43,6 +43,8 @@ use crate::{
             ManpageSubcommand,
             OwnedParam,
             OwnedSwitch,
+            ParamChoice,
+            ParamKind,
         },
         nushell::parse_nu_completions,
     },
@@ -186,16 +188,28 @@ fn json_switch(switch: &OwnedSwitch) -> String {
     }
 }
 
-fn json_param(param: Option<&OwnedParam>) -> String {
-    match param {
-        None => "null".to_owned(),
-        Some(OwnedParam::Mandatory(name)) => {
-            format!(r#"{{"kind":"mandatory","name":{}}}"#, json_string(name))
-        },
-        Some(OwnedParam::Optional(name)) => {
-            format!(r#"{{"kind":"optional","name":{}}}"#, json_string(name))
-        },
-    }
+fn json_choice(choice: &ParamChoice) -> String {
+    format!(
+        r#"{{"value":{},"desc":{}}}"#,
+        json_string(&choice.value),
+        json_string(&choice.desc)
+    )
+}
+
+fn json_param(maybe_param: Option<&OwnedParam>) -> String {
+    let Some(param) = maybe_param else {
+        return "null".to_owned();
+    };
+    let kind = match param.kind {
+        ParamKind::Mandatory => "mandatory",
+        ParamKind::Optional => "optional",
+        ParamKind::OptionalWord => "optional-word",
+    };
+    format!(
+        r#"{{"kind":"{kind}","name":{},"choices":{}}}"#,
+        json_string(&param.name),
+        json_list(&param.choices, json_choice)
+    )
 }
 
 fn json_entry(entry: &ManpageEntry) -> String {
@@ -394,12 +408,33 @@ fn param_from_json(value: &Value) -> Option<OwnedParam> {
     if value.is_null() {
         return None;
     }
-    let kind = value.get("kind")?.as_str()?;
-    let name = value.get("name")?.as_str()?.to_owned();
-    Some(match kind {
-        "mandatory" => OwnedParam::Mandatory(name),
-        "optional" => OwnedParam::Optional(name),
+    let kind = match value.get("kind")?.as_str()? {
+        "mandatory" => ParamKind::Mandatory,
+        "optional" => ParamKind::Optional,
+        "optional-word" => ParamKind::OptionalWord,
         _ => return None,
+    };
+    let name = value.get("name")?.as_str()?.to_owned();
+    let choices = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(choice_from_json).collect())
+        .unwrap_or_default();
+    Some(OwnedParam {
+        kind,
+        name,
+        choices,
+    })
+}
+
+fn choice_from_json(value: &Value) -> Option<ParamChoice> {
+    Some(ParamChoice {
+        value: value.get("value")?.as_str()?.to_owned(),
+        desc:  value
+            .get("desc")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
     })
 }
 

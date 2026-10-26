@@ -1,8 +1,8 @@
 use inshellah::parsers::{
     help::help_parser,
     manpage::{
-        OwnedParam,
         OwnedSwitch,
+        ParamKind,
     },
 };
 
@@ -59,7 +59,7 @@ fn parser_keeps_negatable_params() {
         .expect("jobs entry");
     assert!(matches!(
         &jobs.param,
-        Some(OwnedParam::Mandatory(param)) if param == "n"
+        Some(param) if param.kind == ParamKind::Mandatory && param.name == "n"
     ));
 
     let recurse = result
@@ -69,7 +69,7 @@ fn parser_keeps_negatable_params() {
         .expect("recurse-submodules entry");
     assert!(matches!(
         &recurse.param,
-        Some(OwnedParam::Optional(param)) if param == "pathspec"
+        Some(param) if param.kind == ParamKind::Optional && param.name == "pathspec"
     ));
 
     let reject = result

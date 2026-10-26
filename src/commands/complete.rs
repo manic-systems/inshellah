@@ -18,6 +18,8 @@ use std::{
 use inshellah::{
     complete::{
         Candidate,
+        choice_candidates,
+        entry_for_flag,
         generate_candidates,
     },
     config::Config,
@@ -31,8 +33,8 @@ use inshellah::{
         resolve_command_path_and_cache,
     },
     parsers::manpage::{
+        ManpageEntry,
         ManpageResult,
-        OwnedSwitch,
     },
     store::{
         self,
@@ -132,6 +134,10 @@ pub fn run(
     }
 
     let slot = cmd_path.slot;
+    if let Some(candidates) = flag_value_choices(found.as_ref(), slot, &last_token, cfg) {
+        return print_completion_candidate_values(candidates);
+    }
+
     let resolve_depth = cmd_path.depth;
     let typing_flag = slot == ArgSlot::Free && cfg.triggers_flags(&last_token);
     let fallback_subcommands = match &found {
@@ -314,34 +320,29 @@ fn print_completion_candidates(candidates: &[String]) -> io::Result<()> {
     out.write_all(b"]\n")
 }
 
+/// value choices for `--flag val` and `--flag=val`.
+fn flag_value_choices(
+    found: Option<&(String, ManpageResult, usize)>,
+    slot: ArgSlot<'_>,
+    last_token: &str,
+    cfg: &Config,
+) -> Option<Vec<Candidate>> {
+    let (flag, typed, prefix) = match slot {
+        ArgSlot::FlagValue(flag) => (flag, last_token, String::new()),
+        ArgSlot::Free if last_token.starts_with("--") => {
+            let (flag, typed) = last_token.split_once('=')?;
+            (flag, typed, format!("{flag}="))
+        },
+        ArgSlot::Free | ArgSlot::AfterDoubleDash => return None,
+    };
+    let (_, result, _) = found?;
+    let param = entry_for_flag(result, flag)?.param.as_ref()?;
+    let candidates = choice_candidates(&param.choices, typed, &prefix, cfg);
+    (!candidates.is_empty()).then_some(candidates)
+}
+
 fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
-    if token.contains('=') {
-        return false;
-    }
-    result.entries.iter().any(|entry| {
-        if entry.param.is_none() {
-            return false;
-        }
-        match &entry.switch {
-            OwnedSwitch::Long(long) => token == format!("--{long}"),
-            OwnedSwitch::Short(short) => {
-                let mut chars = token.chars();
-                matches!(
-                    (chars.next(), chars.next(), chars.next()),
-                    (Some('-'), Some(flag_char), None) if flag_char == *short
-                )
-            },
-            OwnedSwitch::Both(short, long) => {
-                token == format!("--{long}") || {
-                    let mut chars = token.chars();
-                    matches!(
-                        (chars.next(), chars.next(), chars.next()),
-                        (Some('-'), Some(flag_char), None) if flag_char == *short
-                    )
-                }
-            },
-        }
-    })
+    !token.contains('=') && entry_for_flag(result, token).is_some_and(ManpageEntry::takes_next_word)
 }
 
 /// the slot the token under the cursor fills.

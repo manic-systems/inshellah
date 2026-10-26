@@ -38,6 +38,7 @@ use inshellah::{
         ManpageSubcommand,
         OwnedParam,
         OwnedSwitch,
+        ParamKind,
     },
     store::write_result,
 };
@@ -74,7 +75,7 @@ fn write_stub_executable(bin: &Path, name: &str) {
 fn entry(switch: OwnedSwitch, param: Option<&str>, desc: &str) -> ManpageEntry {
     ManpageEntry {
         switch,
-        param: param.map(|name| OwnedParam::Mandatory(name.to_owned())),
+        param: param.map(|name| OwnedParam::new(ParamKind::Mandatory, name.to_owned())),
         desc: desc.to_owned(),
     }
 }

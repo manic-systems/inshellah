@@ -5,7 +5,10 @@ pub mod options;
 pub mod positionals;
 mod subcommands;
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    iter,
+};
 
 use nom::{
     IResult,
@@ -55,15 +58,13 @@ make_parser!(entry<'src> -> ManpageEntry,
     => |(_, (switch, param), (first, cont))
         : EntryParts<'src>|
     {
-        let mut lines: Vec<&str> = Vec::with_capacity(1 + cont.len());
-        if !first.trim().is_empty() { lines.push(first); }
-        lines.extend(cont.into_iter().filter(|line| !line.trim().is_empty()));
-        let desc = lines
-            .iter()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
+        let desc = iter::once(first)
+            .chain(cont)
+            .map(str::trim)
             .collect::<Vec<_>>()
-            .join(" ");
+            .join("\n")
+            .trim()
+            .to_owned();
         ManpageEntry { switch, param, desc }
     }
 );

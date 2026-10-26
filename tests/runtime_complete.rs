@@ -26,6 +26,7 @@ use inshellah::{
         ManpageSubcommand,
         OwnedParam,
         OwnedSwitch,
+        ParamKind,
     },
     store::{
         filename_of_command,
@@ -332,7 +333,7 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
     let parent = ManpageResult {
         entries:            vec![ManpageEntry {
             switch: OwnedSwitch::Long("config".to_owned()),
-            param:  Some(OwnedParam::Mandatory("FILE".to_owned())),
+            param:  Some(OwnedParam::new(ParamKind::Mandatory, "FILE".to_owned())),
             desc:   "config file".to_owned(),
         }],
         subcommands:        vec![ManpageSubcommand::new(

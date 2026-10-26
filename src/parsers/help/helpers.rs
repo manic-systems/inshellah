@@ -1,19 +1,11 @@
 use nom::{
     AsChar as _,
     IResult,
-    Parser,
+    Parser as _,
     branch::alt,
-    bytes::complete::{
-        take_till,
-        take_while,
-    },
+    bytes::complete::take_till,
     character::complete::line_ending,
-    combinator::{
-        eof,
-        peek,
-        verify,
-    },
-    error::Error,
+    combinator::eof,
 };
 
 #[macro_export]
@@ -65,17 +57,6 @@ pub fn visual_indent(whitespace: &str) -> u8 {
             _ => 0,
         })
     })
-}
-
-/// non-consuming check that input begins with ≥`min` visual cols of
-/// horizontal whitespace. pair with `space0`/`take_while` to eat it.
-pub fn at_least_indent<'src>(
-    min: u8,
-) -> impl Parser<&'src str, Output = &'src str, Error = Error<&'src str>> {
-    verify(
-        peek(take_while(|ch: char| ch == ' ' || ch == '\t')),
-        move |run: &str| visual_indent(run) >= min,
-    )
 }
 
 /// (byte index of first non-space, visual indent), for callers that need the

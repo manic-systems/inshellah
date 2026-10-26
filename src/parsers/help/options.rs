@@ -5,6 +5,7 @@ use crate::{
         manpage::{
             OwnedParam,
             OwnedSwitch,
+            ParamKind,
         },
     },
 };
@@ -20,6 +21,7 @@ enum Switch<'src> {
 enum Param<'src> {
     Mandatory(&'src str),
     Optional(&'src str),
+    OptionalWord(&'src str),
 }
 
 impl From<Switch<'_>> for OwnedSwitch {
@@ -35,8 +37,9 @@ impl From<Switch<'_>> for OwnedSwitch {
 impl From<Param<'_>> for OwnedParam {
     fn from(param: Param<'_>) -> Self {
         match param {
-            Param::Mandatory(name) => Self::Mandatory(name.to_owned()),
-            Param::Optional(name) => Self::Optional(name.to_owned()),
+            Param::Mandatory(name) => Self::new(ParamKind::Mandatory, name.to_owned()),
+            Param::Optional(name) => Self::new(ParamKind::Optional, name.to_owned()),
+            Param::OptionalWord(name) => Self::new(ParamKind::OptionalWord, name.to_owned()),
         }
     }
 }
@@ -60,6 +63,7 @@ use nom::{
     combinator::{
         map,
         opt,
+        recognize,
         value,
         verify,
     },
@@ -120,7 +124,17 @@ make_parser!(spaced_angle_param<'src> -> Param<'src>,
 make_parser!(spaced_opt_angle_param<'src> -> Param<'src>,
     preceded(char(' '), delimited(char('<'),
         delimited(char('['), take_while1(|ch| ch != ']'), char(']')),
-        char('>'))) => Param::Optional);
+        char('>'))) => Param::OptionalWord);
+
+make_parser!(spaced_opt_bracket_param<'src> -> Param<'src>,
+    preceded(char(' '), delimited(tag("[<"), take_till1(|ch| ch == '>'), tag(">]")))
+        => Param::OptionalWord);
+
+make_parser!(brace_choice_param<'src> -> Param<'src>,
+    preceded(
+        alt((char(' '), char('='))),
+        recognize(delimited(char('{'), take_till1(|ch| ch == '}' || ch == '\n'), char('}')))
+    ) => Param::Mandatory);
 
 make_parser!(spaced_angle_param_after_space<'src> -> Param<'src>,
     preceded(space1, delimited(char('<'), take_till1(|ch| ch == '>'), char('>'))) => Param::Mandatory);
@@ -139,10 +153,12 @@ make_parser!(spaced_type_param<'src> -> Param<'src>,
 );
 
 make_parser!(param_parser_borrowed<'src> -> Param<'src>, alt((
+    brace_choice_param,
     eq_optional_angle_param,
     eq_optional_param,
     eq_mandatory_param,
     spaced_opt_angle_param,
+    spaced_opt_bracket_param,
     spaced_angle_param_after_space,
     spaced_angle_param,
     spaced_uppercase_param,

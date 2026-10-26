@@ -11,6 +11,7 @@ use crate::{
         ManpageResult,
         OwnedParam,
         OwnedSwitch,
+        ParamKind,
         groff::{
             GroffLine,
             strip_groff_escapes,
@@ -56,7 +57,7 @@ fn parse_mdoc_it(args: &str) -> Option<ManpageEntry> {
         .filter(|w| !w.is_empty() && *w != "Ns")
         .collect();
     let param = match words.as_slice() {
-        [_, _, "Ar", name, ..] => Some(OwnedParam::Mandatory(name.to_string())),
+        [_, _, "Ar", name, ..] => Some(OwnedParam::new(ParamKind::Mandatory, name.to_string())),
         _ => None,
     };
     let ["Fl", flag, ..] = words.as_slice() else {

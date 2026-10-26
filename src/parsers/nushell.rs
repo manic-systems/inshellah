@@ -3,6 +3,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashMap,
     mem,
 };
 
@@ -13,6 +14,8 @@ use crate::{
         ManpageSubcommand,
         OwnedParam,
         OwnedSwitch,
+        ParamChoice,
+        ParamKind,
     },
     types::Positional,
 };
@@ -65,12 +68,9 @@ pub fn format_flag(entry: &ManpageEntry) -> String {
         OwnedSwitch::Short(short) => format!("-{short}"),
     };
     let name = sanitize_token(&raw_name);
-    let typed = match &entry.param {
-        Some(OwnedParam::Mandatory(param) | OwnedParam::Optional(param)) => {
-            format!(": {}", nushell_type_of_param(param))
-        },
-        None => String::new(),
-    };
+    let typed = entry.param.as_ref().map_or_else(String::new, |param| {
+        format!(": {}", nushell_type_of_param(&param.name))
+    });
     let flag = format!("    {name}{typed}");
     if entry.desc.is_empty() {
         flag
@@ -183,6 +183,7 @@ pub fn generate_module(cmd_name: &str, result: &ManpageResult) -> String {
 
 /// immediate child blocks (`cmd sub`) fold into `target_cmd`'s subcommands.
 pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
+    let completers = completer_lists(contents);
     let mut blocks: Vec<NuBlock> = Vec::new();
     let mut current_desc = String::new();
     let mut in_block = false;
@@ -212,7 +213,7 @@ pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
             let (param_part, desc) = trimmed
                 .split_once('#')
                 .map_or((trimmed, ""), |(param, desc)| (param.trim(), desc.trim()));
-            parse_nu_param_line_into(param_part, desc, &mut block);
+            parse_nu_param_line_into(param_part, desc, &completers, &mut block);
         }
     }
     if in_block {
@@ -264,7 +265,51 @@ fn extract_extern_name(line: &str) -> Option<String> {
     }
 }
 
-fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
+/// string lists from `def "name" [] { [ ... ] }` completers.
+fn completer_lists(contents: &str) -> HashMap<&str, Vec<ParamChoice>> {
+    let mut lists = HashMap::new();
+    let mut rest = contents;
+    while let Some((_, after_def)) = rest.split_once("def \"") {
+        let Some((name, tail)) = after_def.split_once('"') else {
+            break;
+        };
+        rest = tail;
+        let Some((_, body)) = tail.split_once('{') else {
+            continue;
+        };
+        if let Some((literal, _)) = body.split_once('}')
+            && let Some(values) = string_list_literal(literal)
+        {
+            lists.insert(name, values);
+        }
+    }
+    lists
+}
+
+fn string_list_literal(text: &str) -> Option<Vec<ParamChoice>> {
+    let mut rest = text
+        .trim()
+        .strip_prefix('[')?
+        .strip_suffix(']')?
+        .trim_start();
+    let mut values = Vec::new();
+    while !rest.is_empty() {
+        let (value, tail) = rest.strip_prefix('"')?.split_once('"')?;
+        values.push(ParamChoice {
+            value: value.to_owned(),
+            desc:  String::new(),
+        });
+        rest = tail.trim_start();
+    }
+    (!values.is_empty()).then_some(values)
+}
+
+fn parse_nu_param_line_into(
+    param_part: &str,
+    desc: &str,
+    completers: &HashMap<&str, Vec<ParamChoice>>,
+    block: &mut NuBlock,
+) {
     if param_part.len() < 2 {
         return;
     }
@@ -284,7 +329,7 @@ fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
                 rest = tail;
             }
         }
-        let param = parse_type_suffix(rest);
+        let param = parse_type_suffix(rest, completers);
         let switch = short.map_or_else(
             || OwnedSwitch::Long(name.to_owned()),
             |ch| OwnedSwitch::Both(ch, name.to_owned()),
@@ -342,14 +387,27 @@ fn split_at_non_name_char(text: &str) -> (&str, &str) {
 
 /// always Mandatory: nushell extern syntax has no optional-with-default to
 /// distinguish.
-fn parse_type_suffix(text: &str) -> Option<OwnedParam> {
+fn parse_type_suffix(
+    text: &str,
+    completers: &HashMap<&str, Vec<ParamChoice>>,
+) -> Option<OwnedParam> {
     let typed = text.trim_start().strip_prefix(':')?.trim_start();
-    let type_name = typed.split(|ch: char| !ch.is_ascii_alphabetic()).next()?;
+    let type_end = typed
+        .find(|ch: char| !ch.is_ascii_alphabetic())
+        .unwrap_or(typed.len());
+    let (type_name, after) = typed.split_at(type_end);
     if type_name.is_empty() {
-        None
-    } else {
-        Some(OwnedParam::Mandatory(type_name.to_owned()))
+        return None;
     }
+    let mut param = OwnedParam::new(ParamKind::Mandatory, type_name.to_owned());
+    if let Some(completer) = after
+        .strip_prefix("@\"")
+        .and_then(|tail| tail.split_once('"'))
+        && let Some(values) = completers.get(completer.0)
+    {
+        param.choices.clone_from(values);
+    }
+    Some(param)
 }
 
 #[derive(Default)]

@@ -19,8 +19,9 @@ use crate::{
         ManpageEntry,
         ManpageResult,
         ManpageSubcommand,
-        OwnedParam,
         OwnedSwitch,
+        ParamChoice,
+        ParamKind,
     },
 };
 
@@ -192,23 +193,62 @@ fn acronym_matches(needle: &str, words: &[&str]) -> bool {
 
 /// param placeholder convention: `<FILE>` mandatory, `[FILE]` optional.
 pub fn entry_completion_desc(entry: &ManpageEntry) -> String {
-    match &entry.param {
-        Some(OwnedParam::Mandatory(param)) => {
-            if entry.desc.is_empty() {
-                format!("<{param}>")
-            } else {
-                format!("{} <{param}>", entry.desc)
-            }
-        },
-        Some(OwnedParam::Optional(param)) => {
-            if entry.desc.is_empty() {
-                format!("[{param}]")
-            } else {
-                format!("{} [{param}]", entry.desc)
-            }
-        },
-        None => entry.desc.clone(),
+    let Some(param) = &entry.param else {
+        return entry.desc.clone();
+    };
+    let placeholder = match param.kind {
+        ParamKind::Mandatory => format!("<{}>", param.name),
+        ParamKind::Optional | ParamKind::OptionalWord => format!("[{}]", param.name),
+    };
+    if entry.desc.is_empty() {
+        placeholder
+    } else {
+        format!("{} {placeholder}", entry.desc)
     }
+}
+
+/// the entry a typed `--long` or `-s` names.
+pub fn entry_for_flag<'res>(
+    result: &'res ManpageResult,
+    token: &str,
+) -> Option<&'res ManpageEntry> {
+    let long = token.strip_prefix("--");
+    let short = match token.as_bytes() {
+        [b'-', byte] if *byte != b'-' => Some(char::from(*byte)),
+        _ => None,
+    };
+    result.entries.iter().find(|entry| {
+        match &entry.switch {
+            OwnedSwitch::Long(name) => long == Some(name.as_str()),
+            OwnedSwitch::Short(ch) => short == Some(*ch),
+            OwnedSwitch::Both(ch, name) => long == Some(name.as_str()) || short == Some(*ch),
+        }
+    })
+}
+
+/// `prefix` is `--flag=` when the value is attached.
+pub fn choice_candidates(
+    choices: &[ParamChoice],
+    typed: &str,
+    prefix: &str,
+    cfg: &Config,
+) -> Vec<Candidate> {
+    let mut scored: Vec<(i32, Candidate)> = choices
+        .iter()
+        .map(|choice| (fuzzy_score(typed, &choice.value), choice))
+        .filter(|(score, _)| *score > 0)
+        .map(|(score, choice)| {
+            (
+                score,
+                Candidate::new(format!("{prefix}{}", choice.value), &choice.desc),
+            )
+        })
+        .collect();
+    scored.sort_by_key(|(score, _)| Reverse(*score));
+    if cfg.max_completions > 0 {
+        scored.truncate(cfg.max_completions);
+    }
+    scored.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
 /// subcommands emit only when `matched_depth >= resolve_depth`.
