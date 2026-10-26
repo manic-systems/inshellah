@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah complete`.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use inshellah::complete::{Candidate, generate_candidates};
 use inshellah::config::Config;
 use inshellah::dynamic::{dynamic_complete_candidates_with_path, dynamic_value_completions};
-use inshellah::indexer::{is_executable, resolve_and_cache, resolve_command_path_and_cache};
+use inshellah::indexer::{is_executable, resolve_command_path_and_cache};
 use inshellah::parsers::manpage::{ManpageResult, OwnedSwitch};
 use inshellah::store::{self, default_store_path, lookup, subcommands_of};
 
@@ -86,85 +87,70 @@ pub fn run(
     } else {
         &rest[..rest.len() - 1]
     };
-    let (mut lookup_tokens, mut slot) = lookup_path_tokens(&dirs, &cmd_name, complete_rest);
-    if last_token.is_empty()
-        && !rest.is_empty()
-        && !lookup_tokens.last().is_some_and(|t| t.is_empty())
-    {
-        lookup_tokens.push(String::new());
-    }
+    let mut cmd_path = command_path(&dirs, None, &cmd_name, complete_rest);
 
     // try longest-prefix match: "git stash apply" -> "git stash" -> "git"
-    let find_result = |toks: &[String]| -> Option<(String, ManpageResult, usize)> {
-        let n = toks.len();
-        for drop in 0..n {
-            let prefix = &toks[..n - drop];
-            if prefix.is_empty() {
-                continue;
-            }
-            let name = prefix.join(" ");
-            if let Some(r) = lookup(&dirs, &name) {
-                return Some((name, r, prefix.len()));
-            }
-        }
-        None
+    let find_result = |path: &[String]| -> Option<(String, ManpageResult, usize)> {
+        (1..=path.len()).rev().find_map(|len| {
+            let name = path[..len].join(" ");
+            lookup(&dirs, &name).map(|r| (name, r, len))
+        })
     };
 
-    let mut found = find_result(&lookup_tokens);
+    let mut found = find_result(&cmd_path.path);
 
-    // nothing matched or only a parent matched, so try --help.
-    let resolve_tokens: Vec<String> = lookup_tokens
-        .iter()
-        .filter(|t| !t.is_empty())
+    let bin_path = explicit_cmd_path
+        .as_ref()
         .cloned()
-        .collect();
-    let resolve_depth = resolve_tokens.len();
-    // a stale hit re-resolves through the same path: the resolve block
-    // overwrites the cache and falls back to the stale value if rescrape fails.
-    let need_resolve = cache_is_stale(user_dir, found.as_ref(), cfg.cache_ttl_secs)
-        || match &found {
-            Some((_, _, depth)) => *depth < resolve_depth,
-            None => resolve_depth > 0,
-        };
-    if need_resolve
-        && let Some(path) = explicit_cmd_path
-            .as_ref()
-            .cloned()
-            .or_else(|| find_in_path(&cmd_name))
+        .or_else(|| find_in_path(&cmd_name));
+    // also search the binary's own prefix for manpages.
+    let mut all_mandirs = mandirs.to_vec();
+    if let Some(prefix) = bin_path
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
     {
-        // also search the binary's own prefix for manpages.
-        let mut all_mandirs = mandirs.to_vec();
-        if let Some(parent) = path.parent()
-            && let Some(prefix) = parent.parent()
-        {
-            let share_man = prefix.join("share/man");
-            if share_man.is_dir() {
-                all_mandirs.push(share_man);
-            }
-        }
-        let sub_args = if resolve_tokens.len() > 1 {
-            resolve_tokens[1..].to_vec()
-        } else {
-            Vec::new()
-        };
-        let resolved = if sub_args.is_empty() {
-            resolve_and_cache(user_dir, &all_mandirs, &cmd_name, &path, timeout_ms)
-        } else {
-            resolve_command_path_and_cache(
-                user_dir,
-                &all_mandirs,
-                &cmd_name,
-                &sub_args,
-                &path,
-                timeout_ms,
-            )
-        };
-        if let Some(result) = resolved {
-            found = Some((resolve_tokens.join(" "), result, resolve_depth));
-            slot = lookup_path_tokens(&dirs, &cmd_name, complete_rest).1;
+        let share_man = prefix.join("share/man");
+        if share_man.is_dir() {
+            all_mandirs.push(share_man);
         }
     }
 
+    while let Some(bin) = &bin_path
+        && (cache_is_stale(user_dir, found.as_ref(), cfg.cache_ttl_secs)
+            || found
+                .as_ref()
+                .is_none_or(|(_, _, depth)| *depth < cmd_path.path.len()))
+    {
+        let Some(result) = resolve_command_path_and_cache(
+            user_dir,
+            &all_mandirs,
+            &cmd_name,
+            &cmd_path.path[1..],
+            bin,
+            timeout_ms,
+        ) else {
+            break;
+        };
+        let resolved_len = cmd_path.path.len();
+        let probed = cmd_path.probe;
+        found = Some((cmd_path.path.join(" "), result, resolved_len));
+        let fresh = found.as_ref().map(|(name, r, _)| (name.as_str(), r));
+        cmd_path = command_path(&dirs, fresh, &cmd_name, complete_rest);
+        // a probe's --help can echo the parent's, which caches it as a group
+        // and would license another probe one word deeper.
+        if probed || cmd_path.path.len() <= resolved_len {
+            break;
+        }
+        if let Some(hit) = find_result(&cmd_path.path)
+            && hit.2 > resolved_len
+        {
+            found = Some(hit);
+        }
+    }
+
+    let slot = cmd_path.slot;
+    let resolve_depth = cmd_path.depth;
     let typing_flag = slot == ArgSlot::Free && cfg.triggers_flags(&last_token);
     let fallback_subcommands = match &found {
         Some((matched_name, r, _)) if r.subcommands.is_empty() => {
@@ -328,14 +314,34 @@ enum ArgSlot {
     AfterDoubleDash,
 }
 
-fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> (Vec<String>, ArgSlot) {
-    let mut tokens = vec![cmd_name.to_string()];
-    let mut current = lookup(dirs, cmd_name);
+struct CommandPath {
+    path: Vec<String>,
+    depth: usize,
+    slot: ArgSlot,
+    probe: bool,
+}
+
+/// `fresh` preserves flag metadata when caching fails.
+fn command_path(
+    dirs: &[PathBuf],
+    fresh: Option<(&str, &ManpageResult)>,
+    cmd_name: &str,
+    rest: &[String],
+) -> CommandPath {
+    let node = |name: &str| match fresh {
+        Some((fresh_name, result)) if fresh_name == name => Some(Cow::Borrowed(result)),
+        _ => lookup(dirs, name).map(Cow::Owned),
+    };
+    let mut path = vec![cmd_name.to_string()];
+    let mut depth = 1;
+    let mut current = node(cmd_name);
+    let mut current_is_exact = current.is_some();
+    let mut on_path = true;
+    let mut probe = false;
     let mut skip_next_value = false;
 
     for token in rest {
         if token.is_empty() {
-            tokens.push(token.clone());
             continue;
         }
         if skip_next_value {
@@ -343,7 +349,12 @@ fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> (Vec
             continue;
         }
         if token == "--" {
-            return (tokens, ArgSlot::AfterDoubleDash);
+            return CommandPath {
+                path,
+                depth,
+                slot: ArgSlot::AfterDoubleDash,
+                probe,
+            };
         }
         if token.starts_with('-') {
             if current
@@ -355,20 +366,31 @@ fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> (Vec
             continue;
         }
 
+        depth += 1;
+        if !on_path {
+            continue;
+        }
         // map an alias to its canonical child name (cargo `b` -> build) so the
         // path resolves to the real node and descends into its flags/subs.
-        let resolved = current
+        let group = current
             .as_ref()
-            .and_then(|r| canonical_for_alias(r, token))
-            .unwrap_or_else(|| token.clone());
-        tokens.push(resolved);
-        let name = tokens
-            .iter()
-            .filter(|t| !t.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
-        current = lookup(dirs, &name).or(current);
+            .filter(|r| current_is_exact && !r.subcommands.is_empty());
+        let in_group = group.is_some();
+        let listed = group.and_then(|r| listed_subcommand(r, token));
+        let is_listed = listed.is_some();
+        let name = listed.unwrap_or_else(|| token.clone());
+        let child = node(&format!("{} {name}", path.join(" ")));
+        if !is_listed && child.is_none() {
+            on_path = false;
+            // Plugins like `cargo nextest` may be missing from help output.
+            if !in_group {
+                continue;
+            }
+            probe = true;
+        }
+        path.push(name);
+        current_is_exact = child.is_some();
+        current = child.or(current);
     }
 
     let slot = if skip_next_value {
@@ -376,18 +398,22 @@ fn lookup_path_tokens(dirs: &[PathBuf], cmd_name: &str, rest: &[String]) -> (Vec
     } else {
         ArgSlot::Free
     };
-    (tokens, slot)
+    CommandPath {
+        path,
+        depth,
+        slot,
+        probe,
+    }
 }
 
-/// canonical child name for a token that matches one of `result`'s subcommand
-/// aliases (not its name), else None.
-fn canonical_for_alias(result: &ManpageResult, token: &str) -> Option<String> {
-    result.subcommands.iter().find_map(|sc| {
-        sc.aliases
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(token))
-            .then(|| sc.name.clone())
-    })
+/// canonical child name for a token that names one of `result`'s subcommands
+/// or their aliases, else None.
+fn listed_subcommand(result: &ManpageResult, token: &str) -> Option<String> {
+    result
+        .subcommands
+        .iter()
+        .find(|sc| sc.name == token || sc.aliases.iter().any(|a| a.eq_ignore_ascii_case(token)))
+        .map(|sc| sc.name.clone())
 }
 
 // a user-cache set is stale when its newest file is older than the ttl. ttl 0
