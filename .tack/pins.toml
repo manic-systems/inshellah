@@ -27,7 +27,6 @@ recomposable = true
 #   submodules      fetch git submodules
 #   unpack          fixed-only tarball or file
 [inputs]
-
 [inputs.nixpkgs]
 url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz"
 

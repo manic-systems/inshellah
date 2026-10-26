@@ -1,4 +1,4 @@
-msrv = "1.97.0" # must match Cargo.toml
+msrv = "1.97.0"  # must match Cargo.toml
 
 cognitive-complexity-threshold = 25
 excessive-nesting-threshold    = 7

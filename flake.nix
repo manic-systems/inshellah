@@ -11,6 +11,8 @@
         lib.genAttrs (lib.systems.doubles.linux ++ lib.systems.doubles.darwin) (
           system: f (nixpkgs.legacyPackages.${system} or (import nixpkgs { inherit system; }))
         );
+      nightlyRustfmt =
+        pkgs: fenix.packages.${pkgs.stdenv.hostPlatform.system}.latest.rustfmt or pkgs.rustfmt;
     in
     {
       devShells = forAllSystems (pkgs: {
@@ -18,10 +20,26 @@
           packages = with pkgs; [
             rustc
             cargo
-            (fenix.packages.${pkgs.stdenv.hostPlatform.system}.latest.rustfmt or rustfmt)
+            (nightlyRustfmt pkgs)
             rust-analyzer
             clippy
+            tombi
           ];
+        };
+
+        # `nix develop .#fmt` formats on entry
+        fmt = pkgs.mkShellNoCC {
+          packages = [
+            pkgs.cargo
+            (nightlyRustfmt pkgs)
+            pkgs.tombi
+            pkgs.nixfmt
+          ];
+          shellHook = ''
+            cargo fmt
+            tombi format
+            find . -name '*.nix' -not -path './target/*' -exec nixfmt {} +
+          '';
         };
       });
 
@@ -86,7 +104,7 @@
             [net]
             offline = true
             EOF
-            cargo clippy --all-targets
+            cargo clippy --all-targets -- -D warnings
             cargo test --all-targets
             popd
           '';
@@ -126,6 +144,26 @@
           # tokenizer instead of self-skipping when nu is absent.
           rust = mkShellCheck "inshellah-rust-check" (rustInputs ++ [ pkgs.nushell ]) rustCheckPhase;
           nushell = mkShellCheck "inshellah-nushell-check" [ pkgs.nushell ] nushellCheckPhase;
+          fmt =
+            pkgs.runCommand "inshellah-fmt-check"
+              {
+                nativeBuildInputs = [
+                  pkgs.cargo
+                  (nightlyRustfmt pkgs)
+                  pkgs.tombi
+                  pkgs.nixfmt
+                ];
+                src = checkSrc;
+              }
+              ''
+                cp -r $src ./tree
+                chmod -R +w ./tree
+                cd ./tree
+                cargo fmt -- --check
+                tombi format --offline --check
+                find . -name '*.nix' -exec nixfmt --check {} +
+                touch $out
+              '';
           default = mkShellCheck "inshellah-check" (rustInputs ++ [ pkgs.nushell ]) ''
             ${rustCheckPhase}
             ${nushellCheckPhase}
