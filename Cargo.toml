@@ -10,7 +10,6 @@ repository = "https://github.com/manic-systems/inshellah"
 include = ["src", "doc", "README.md", "LICENSE"]
 
 [dependencies]
-fast-strip-ansi = "0.13.1"
 flate2 = "1.1.9"
 libc = "0.2.186"
 nom = "8.0.0"
