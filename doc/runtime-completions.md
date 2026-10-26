@@ -161,8 +161,10 @@ with `null`.
 | clap `CompleteEnv` programs | the program's own completer via `COMPLETE=fish` |
 
 commands without a provider are checked for cobra or clap's `CompleteEnv`
-by reading the binary for strings those libraries compile in. a binary is
-never run to find out. the result is cached per binary in the user cache.
+by reading the binary for strings those libraries compile in. a clap match
+is confirmed by `COMPLETE=fish prog --help` printing its registration
+script, and a cobra binary that answers `__complete` outside the protocol
+is not asked again. results are cached per binary in the user cache.
 
 ## macOS developer toolchain
 

@@ -16,13 +16,19 @@ use crate::{
     dynamic::{
         Answer,
         Files,
+        Reply,
         shared::{
             DynCtx,
+            run_ended,
             run_with,
         },
     },
     indexer::probe::image_strings,
     store::ExeFact,
+    subprocess::{
+        Run,
+        run_quiet_ended,
+    },
 };
 
 const COBRA_ERROR: u32 = 1;
@@ -75,6 +81,29 @@ impl FromStr for Detection {
     }
 }
 
+impl Detection {
+    /// what `bin` answers, from its image and then a confirmation run.
+    pub fn scan(bin: &Path, timeout_ms: u64) -> Option<Self> {
+        let needles: Vec<&str> = Protocol::ALL
+            .into_iter()
+            .flat_map(Protocol::signature)
+            .copied()
+            .collect();
+        let found = image_strings(bin, &needles);
+        let linked = Protocol::ALL.into_iter().find(|protocol| {
+            protocol
+                .signature()
+                .iter()
+                .all(|needle| found.contains(*needle))
+        });
+        let Some(protocol) = linked else {
+            return Some(Self(None));
+        };
+        let confirmed = protocol.confirm(bin, timeout_ms)?;
+        Some(Self(confirmed.then_some(protocol)))
+    }
+}
+
 impl ExeFact for Detection {
     const EXTENSION: &'static str = "protocol";
 }
@@ -90,50 +119,61 @@ impl Protocol {
         }
     }
 
-    /// the protocol `bin` answers, read from its image without running it.
-    pub fn detect(bin: &Path) -> Option<Self> {
-        let needles: Vec<&str> = Self::ALL
-            .into_iter()
-            .flat_map(Self::signature)
-            .copied()
-            .collect();
-        let found = image_strings(bin, &needles);
-        Self::ALL.into_iter().find(|protocol| {
-            protocol
-                .signature()
-                .iter()
-                .all(|needle| found.contains(*needle))
-        })
+    /// `COMPLETE=fish prog --help` proves clap, None when that run failed.
+    fn confirm(self, bin: &Path, timeout_ms: u64) -> Option<bool> {
+        match self {
+            Self::Cobra => Some(true),
+            Self::Clap => {
+                let args = [bin.to_string_lossy().into_owned(), "--help".to_owned()];
+                let run = run_quiet_ended(&args, timeout_ms, |cmd| {
+                    cmd.env("COMPLETE", "fish");
+                });
+                match run {
+                    Run::Succeeded(out) => Some(out.contains("COMPLETE=fish")),
+                    Run::Errored(out) => out.contains("COMPLETE=fish").then_some(true),
+                    Run::Failed => None,
+                }
+            },
+        }
     }
 
-    pub(super) fn complete(self, spans: &[String], ctx: &DynCtx) -> Option<Answer> {
+    pub(super) fn complete(self, spans: &[String], ctx: &DynCtx) -> Reply {
         match self {
             Self::Cobra => cobra(spans, ctx),
             Self::Clap => {
-                clap(spans, ctx).map(|candidates| {
-                    Answer {
+                clap(spans, ctx).map_or(Reply::Silent, |candidates| {
+                    Reply::Answered(Answer {
                         candidates,
                         files: Files::Replace,
-                    }
+                    })
                 })
             },
         }
     }
 }
 
-fn cobra(spans: &[String], ctx: &DynCtx) -> Option<Answer> {
+/// cobra ends each reply with a `:DIRECTIVE` line, anything else is foreign.
+fn cobra(spans: &[String], ctx: &DynCtx) -> Reply {
     let mut args = vec![ctx.bin(ctx.cmd_name), "__complete".to_owned()];
-    args.extend_from_slice(spans.get(1..)?);
+    args.extend(spans.iter().skip(1).cloned());
 
-    let out = run_with(&args, ctx, |cmd| {
+    let out = match run_ended(&args, ctx, |cmd| {
         cmd.env("COBRA_ACTIVE_HELP", "0");
-    })?;
+    }) {
+        Run::Succeeded(out) => out,
+        Run::Errored(_) | Run::Failed => return Reply::Silent,
+    };
 
     let trimmed = out.trim_end();
     let (body, last) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
-    let directive: u32 = last.strip_prefix(':')?.parse().ok()?;
+    let Some(directive) = last
+        .strip_prefix(':')
+        .and_then(|code| code.parse::<u32>().ok())
+    else {
+        return Reply::Foreign;
+    };
     if directive & (COBRA_ERROR | COBRA_FILTER_FILE_EXT | COBRA_FILTER_DIRS) != 0 {
-        return None;
+        return Reply::Silent;
     }
 
     let candidates = body
@@ -146,7 +186,7 @@ fn cobra(spans: &[String], ctx: &DynCtx) -> Option<Answer> {
     } else {
         Files::Never
     };
-    Some(Answer { candidates, files })
+    Reply::Answered(Answer { candidates, files })
 }
 
 pub(super) fn clap(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {

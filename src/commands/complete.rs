@@ -32,6 +32,7 @@ use inshellah::{
     dynamic::{
         Answer,
         Files,
+        Reply,
         Slot,
         adapters::{
             Detection,
@@ -254,25 +255,27 @@ pub fn decide(
     let want_files = !typing_flag
         && (slot != ArgSlot::Free
             || (!has_subs && (last_token.is_empty() || candidates.is_empty())));
-    trace.protocol = protocol_of(user_dir, &trace);
+    trace.protocol = protocol_of(user_dir, &trace, timeout_ms);
     // spans are post-elevation, so `sudo nix ...` reaches this as
     // `[nix, ...]` and hits the nix branch.
-    let dyn_candidates = (!typing_flag || candidates.is_empty())
-        .then(|| {
-            dynamic_complete_candidates_with_path(
-                &spans,
-                explicit_cmd_path.as_deref(),
-                match slot {
-                    ArgSlot::FlagValue(flag) => Slot::FlagValue(flag),
-                    ArgSlot::AfterDoubleDash => Slot::Positional,
-                    ArgSlot::Free => Slot::from_spans(&spans),
-                },
-                &value_flags(lookup(&dirs, &cmd_name).as_ref(), found.as_ref()),
-                trace.protocol,
-                cfg,
-            )
-        })
-        .flatten();
+    let reply = if typing_flag && !candidates.is_empty() {
+        Reply::Silent
+    } else {
+        dynamic_complete_candidates_with_path(
+            &spans,
+            explicit_cmd_path.as_deref(),
+            match slot {
+                ArgSlot::FlagValue(flag) => Slot::FlagValue(flag),
+                ArgSlot::AfterDoubleDash => Slot::Positional,
+                ArgSlot::Free => Slot::from_spans(&spans),
+            },
+            &value_flags(lookup(&dirs, &cmd_name).as_ref(), found.as_ref()),
+            trace.protocol,
+            cfg,
+        )
+    };
+    forget_foreign_protocol(user_dir, &reply, &mut trace);
+    let dyn_candidates = reply.into_answer();
     trace.dynamic = dyn_candidates
         .as_ref()
         .map(|answer| answer.candidates.len());
@@ -548,7 +551,7 @@ fn flag_value_choices(
 }
 
 /// the protocol a provider-less traced binary answers, scanned once and cached.
-fn protocol_of(user_dir: &Path, trace: &Trace) -> Option<Protocol> {
+fn protocol_of(user_dir: &Path, trace: &Trace, timeout_ms: u64) -> Option<Protocol> {
     let cmd_name = trace.spans.first()?;
     if provider_kind(cmd_name).is_some() {
         return None;
@@ -558,11 +561,25 @@ fn protocol_of(user_dir: &Path, trace: &Trace) -> Option<Protocol> {
     if let Some(Detection(cached)) = read_fact(user_dir, cmd_name, &exe) {
         return cached;
     }
-    let detection = Detection(Protocol::detect(bin));
+    let detection = Detection::scan(bin, timeout_ms)?;
     // an uncached scan would reread a large binary on every Tab.
     write_fact(user_dir, cmd_name, &exe, &detection)
         .ok()
         .and(detection.0)
+}
+
+/// stop asking a binary that linked the library but ignored its protocol.
+fn forget_foreign_protocol(user_dir: &Path, reply: &Reply, trace: &mut Trace) {
+    let (Reply::Foreign, Some(cmd_name), Some(exe)) = (
+        reply,
+        trace.spans.first(),
+        trace.bin.as_deref().and_then(ExeIdentity::of),
+    ) else {
+        return;
+    };
+    if write_fact(user_dir, cmd_name, &exe, &Detection(None)).is_ok() {
+        trace.protocol = None;
+    }
 }
 
 /// value-taking flags of the root command and the resolved subcommand.

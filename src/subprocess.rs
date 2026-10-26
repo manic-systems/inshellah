@@ -22,7 +22,6 @@ use std::{
     },
     process::{
         Command,
-        ExitStatus,
         Stdio,
     },
     sync::OnceLock,
@@ -62,26 +61,53 @@ fn safe_env_key(key: &str) -> bool {
 
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
+/// how a captured run ended.
+pub enum Run {
+    /// exited zero, with what it printed.
+    Succeeded(String),
+    /// exited nonzero, with what it printed.
+    Errored(String),
+    /// never spawned, or killed at the deadline or the capture cap.
+    Failed,
+}
+
+impl Run {
+    fn printed(self) -> Option<String> {
+        match self {
+            Self::Succeeded(out) | Self::Errored(out) => (!out.is_empty()).then_some(out),
+            Self::Failed => None,
+        }
+    }
+}
+
 /// scrape runner: stdout+stderr merged, cwd /tmp so `--help` can't read repo
 /// state.
 pub fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
-    run_cmd_inner(args, timeout_ms, false, false, |_| {})
+    run_cmd_inner(args, timeout_ms, false, false, |_| {}).printed()
 }
 
 pub fn run_cmd_with<F>(args: &[String], timeout_ms: u64, customize: F) -> Option<String>
 where
     F: FnOnce(&mut Command),
 {
-    run_cmd_inner(args, timeout_ms, false, false, customize)
+    run_cmd_inner(args, timeout_ms, false, false, customize).printed()
 }
 
 /// dynamic runner: stderr dropped (parsers want clean stdout), cwd inherited
 /// so `git remote`/`jj log` see the user's repo.
 pub fn run_quiet(args: &[String], timeout_ms: u64) -> Option<String> {
-    run_cmd_inner(args, timeout_ms, true, true, |_| {})
+    run_cmd_inner(args, timeout_ms, true, true, |_| {}).printed()
 }
 
 pub fn run_quiet_with<F>(args: &[String], timeout_ms: u64, customize: F) -> Option<String>
+where
+    F: FnOnce(&mut Command),
+{
+    run_cmd_inner(args, timeout_ms, true, true, customize).printed()
+}
+
+/// `run_quiet_with` that keeps the exit status and a silent exit.
+pub fn run_quiet_ended<F>(args: &[String], timeout_ms: u64, customize: F) -> Run
 where
     F: FnOnce(&mut Command),
 {
@@ -119,22 +145,18 @@ fn set_nonblocking(fd: RawFd) {
     }
 }
 
-#[expect(
-    clippy::let_underscore_must_use,
-    reason = "reaping the child is best-effort, the captured output is already decided"
-)]
 fn run_cmd_inner<F>(
     args: &[String],
     timeout_ms: u64,
     discard_stderr: bool,
     inherit_cwd: bool,
     customize: F,
-) -> Option<String>
+) -> Run
 where
     F: FnOnce(&mut Command),
 {
     if args.is_empty() {
-        return None;
+        return Run::Failed;
     }
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..]);
@@ -155,9 +177,13 @@ where
     cmd.process_group(0);
     customize(&mut cmd);
 
-    let mut child = cmd.spawn().ok()?;
+    let Ok(mut child) = cmd.spawn() else {
+        return Run::Failed;
+    };
     let pgid = child.id().cast_signed();
-    let mut stdout = child.stdout.take()?;
+    let Some(mut stdout) = child.stdout.take() else {
+        return Run::Failed;
+    };
     let mut stderr = child.stderr.take();
     let stdout_fd = stdout.as_raw_fd();
     let stderr_fd = stderr.as_ref().map(AsRawFd::as_raw_fd);
@@ -253,12 +279,11 @@ where
             libc::killpg(pgid, libc::SIGKILL);
         }
     }
-    let _: io::Result<ExitStatus> = child.wait();
-
-    if timed_out || capped || buf.is_empty() {
-        None
-    } else {
-        Some(String::from_utf8_lossy(&buf).into_owned())
+    let out = String::from_utf8_lossy(&buf).into_owned();
+    match child.wait() {
+        _ if timed_out || capped => Run::Failed,
+        Ok(status) if status.success() => Run::Succeeded(out),
+        Ok(_) | Err(_) => Run::Errored(out),
     }
 }
 

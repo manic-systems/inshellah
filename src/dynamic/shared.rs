@@ -17,7 +17,10 @@ use crate::complete::{
 };
 use crate::{
     dynamic::Slot,
-    subprocess,
+    subprocess::{
+        self,
+        Run,
+    },
 };
 
 #[derive(Clone, Copy)]
@@ -216,6 +219,13 @@ where
     F: FnOnce(&mut Command),
 {
     subprocess::run_quiet_with(args, ctx.ms_left(), customize)
+}
+
+pub fn run_ended<F>(args: &[String], ctx: &DynCtx, customize: F) -> Run
+where
+    F: FnOnce(&mut Command),
+{
+    subprocess::run_quiet_ended(args, ctx.ms_left(), customize)
 }
 
 /// drop exact-match subcommand/external candidates so a typed-out word isn't

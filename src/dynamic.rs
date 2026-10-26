@@ -40,6 +40,23 @@ pub struct Answer {
     pub files:      Files,
 }
 
+/// how a provider or a program's own completer responded.
+pub enum Reply {
+    Answered(Answer),
+    Silent,
+    /// the program replied outside its protocol, so it does not speak it.
+    Foreign,
+}
+
+impl Reply {
+    pub fn into_answer(self) -> Option<Answer> {
+        match self {
+            Self::Answered(answer) => Some(answer),
+            Self::Silent | Self::Foreign => None,
+        }
+    }
+}
+
 /// what the word under the cursor fills.
 #[derive(Clone, Copy)]
 pub enum Slot<'span> {
@@ -130,6 +147,7 @@ pub fn dynamic_complete_with_path(
         None,
         cfg,
     )
+    .into_answer()
     .map(|answer| {
         answer
             .candidates
@@ -146,9 +164,9 @@ pub fn dynamic_complete_candidates_with_path(
     value_flags: &[String],
     protocol: Option<Protocol>,
     cfg: &Config,
-) -> Option<Answer> {
+) -> Reply {
     if spans.is_empty() {
-        return None;
+        return Reply::Silent;
     }
     let deadline = if cfg.dynamic_timeout_ms == 0 {
         None
@@ -163,10 +181,18 @@ pub fn dynamic_complete_candidates_with_path(
         slot,
         value_flags,
     };
-    let Answer {
+    let reply = match (providers::dispatch(spans, &ctx), protocol) {
+        (Some(answer), _) => Reply::Answered(answer),
+        (None, Some(asked)) => asked.complete(spans, &ctx),
+        (None, None) => Reply::Silent,
+    };
+    let Reply::Answered(Answer {
         candidates: mut raw,
         files,
-    } = providers::dispatch(spans, &ctx).or_else(|| protocol?.complete(spans, &ctx))?;
+    }) = reply
+    else {
+        return reply;
+    };
 
     let last = spans.last().map_or("", String::as_str);
     let (inline, needle) = match (ctx.slot, last.split_once('=')) {
@@ -190,7 +216,10 @@ pub fn dynamic_complete_candidates_with_path(
             candidate.value.insert_str(0, prefix);
         }
     }
-    (files == Files::Never || !filtered.is_empty()).then_some(Answer {
+    if files != Files::Never && filtered.is_empty() {
+        return Reply::Silent;
+    }
+    Reply::Answered(Answer {
         candidates: filtered,
         files,
     })
