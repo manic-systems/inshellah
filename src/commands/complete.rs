@@ -4,6 +4,11 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
+    fmt::{
+        self,
+        Display,
+        Formatter,
+    },
     io::{
         self,
         Write as _,
@@ -65,26 +70,100 @@ pub fn run(
     timeout_ms: u64,
     cfg: &Config,
 ) -> io::Result<()> {
+    let decision = decide(raw_spans, user_dir, system_dirs, mandirs, timeout_ms, cfg);
+    writeln!(io::stdout().lock(), "{}", decision.response)
+}
+
+/// what `complete` answers, why, and what it looked at on the way.
+pub struct Decision {
+    pub response: Response,
+    pub reason:   Reason,
+    pub trace:    Trace,
+}
+
+#[derive(Default)]
+pub struct Trace {
+    pub spans:   Vec<String>,
+    pub bin:     Option<PathBuf>,
+    pub dropped: Vec<(PathBuf, ExeIdentity)>,
+    pub path:    Vec<String>,
+    pub node:    Option<String>,
+    pub slot:    Option<String>,
+    pub dynamic: Option<usize>,
+}
+
+pub enum Reason {
+    NotOnPath,
+    ValueProvider,
+    FlagChoices,
+    ProviderWithFiles,
+    Provider,
+    ProviderOverFiles,
+    Merged,
+    Files,
+    Static,
+    Nothing,
+}
+
+impl Display for Reason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotOnPath => "the command is not on PATH",
+            Self::ValueProvider => "a live provider answers this command before the cache",
+            Self::FlagChoices => "the flag takes one of a known set of values",
+            Self::ProviderWithFiles => "provider candidates sit beside nushell's file completion",
+            Self::Provider => "the cache had nothing here, a live provider answered",
+            Self::ProviderOverFiles => "a live provider answered a file-like position",
+            Self::Merged => "cache and provider candidates merged",
+            Self::Files => "file-like position with no candidates, nushell completes files",
+            Self::Static => "candidates from the cache",
+            Self::Nothing => "nothing matched, nushell decides",
+        })
+    }
+}
+
+pub fn decide(
+    raw_spans: &[String],
+    user_dir: &Path,
+    system_dirs: &[PathBuf],
+    mandirs: &[PathBuf],
+    timeout_ms: u64,
+    cfg: &Config,
+) -> Decision {
     let mut all_dirs: Vec<PathBuf> = Vec::with_capacity(system_dirs.len() + 1);
     all_dirs.push(user_dir.to_path_buf());
     all_dirs.extend(system_dirs.iter().cloned());
 
     let (spans, explicit_cmd_path) = strip_elevation(raw_spans, &all_dirs);
+    let mut trace = Trace {
+        spans: spans.clone(),
+        ..Trace::default()
+    };
     if spans.is_empty() || (explicit_cmd_path.is_none() && find_in_path(&spans[0]).is_none()) {
-        return print_response(&Response::Defer);
+        return Decision {
+            response: Response::Defer,
+            reason: Reason::NotOnPath,
+            trace,
+        };
     }
 
     let cmd_name = spans[0].clone();
     let rest: Vec<String> = spans[1..].to_vec();
-    let bin_path = explicit_cmd_path
+    trace.bin = explicit_cmd_path
         .clone()
         .or_else(|| find_in_path(&cmd_name));
-    let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, bin_path.as_deref());
+    let (dirs, dropped) = dirs_for_binary(all_dirs, user_dir, &cmd_name, trace.bin.as_deref());
+    trace.dropped = dropped;
 
     if let Some(candidates) =
         dynamic_value_completions(&cmd_name, &rest, explicit_cmd_path.as_deref(), timeout_ms)
     {
-        return print_response(&Response::or_defer(candidates));
+        trace.dynamic = Some(candidates.len());
+        return Decision {
+            response: Response::or_defer(candidates),
+            reason: Reason::ValueProvider,
+            trace,
+        };
     }
 
     let last_token = rest.last().cloned().unwrap_or_default();
@@ -93,59 +172,32 @@ pub fn run(
     } else {
         &rest[..rest.len() - 1]
     };
-    let mut cmd_path = command_path(&dirs, None, &cmd_name, complete_rest);
-
-    // try longest-prefix match: "git stash apply" -> "git stash" -> "git"
-    let find_result = |path: &[String]| -> Option<(String, ManpageResult, usize)> {
-        (1..=path.len()).rev().find_map(|len| {
-            let name = path[..len].join(" ");
-            lookup(&dirs, &name).map(|result| (name, result, len))
-        })
-    };
-
-    let mut found = find_result(&cmd_path.path);
-    let all_mandirs = mandirs_with_bin_prefix(mandirs, bin_path.as_deref());
-
-    while let Some(bin) = &bin_path
-        && (cache_is_stale(user_dir, found.as_ref(), cfg.cache_ttl_secs)
-            || found
-                .as_ref()
-                .is_none_or(|(_, _, depth)| *depth < cmd_path.path.len()))
-    {
-        let Some(result) = resolve_command_path_and_cache(
-            user_dir,
-            &all_mandirs,
-            &cmd_name,
-            &cmd_path.path[1..],
-            bin,
-            timeout_ms,
-        )
-        .result
-        else {
-            break;
-        };
-        let resolved_len = cmd_path.path.len();
-        let probed = cmd_path.probe;
-        found = Some((cmd_path.path.join(" "), result, resolved_len));
-        let fresh = found
-            .as_ref()
-            .map(|(name, cached, _)| (name.as_str(), cached));
-        cmd_path = command_path(&dirs, fresh, &cmd_name, complete_rest);
-        // a probe's --help can echo the parent's, which caches it as a group
-        // and would license another probe one word deeper.
-        if probed || cmd_path.path.len() <= resolved_len {
-            break;
-        }
-        if let Some(hit) = find_result(&cmd_path.path)
-            && hit.2 > resolved_len
-        {
-            found = Some(hit);
-        }
-    }
+    let all_mandirs = mandirs_with_bin_prefix(mandirs, trace.bin.as_deref());
+    let (cmd_path, found) = resolve_node(&Resolve {
+        dirs: &dirs,
+        user_dir,
+        mandirs: &all_mandirs,
+        cmd_name: &cmd_name,
+        rest: complete_rest,
+        bin: trace.bin.as_deref(),
+        timeout_ms,
+        ttl_secs: cfg.cache_ttl_secs,
+    });
+    trace.path.clone_from(&cmd_path.path);
+    trace.node = found.as_ref().map(|(name, ..)| name.clone());
 
     let slot = cmd_path.slot;
+    trace.slot = Some(match slot {
+        ArgSlot::Free => "free".to_owned(),
+        ArgSlot::FlagValue(flag) => format!("value of {flag}"),
+        ArgSlot::AfterDoubleDash => "after --".to_owned(),
+    });
     if let Some(candidates) = flag_value_choices(found.as_ref(), slot, &last_token, cfg) {
-        return print_response(&Response::Candidates(candidates));
+        return Decision {
+            response: Response::Candidates(candidates),
+            reason: Reason::FlagChoices,
+            trace,
+        };
     }
 
     let resolve_depth = cmd_path.depth;
@@ -199,12 +251,78 @@ pub fn run(
             )
         })
         .flatten();
-    print_response(&combine(
-        dyn_candidates,
-        candidates,
-        want_files,
-        cfg.max_completions,
-    ))
+    trace.dynamic = dyn_candidates.as_ref().map(|(dynamic, _)| dynamic.len());
+    let (response, reason) = combine(dyn_candidates, candidates, want_files, cfg.max_completions);
+    Decision {
+        response,
+        reason,
+        trace,
+    }
+}
+
+struct Resolve<'ctx> {
+    dirs:       &'ctx [PathBuf],
+    user_dir:   &'ctx Path,
+    mandirs:    &'ctx [PathBuf],
+    cmd_name:   &'ctx str,
+    rest:       &'ctx [String],
+    bin:        Option<&'ctx Path>,
+    timeout_ms: u64,
+    ttl_secs:   u64,
+}
+
+/// the deepest cached node for the typed path, resolving missing or stale ones.
+fn resolve_node<'ctx>(
+    ctx: &Resolve<'ctx>,
+) -> (CommandPath<'ctx>, Option<(String, ManpageResult, usize)>) {
+    let mut cmd_path = command_path(ctx.dirs, None, ctx.cmd_name, ctx.rest);
+
+    // try longest-prefix match: "git stash apply" -> "git stash" -> "git"
+    let find_result = |path: &[String]| -> Option<(String, ManpageResult, usize)> {
+        (1..=path.len()).rev().find_map(|len| {
+            let name = path[..len].join(" ");
+            lookup(ctx.dirs, &name).map(|result| (name, result, len))
+        })
+    };
+
+    let mut found = find_result(&cmd_path.path);
+    while let Some(bin) = ctx.bin
+        && (cache_is_stale(ctx.user_dir, found.as_ref(), ctx.ttl_secs)
+            || found
+                .as_ref()
+                .is_none_or(|(_, _, depth)| *depth < cmd_path.path.len()))
+    {
+        let Some(result) = resolve_command_path_and_cache(
+            ctx.user_dir,
+            ctx.mandirs,
+            ctx.cmd_name,
+            &cmd_path.path[1..],
+            bin,
+            ctx.timeout_ms,
+        )
+        .result
+        else {
+            break;
+        };
+        let resolved_len = cmd_path.path.len();
+        let probed = cmd_path.probe;
+        found = Some((cmd_path.path.join(" "), result, resolved_len));
+        let fresh = found
+            .as_ref()
+            .map(|(name, cached, _)| (name.as_str(), cached));
+        cmd_path = command_path(ctx.dirs, fresh, ctx.cmd_name, ctx.rest);
+        // a probe's --help can echo the parent's, which caches it as a group
+        // and would license another probe one word deeper.
+        if probed || cmd_path.path.len() <= resolved_len {
+            break;
+        }
+        if let Some(hit) = find_result(&cmd_path.path)
+            && hit.2 > resolved_len
+        {
+            found = Some(hit);
+        }
+    }
+    (cmd_path, found)
 }
 
 /// dirs whose `cmd_name` entries match `bin`, purging stale user-cache ones.
@@ -213,16 +331,22 @@ fn dirs_for_binary(
     user_dir: &Path,
     cmd_name: &str,
     bin: Option<&Path>,
-) -> Vec<PathBuf> {
+) -> (Vec<PathBuf>, Vec<(PathBuf, ExeIdentity)>) {
     let Some(identity) = bin.and_then(ExeIdentity::of) else {
-        return dirs;
+        return (dirs, Vec::new());
     };
-    dirs.into_iter()
+    let mut dropped = Vec::new();
+    let kept = dirs
+        .into_iter()
         .filter(|dir| {
-            let stale = read_exe(dir, cmd_name).is_some_and(|stored| stored != identity);
-            !stale || (dir == user_dir && purge_command(dir, cmd_name).is_ok())
+            let Some(stored) = read_exe(dir, cmd_name).filter(|stored| *stored != identity) else {
+                return true;
+            };
+            dropped.push((dir.clone(), stored));
+            dir == user_dir && purge_command(dir, cmd_name).is_ok()
         })
-        .collect()
+        .collect();
+    (kept, dropped)
 }
 
 /// also search the binary's own prefix for manpages.
@@ -313,19 +437,24 @@ fn combine(
     candidates: Vec<Candidate>,
     want_files: bool,
     max_completions: usize,
-) -> Response {
+) -> (Response, Reason) {
     match answer {
-        Some((dynamic, Files::Alongside)) if want_files => Response::WithFiles(dynamic),
-        Some((dynamic, _)) if candidates.is_empty() || want_files => Response::Candidates(dynamic),
-        Some((dynamic, _)) => {
-            Response::Candidates(merge_completion_candidates(
-                dynamic,
-                candidates,
-                max_completions,
-            ))
+        Some((dynamic, Files::Alongside)) if want_files => {
+            (Response::WithFiles(dynamic), Reason::ProviderWithFiles)
         },
-        None if want_files => Response::Defer,
-        None => Response::or_defer(candidates),
+        Some((dynamic, _)) if want_files => {
+            (Response::Candidates(dynamic), Reason::ProviderOverFiles)
+        },
+        Some((dynamic, _)) if candidates.is_empty() => {
+            (Response::Candidates(dynamic), Reason::Provider)
+        },
+        Some((dynamic, _)) => {
+            let merged = merge_completion_candidates(dynamic, candidates, max_completions);
+            (Response::Candidates(merged), Reason::Merged)
+        },
+        None if want_files => (Response::Defer, Reason::Files),
+        None if candidates.is_empty() => (Response::Defer, Reason::Nothing),
+        None => (Response::Candidates(candidates), Reason::Static),
     }
 }
 
@@ -345,10 +474,6 @@ fn merge_completion_candidates(
         }
     }
     out
-}
-
-fn print_response(response: &Response) -> io::Result<()> {
-    writeln!(io::stdout().lock(), "{response}")
 }
 
 /// value choices for `--flag val` and `--flag=val`.

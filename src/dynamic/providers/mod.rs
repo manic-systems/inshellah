@@ -244,6 +244,18 @@ fn provider_for(cmd: &str, kind: Kind) -> Option<&'static FunctionProvider> {
         .find(|provider| provider.kind() == kind && provider.commands().contains(&cmd))
 }
 
+pub fn kind_of(cmd: &str) -> Option<&'static str> {
+    PROVIDERS
+        .iter()
+        .find(|provider| provider.commands().contains(&cmd))
+        .map(|provider| {
+            match provider.kind() {
+                Kind::Value => "value provider",
+                Kind::Fallback => "fallback provider",
+            }
+        })
+}
+
 /// fallback providers, called when static completion was empty. value providers
 /// answer earlier via `value_completions`.
 pub fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<(Vec<Candidate>, Files, Matching)> {

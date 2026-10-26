@@ -7,6 +7,7 @@ pub mod complete;
 pub mod completions;
 pub mod diff;
 pub mod dump;
+pub mod explain;
 pub mod index;
 pub mod manpage;
 pub mod manpage_dir;

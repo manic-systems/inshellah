@@ -60,6 +60,17 @@ enum Cli {
         #[pound(trailing, value_name = "SPAN")]
         spans:      Vec<String>,
     },
+    /// show how `complete` answers a command line and why
+    Explain {
+        #[pound(flatten)]
+        dirs:       Dirs,
+        /// --help resolve timeout in milliseconds
+        #[pound(long, value_name = "MS")]
+        timeout_ms: Option<u64>,
+        /// the command line being completed
+        #[pound(trailing, value_name = "SPAN")]
+        spans:      Vec<String>,
+    },
     /// print stored completion data
     Query {
         #[pound(flatten)]
@@ -146,6 +157,23 @@ fn main() {
                 commands::complete::run(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
             {
                 eprintln!("complete failed: {err}");
+                process::exit(1);
+            }
+        },
+        Cli::Explain {
+            dirs,
+            timeout_ms: timeout_override,
+            spans,
+        } => {
+            let cfg = Config::from_env();
+            let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
+            let (user_dir, system_dirs) =
+                commands::complete::default_user_dir_and_system_dirs(dirs.resolve());
+            let mandirs = commands::complete::mandirs_for_system_dirs(&system_dirs);
+            if let Err(err) =
+                commands::explain::run(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
+            {
+                eprintln!("explain failed: {err}");
                 process::exit(1);
             }
         },

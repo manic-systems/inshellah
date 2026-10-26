@@ -61,6 +61,10 @@ impl<'span> Slot<'span> {
     }
 }
 
+pub fn provider_kind(cmd: &str) -> Option<&'static str> {
+    providers::kind_of(cmd)
+}
+
 /// candidates as JSON, or None to hand off to nu's file completer.
 pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
     dynamic_complete_with_path(spans, None, cfg)
