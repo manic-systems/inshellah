@@ -150,10 +150,11 @@ fn nix_script_wrapper_target(path: &Path) -> Option<PathBuf> {
     if !contents.contains("/nix/store/") {
         return None;
     }
-    if !(contents.contains("exec ") || contents.contains("exec\t")) {
-        return None;
-    }
-    extract_nix_bin_path(&contents)
+    // the shebang names the interpreter, the exec line names the target.
+    contents
+        .lines()
+        .filter(|line| line.trim_start().starts_with("exec"))
+        .find_map(extract_nix_bin_path)
 }
 
 fn extract_nix_bin_path(contents: &str) -> Option<PathBuf> {
