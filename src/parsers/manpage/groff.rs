@@ -5,12 +5,20 @@
 
 /// on each macro named `$mname`, invoke the body with `(lines, i, args)`.
 ///
-/// the body returns `Option<(T, usize)>`: `Some((value, new_i))` pushes and advances
-/// the cursor to `new_i`; `None` advances by one and keeps scanning.
+/// the body returns `Option<(T, usize)>`: `Some((value, new_i))` pushes and
+/// advances the cursor to `new_i`; `None` advances by one and keeps scanning.
 #[macro_export]
 macro_rules! make_macro_walker {
-    (pub $name:ident -> Vec<$t:ty>, on macro $mname:expr =>
-     |$lines:ident, $i:ident, $args:ident| $body:expr) => {
+    (
+        pub
+        $name:ident -> Vec <
+        $t:ty > ,on macro
+        $mname:expr => |
+        $lines:ident,
+        $i:ident,
+        $args:ident |
+        $body:expr
+    ) => {
         pub fn $name(lines_input: &[$crate::parsers::manpage::groff::GroffLine]) -> Vec<$t> {
             let mut out = Vec::new();
             let mut cursor = 0;
@@ -85,7 +93,8 @@ pub fn strip_groff_escapes(source: &str) -> String {
                     if pos + 2 < len {
                         let font_char = bytes[pos + 2];
                         // space before italic font preserves word boundaries:
-                        // \fB--max-results\fR\fIcount\fR -> "--max-results count"
+                        // \fB--max-results\fR\fIcount\fR -> "--max-results
+                        // count"
                         if font_char == b'I' && is_alnum(prev_char) {
                             buffer.push(' ');
                             prev_char = b' ';
@@ -104,16 +113,16 @@ pub fn strip_groff_escapes(source: &str) -> String {
                     } else {
                         pos += 2;
                     }
-                }
+                },
                 b'-' => {
                     buffer.push('-');
                     prev_char = b'-';
                     pos += 2;
-                }
+                },
                 b'&' | b'/' | b',' => {
                     // zero-width characters
                     pos += 2;
-                }
+                },
                 b'(' => {
                     // two-char named char: \(aq, \(lq, \(rq, etc.
                     if let Some(name) = source.get(pos + 2..pos + 4) {
@@ -125,7 +134,7 @@ pub fn strip_groff_escapes(source: &str) -> String {
                     } else {
                         pos += 2;
                     }
-                }
+                },
                 b'[' => {
                     // bracketed named char: \[aq], \[lq], etc.
                     pos += 2;
@@ -138,7 +147,7 @@ pub fn strip_groff_escapes(source: &str) -> String {
                         }
                         pos += 1;
                     }
-                }
+                },
                 b's' => {
                     // size escape: \sN, \s+N, \s-N
                     pos += 2;
@@ -151,7 +160,7 @@ pub fn strip_groff_escapes(source: &str) -> String {
                     if pos < len && bytes[pos].is_ascii_digit() {
                         pos += 1;
                     }
-                }
+                },
                 b'm' => {
                     // color escape: \m[...]
                     pos += 2;
@@ -162,7 +171,7 @@ pub fn strip_groff_escapes(source: &str) -> String {
                             pos += 1;
                         }
                     }
-                }
+                },
                 b'X' => {
                     // device control: \X'...'
                     pos += 2;
@@ -173,32 +182,32 @@ pub fn strip_groff_escapes(source: &str) -> String {
                             pos += 1;
                         }
                     }
-                }
+                },
                 b'*' => {
                     // string variable: \*X or \*(XX or \*[...]
                     pos += 2;
                     skip_groff_reference(bytes, len, &mut pos);
-                }
+                },
                 b'n' => {
                     // number register: \nX or \n(XX or \n[...]
                     pos += 2;
                     skip_groff_reference(bytes, len, &mut pos);
-                }
+                },
                 b'e' | b'\\' => {
                     buffer.push('\\');
                     prev_char = b'\\';
                     pos += 2;
-                }
+                },
                 b' ' | b'~' => {
                     // escaped/non-breaking space
                     buffer.push(' ');
                     prev_char = b' ';
                     pos += 2;
-                }
+                },
                 _ => {
                     // unknown escape, skip the two-char sequence
                     pos += 2;
-                }
+                },
             }
         } else if let Some(ch) = source.get(pos..).and_then(|rest| rest.chars().next()) {
             buffer.push(ch);
@@ -241,7 +250,8 @@ const fn skip_groff_reference(bytes: &[u8], len: usize, pos: &mut usize) {
 ///
 /// args concatenate without spaces, matching groff:
 ///   .BI "--output " "FILE"  ->  "--outputFILE"
-/// quoted strings keep inner spaces (quotes stripped); unquoted spaces consumed.
+/// quoted strings keep inner spaces (quotes stripped); unquoted spaces
+/// consumed.
 pub fn strip_inline_macro_args(text: &str) -> String {
     let bytes = text.as_bytes();
     let len = bytes.len();
@@ -293,8 +303,8 @@ const fn is_comment_line(line: &str) -> bool {
 }
 
 /// classify a single line of manpage source. macro lines start with '.' or '\''
-/// (groff alternate control char); name splits from args at the first space/tab,
-/// double-quoted args are unquoted.
+/// (groff alternate control char); name splits from args at the first
+/// space/tab, double-quoted args are unquoted.
 pub fn classify_line(line: &str) -> GroffLine {
     if is_comment_line(line) {
         return GroffLine::Comment;

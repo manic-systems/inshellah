@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2
-use std::collections::HashSet;
-use std::env;
-use std::fs;
-use std::path::PathBuf;
+use std::{
+    collections::HashSet,
+    env,
+    fs,
+    path::PathBuf,
+};
 
-use crate::complete::Candidate;
-use crate::dynamic::shared::DynCtx;
+use crate::{
+    complete::Candidate,
+    dynamic::shared::DynCtx,
+};
 
 pub(super) fn complete(_spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !ctx.slot.positional() && ctx.slot.value_flag() != Some("-J") {

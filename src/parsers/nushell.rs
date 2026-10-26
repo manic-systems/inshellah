@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! generate nushell `extern` definitions from a [`ManpageResult`].
 
-use std::borrow::Cow;
-use std::mem;
-
-use crate::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
+use std::{
+    borrow::Cow,
+    mem,
 };
-use crate::types::Positional;
+
+use crate::{
+    parsers::manpage::{
+        ManpageEntry,
+        ManpageResult,
+        ManpageSubcommand,
+        OwnedParam,
+        OwnedSwitch,
+    },
+    types::Positional,
+};
 
 pub fn nushell_type_of_param(name: &str) -> &'static str {
     match name {
@@ -60,7 +68,7 @@ pub fn format_flag(entry: &ManpageEntry) -> String {
     let typed = match &entry.param {
         Some(OwnedParam::Mandatory(param) | OwnedParam::Optional(param)) => {
             format!(": {}", nushell_type_of_param(param))
-        }
+        },
         None => String::new(),
     };
     let flag = format!("    {name}{typed}");
@@ -292,8 +300,8 @@ fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
         {
             block.entries.push(ManpageEntry {
                 switch: OwnedSwitch::Short(ch),
-                param: None,
-                desc: desc.to_owned(),
+                param:  None,
+                desc:   desc.to_owned(),
             });
         }
     } else {
@@ -316,13 +324,10 @@ fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
                 .iter()
                 .any(|(existing, _)| existing.eq_ignore_ascii_case(&name));
             if !duplicate {
-                block.positionals.push((
-                    name,
-                    Positional {
-                        optional: optional || variadic,
-                        variadic,
-                    },
-                ));
+                block.positionals.push((name, Positional {
+                    optional: optional || variadic,
+                    variadic,
+                }));
             }
         }
     }
@@ -349,8 +354,8 @@ fn parse_type_suffix(text: &str) -> Option<OwnedParam> {
 
 #[derive(Default)]
 struct NuBlock {
-    cmd: String,
-    entries: Vec<ManpageEntry>,
+    cmd:         String,
+    entries:     Vec<ManpageEntry>,
     positionals: Vec<(String, Positional)>,
     description: String,
 }
@@ -358,7 +363,10 @@ struct NuBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parsers::manpage::{ManpageResult, ManpageSubcommand};
+    use crate::parsers::manpage::{
+        ManpageResult,
+        ManpageSubcommand,
+    };
 
     #[test]
     fn escape_nu_escapes_line_breaking_chars() {
@@ -373,8 +381,8 @@ mod tests {
     fn flag_description_newline_does_not_break_out_of_line() {
         let entry = ManpageEntry {
             switch: OwnedSwitch::Long("verbose".into()),
-            param: None,
-            desc: "be loud\nrm -rf /".into(),
+            param:  None,
+            desc:   "be loud\nrm -rf /".into(),
         };
         let line = format_flag(&entry);
         assert_eq!(

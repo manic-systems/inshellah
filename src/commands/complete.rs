@@ -1,18 +1,46 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah complete`.
 
-use std::borrow::Cow;
-use std::collections::HashSet;
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf, absolute};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    io::{
+        self,
+        Write as _,
+    },
+    path::{
+        Path,
+        PathBuf,
+        absolute,
+    },
+};
 
-use inshellah::complete::{Candidate, generate_candidates};
-use inshellah::config::Config;
-use inshellah::dynamic::{Slot, dynamic_complete_candidates_with_path, dynamic_value_completions};
-use inshellah::indexer::probe::is_executable;
-use inshellah::indexer::resolve_command_path_and_cache;
-use inshellah::parsers::manpage::{ManpageResult, OwnedSwitch};
-use inshellah::store::{self, default_store_path, lookup, subcommands_of};
+use inshellah::{
+    complete::{
+        Candidate,
+        generate_candidates,
+    },
+    config::Config,
+    dynamic::{
+        Slot,
+        dynamic_complete_candidates_with_path,
+        dynamic_value_completions,
+    },
+    indexer::{
+        probe::is_executable,
+        resolve_command_path_and_cache,
+    },
+    parsers::manpage::{
+        ManpageResult,
+        OwnedSwitch,
+    },
+    store::{
+        self,
+        default_store_path,
+        lookup,
+        subcommands_of,
+    },
+};
 
 use super::common::find_in_path;
 
@@ -109,7 +137,7 @@ pub fn run(
     let fallback_subcommands = match &found {
         Some((matched_name, result, _)) if result.subcommands.is_empty() => {
             subcommands_of(&dirs, matched_name)
-        }
+        },
         _ => Vec::new(),
     };
     // positional value choices (getent databases) fill the same slot as
@@ -120,15 +148,17 @@ pub fn run(
             || !fallback_subcommands.is_empty()
     });
     let candidates: Vec<Candidate> = match &found {
-        Some((_, result, depth)) if slot == ArgSlot::Free => generate_candidates(
-            result,
-            *depth,
-            resolve_depth,
-            &last_token,
-            &fallback_subcommands,
-            typing_flag,
-            cfg,
-        ),
+        Some((_, result, depth)) if slot == ArgSlot::Free => {
+            generate_candidates(
+                result,
+                *depth,
+                resolve_depth,
+                &last_token,
+                &fallback_subcommands,
+                typing_flag,
+                cfg,
+            )
+        },
         _ => Vec::new(),
     };
     // hand off at non-flag leaf positions so file and dynamic completers can
@@ -198,7 +228,7 @@ fn strip_elevation(spans: &[String], dirs: &[PathBuf]) -> (Vec<String>, Option<P
                 }
             }
             target_spans.unwrap_or_else(|| spans.to_vec())
-        }
+        },
         _ => spans.to_vec(),
     };
     if explicit_cmd_path.is_none()
@@ -300,7 +330,7 @@ fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
                     (chars.next(), chars.next(), chars.next()),
                     (Some('-'), Some(flag_char), None) if flag_char == *short
                 )
-            }
+            },
             OwnedSwitch::Both(short, long) => {
                 token == format!("--{long}") || {
                     let mut chars = token.chars();
@@ -309,7 +339,7 @@ fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
                         (Some('-'), Some(flag_char), None) if flag_char == *short
                     )
                 }
-            }
+            },
         }
     })
 }
@@ -323,9 +353,9 @@ enum ArgSlot<'rest> {
 }
 
 struct CommandPath<'rest> {
-    path: Vec<String>,
+    path:  Vec<String>,
     depth: usize,
-    slot: ArgSlot<'rest>,
+    slot:  ArgSlot<'rest>,
     probe: bool,
 }
 
@@ -336,9 +366,11 @@ fn command_path<'rest>(
     cmd_name: &str,
     rest: &'rest [String],
 ) -> CommandPath<'rest> {
-    let node = |name: &str| match fresh {
-        Some((fresh_name, result)) if fresh_name == name => Some(Cow::Borrowed(result)),
-        _ => lookup(dirs, name).map(Cow::Owned),
+    let node = |name: &str| {
+        match fresh {
+            Some((fresh_name, result)) if fresh_name == name => Some(Cow::Borrowed(result)),
+            _ => lookup(dirs, name).map(Cow::Owned),
+        }
     };
     let mut path = vec![cmd_name.to_owned()];
     let mut depth = 1;
@@ -432,7 +464,7 @@ fn cache_is_stale(
     ttl_secs: u64,
 ) -> bool {
     ttl_secs > 0
-        && found.is_some_and(|(name, _, _)| {
+        && found.is_some_and(|(name, ..)| {
             store::user_cache_age(user_dir, name).is_some_and(|age| age.as_secs() > ttl_secs)
         })
 }

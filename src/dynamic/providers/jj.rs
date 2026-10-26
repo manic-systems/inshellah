@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! jj completes itself under `COMPLETE=fish`, one `value\tdescription` per line.
+//! jj completes itself under `COMPLETE=fish`, one `value\tdescription` per
+//! line.
 
-use crate::complete::Candidate;
-use crate::dynamic::shared::{DynCtx, filter_candidates, run_with};
+use crate::{
+    complete::Candidate,
+    dynamic::shared::{
+        DynCtx,
+        filter_candidates,
+        run_with,
+    },
+};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if let Some(candidates) = native(spans, ctx) {

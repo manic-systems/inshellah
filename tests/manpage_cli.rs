@@ -1,10 +1,18 @@
 #![cfg(test)]
 
-use std::env;
-use std::fs;
-use std::path::PathBuf;
-use std::process::{self, Command};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    env,
+    fs,
+    path::PathBuf,
+    process::{
+        self,
+        Command,
+    },
+    time::{
+        SystemTime,
+        UNIX_EPOCH,
+    },
+};
 
 fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

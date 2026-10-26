@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah purge`.
 
-use std::io;
-use std::path::Path;
+use std::{
+    io,
+    path::Path,
+};
 
 use inshellah::store::purge_dir;
 

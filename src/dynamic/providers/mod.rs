@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
-use crate::complete::Candidate;
-use crate::dynamic::shared::DynCtx;
+use crate::{
+    complete::Candidate,
+    dynamic::shared::DynCtx,
+};
 
 pub mod adb;
 pub mod containers;
@@ -31,7 +33,7 @@ trait Provider {
 
 struct FunctionProvider {
     commands: &'static [&'static str],
-    kind: Kind,
+    kind:     Kind,
     complete: CompleteFn,
 }
 
@@ -52,12 +54,12 @@ impl Provider for FunctionProvider {
 const PROVIDERS: &[FunctionProvider] = &[
     FunctionProvider {
         commands: &["adb"],
-        kind: Kind::Value,
+        kind:     Kind::Value,
         complete: adb::complete,
     },
     FunctionProvider {
         commands: &["nix"],
-        kind: Kind::Fallback,
+        kind:     Kind::Fallback,
         complete: nix::complete,
     },
     FunctionProvider {
@@ -69,42 +71,42 @@ const PROVIDERS: &[FunctionProvider] = &[
             "machinectl",
             "networkctl",
         ],
-        kind: Kind::Fallback,
+        kind:     Kind::Fallback,
         complete: systemd::complete,
     },
     FunctionProvider {
         commands: &["ssh", "scp", "sftp"],
-        kind: Kind::Fallback,
+        kind:     Kind::Fallback,
         complete: ssh::complete,
     },
     FunctionProvider {
         commands: &["docker", "podman"],
-        kind: Kind::Fallback,
+        kind:     Kind::Fallback,
         complete: containers::complete,
     },
     FunctionProvider {
         commands: &["kubectl"],
-        kind: Kind::Fallback,
+        kind:     Kind::Fallback,
         complete: kubectl::complete,
     },
     FunctionProvider {
         commands: &["git"],
-        kind: Kind::Fallback,
+        kind:     Kind::Fallback,
         complete: git::complete,
     },
     FunctionProvider {
         commands: &["jj"],
-        kind: Kind::Value,
+        kind:     Kind::Value,
         complete: jj::complete,
     },
     FunctionProvider {
         commands: &["npm", "pnpm", "yarn", "make", "just", "cargo", "zig"],
-        kind: Kind::Fallback,
+        kind:     Kind::Fallback,
         complete: project::complete,
     },
     FunctionProvider {
         commands: &["kill", "pkill"],
-        kind: Kind::Fallback,
+        kind:     Kind::Fallback,
         complete: process::complete,
     },
 ];

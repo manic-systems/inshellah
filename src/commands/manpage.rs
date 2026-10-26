@@ -3,8 +3,10 @@
 
 use std::path::Path;
 
-use inshellah::indexer::process_manpage;
-use inshellah::parsers::nushell::generate_extern;
+use inshellah::{
+    indexer::process_manpage,
+    parsers::nushell::generate_extern,
+};
 
 pub fn run(file: &Path) {
     if let Some((name, result, sub_sections)) = process_manpage(file) {

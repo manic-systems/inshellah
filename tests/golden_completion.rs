@@ -13,17 +13,34 @@
 //! in `goldens-NOTES.md` alongside the snapshots.
 #![cfg(test)]
 
-use std::env;
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
-use std::process::{self, Command};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use inshellah::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
+use std::{
+    env,
+    fs,
+    os::unix::fs::PermissionsExt as _,
+    path::{
+        Path,
+        PathBuf,
+    },
+    process::{
+        self,
+        Command,
+    },
+    time::{
+        SystemTime,
+        UNIX_EPOCH,
+    },
 };
-use inshellah::store::write_result;
+
+use inshellah::{
+    parsers::manpage::{
+        ManpageEntry,
+        ManpageResult,
+        ManpageSubcommand,
+        OwnedParam,
+        OwnedSwitch,
+    },
+    store::write_result,
+};
 
 mod common;
 
@@ -78,49 +95,50 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
 
     // user cache: `tool` with subcommands + flags
     let tool = ManpageResult {
-        entries: vec![
+        entries:            vec![
             entry(switch_both('v', "verbose"), None, "verbose output"),
             entry(switch_long("color"), Some("WHEN"), "colorize output"),
         ],
-        subcommands: vec![
+        subcommands:        vec![
             sub("build", "Compile the package"),
             sub("check", "Analyze the package"),
             sub("clean", "Remove build artifacts"),
         ],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: "A demo tool".to_owned(),
+        positionals:        Vec::new(),
+        description:        "A demo tool".to_owned(),
     };
     write_result(&user, "tool", "manpage", &tool).expect("write tool");
 
     // user cache: `tool build` with its own flags, no subs
     let tool_build = ManpageResult {
-        entries: vec![
+        entries:            vec![
             entry(switch_long("release"), None, "build in release mode"),
             entry(switch_both('j', "jobs"), Some("N"), "parallel jobs"),
         ],
-        subcommands: Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: "Compile the package".to_owned(),
+        positionals:        Vec::new(),
+        description:        "Compile the package".to_owned(),
     };
     write_result(&user, "tool build", "manpage", &tool_build).expect("write tool build");
 
     // system cache: a command present only in the system dir
     let othertool = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![
+        entries:            Vec::new(),
+        subcommands:        vec![
             sub("start", "Start it"),
             sub("stop", "Stop it"),
             sub("status", "Show status"),
         ],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: "Other tool".to_owned(),
+        positionals:        Vec::new(),
+        description:        "Other tool".to_owned(),
     };
     write_result(&system, "othertool", "manpage", &othertool).expect("write othertool");
 
-    // fake `tool` binary: resolves the uncached `tool extra` subcommand via --help
+    // fake `tool` binary: resolves the uncached `tool extra` subcommand via
+    // --help
     let tool_bin = bin.join("tool");
     fs::write(
         &tool_bin,

@@ -1,16 +1,40 @@
 use nom::{
-    AsChar as _, IResult, Parser as _,
+    AsChar as _,
+    IResult,
+    Parser as _,
     branch::alt,
-    bytes::complete::{tag, take_till, take_while1},
-    character::complete::{char, space0},
-    combinator::{not, value, verify},
+    bytes::complete::{
+        tag,
+        take_till,
+        take_while1,
+    },
+    character::complete::{
+        char,
+        space0,
+    },
+    combinator::{
+        not,
+        value,
+        verify,
+    },
     multi::many0,
-    sequence::{delimited, preceded, terminated},
+    sequence::{
+        delimited,
+        preceded,
+        terminated,
+    },
 };
 
-use crate::make_parser;
-use crate::parsers::help::helpers::{eol, is_option_char};
-use crate::parsers::manpage::ManpageSubcommand;
+use crate::{
+    make_parser,
+    parsers::{
+        help::helpers::{
+            eol,
+            is_option_char,
+        },
+        manpage::ManpageSubcommand,
+    },
+};
 
 fn is_placeholder(ch: char) -> bool {
     match ch {
@@ -114,7 +138,8 @@ mod tests {
 
     #[test]
     fn pipe_alias_keeps_canonical_name() {
-        // pw-cli's `help | h`: pipe-separated alias discarded, canonical survives.
+        // pw-cli's `help | h`: pipe-separated alias discarded, canonical
+        // survives.
         let (name, desc) = parse("    help | h    Show this help\n");
         assert_eq!(name, "help");
         assert_eq!(desc, "Show this help");
@@ -122,7 +147,8 @@ mod tests {
 
     #[test]
     fn tab_column_gap_separates_desc() {
-        // long names abut a bare tab with no padding spaces (pw-cli get-permissions).
+        // long names abut a bare tab with no padding spaces (pw-cli
+        // get-permissions).
         let (name, desc) = parse("    get-permissions | gp\tGet permissions of a client\n");
         assert_eq!(name, "get-permissions");
         assert_eq!(desc, "Get permissions of a client");

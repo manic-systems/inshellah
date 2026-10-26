@@ -2,21 +2,52 @@
 //! filesystem store for parsed completion data. filenames are reversible
 //! ("git add" -> v1%git%20add.json). lookups span the user cache + system dirs.
 
-use std::collections::{BTreeSet, HashMap};
-use std::ffi::OsStr;
-use std::fmt::{self, Display, Formatter, Write as _};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
-use std::{env, fs, io, iter, process};
+use std::{
+    collections::{
+        BTreeSet,
+        HashMap,
+    },
+    env,
+    ffi::OsStr,
+    fmt::{
+        self,
+        Display,
+        Formatter,
+        Write as _,
+    },
+    fs,
+    io,
+    iter,
+    path::{
+        Path,
+        PathBuf,
+    },
+    process,
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
+    },
+    time::{
+        Duration,
+        SystemTime,
+    },
+};
 
 use serde_json::Value;
 
-use crate::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
+use crate::{
+    parsers::{
+        manpage::{
+            ManpageEntry,
+            ManpageResult,
+            ManpageSubcommand,
+            OwnedParam,
+            OwnedSwitch,
+        },
+        nushell::parse_nu_completions,
+    },
+    types::Positional,
 };
-use crate::parsers::nushell::parse_nu_completions;
-use crate::types::Positional;
 
 pub fn default_store_path() -> PathBuf {
     if let Ok(xdg) = env::var("XDG_CACHE_HOME")
@@ -46,7 +77,7 @@ impl Display for PercentEncoded<'_> {
             match byte {
                 b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' => {
                     f.write_char(char::from(byte))?;
-                }
+                },
                 _ => write!(f, "%{byte:02X}")?,
             }
         }
@@ -122,7 +153,7 @@ impl Display for JsonEscaped<'_> {
                 '\x0c' => f.write_str("\\f")?,
                 control if control < '\x20' => {
                     write!(f, "\\u{:04x}", u32::from(control))?;
-                }
+                },
                 other => f.write_char(other)?,
             }
         }
@@ -141,15 +172,17 @@ fn json_switch(switch: &OwnedSwitch) -> String {
                 r#"{{"type":"short","char":{}}}"#,
                 json_string(&short.to_string())
             )
-        }
+        },
         OwnedSwitch::Long(long) => {
             format!(r#"{{"type":"long","name":{}}}"#, json_string(long))
-        }
-        OwnedSwitch::Both(short, long) => format!(
-            r#"{{"type":"both","char":{},"name":{}}}"#,
-            json_string(&short.to_string()),
-            json_string(long)
-        ),
+        },
+        OwnedSwitch::Both(short, long) => {
+            format!(
+                r#"{{"type":"both","char":{},"name":{}}}"#,
+                json_string(&short.to_string()),
+                json_string(long)
+            )
+        },
     }
 }
 
@@ -158,10 +191,10 @@ fn json_param(param: Option<&OwnedParam>) -> String {
         None => "null".to_owned(),
         Some(OwnedParam::Mandatory(name)) => {
             format!(r#"{{"kind":"mandatory","name":{}}}"#, json_string(name))
-        }
+        },
         Some(OwnedParam::Optional(name)) => {
             format!(r#"{{"kind":"optional","name":{}}}"#, json_string(name))
-        }
+        },
     }
 }
 
@@ -249,7 +282,7 @@ pub fn write_file(path: &Path, contents: &str) -> io::Result<()> {
         Some(dir) if !dir.as_os_str().is_empty() => {
             fs::create_dir_all(dir)?;
             dir
-        }
+        },
         _ => Path::new("."),
     };
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -264,7 +297,7 @@ pub fn write_file(path: &Path, contents: &str) -> io::Result<()> {
         Err(err) => {
             let _: io::Result<()> = fs::remove_file(&tmp);
             Err(err)
-        }
+        },
     }
 }
 
@@ -350,13 +383,13 @@ fn switch_from_json(value: &Value) -> Option<OwnedSwitch> {
         "short" => {
             let short = value.get("char")?.as_str()?.chars().next()?;
             Some(OwnedSwitch::Short(short))
-        }
+        },
         "long" => Some(OwnedSwitch::Long(value.get("name")?.as_str()?.to_owned())),
         "both" => {
             let short = value.get("char")?.as_str()?.chars().next()?;
             let long = value.get("name")?.as_str()?.to_owned();
             Some(OwnedSwitch::Both(short, long))
-        }
+        },
         _ => None,
     }
 }
@@ -622,9 +655,12 @@ pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        slice,
+        time::UNIX_EPOCH,
+    };
+
     use super::*;
-    use std::slice;
-    use std::time::UNIX_EPOCH;
 
     fn unique_dir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -679,15 +715,15 @@ mod tests {
         let dir = unique_dir("empty-native");
         fs::create_dir_all(&dir).unwrap();
         let result = ManpageResult {
-            entries: vec![ManpageEntry {
+            entries:            vec![ManpageEntry {
                 switch: OwnedSwitch::Long("json".to_owned()),
-                param: None,
-                desc: "json flag".to_owned(),
+                param:  None,
+                desc:   "json flag".to_owned(),
             }],
-            subcommands: Vec::new(),
+            subcommands:        Vec::new(),
             positional_choices: Vec::new(),
-            positionals: Vec::new(),
-            description: String::new(),
+            positionals:        Vec::new(),
+            description:        String::new(),
         };
         write_result(&dir, "demo", "help", &result).unwrap();
         write_file(
@@ -714,11 +750,11 @@ mod tests {
         let dir = unique_dir("cache-age");
         fs::create_dir_all(&dir).unwrap();
         let result = ManpageResult {
-            entries: Vec::new(),
-            subcommands: Vec::new(),
+            entries:            Vec::new(),
+            subcommands:        Vec::new(),
             positional_choices: Vec::new(),
-            positionals: Vec::new(),
-            description: String::new(),
+            positionals:        Vec::new(),
+            description:        String::new(),
         };
         write_result(&dir, "command", "manpage", &result).unwrap();
         let age = user_cache_age(&dir, "command").expect("cache file should exist");
@@ -732,11 +768,11 @@ mod tests {
         let dir = unique_dir("subcommands");
         fs::create_dir_all(&dir).unwrap();
         let result = ManpageResult {
-            entries: Vec::new(),
-            subcommands: Vec::new(),
+            entries:            Vec::new(),
+            subcommands:        Vec::new(),
             positional_choices: Vec::new(),
-            positionals: Vec::new(),
-            description: "child desc".to_owned(),
+            positionals:        Vec::new(),
+            description:        "child desc".to_owned(),
         };
         write_result(&dir, "demo foo_bar", "manpage", &result).unwrap();
         write_result(&dir, "demo foo_bar nested", "manpage", &result).unwrap();

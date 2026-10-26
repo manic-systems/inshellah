@@ -7,17 +7,38 @@ mod subcommands;
 
 use std::collections::HashMap;
 
-use crate::parsers::help::description::description;
-use crate::parsers::help::helpers::get_indent;
-use crate::parsers::help::options::{param_parser, switch_parser};
-use crate::parsers::help::positionals::{extract_cli11_positionals, extract_usage_positionals};
-use crate::parsers::help::subcommands::subcommand_entry;
-use crate::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
+use nom::{
+    IResult,
+    Parser as _,
+    character::complete::space0,
+    combinator::opt,
 };
-use nom::{IResult, Parser as _, character::complete::space0, combinator::opt};
 
-use crate::make_parser;
+use crate::{
+    make_parser,
+    parsers::{
+        help::{
+            description::description,
+            helpers::get_indent,
+            options::{
+                param_parser,
+                switch_parser,
+            },
+            positionals::{
+                extract_cli11_positionals,
+                extract_usage_positionals,
+            },
+            subcommands::subcommand_entry,
+        },
+        manpage::{
+            ManpageEntry,
+            ManpageResult,
+            ManpageSubcommand,
+            OwnedParam,
+            OwnedSwitch,
+        },
+    },
+};
 
 type EntryParts<'src> = (
     &'src str,
@@ -54,13 +75,13 @@ fn dedup_subcommands(raw: Vec<ManpageSubcommand>) -> Vec<ManpageSubcommand> {
     for subcommand in raw {
         let key = subcommand.name.to_ascii_lowercase();
         match by_name.get(&key) {
-            Some(prev) if prev.desc.len() >= subcommand.desc.len() => {}
+            Some(prev) if prev.desc.len() >= subcommand.desc.len() => {},
             _ => {
                 if !by_name.contains_key(&key) {
                     order.push(key.clone());
                 }
                 by_name.insert(key, subcommand);
-            }
+            },
         }
     }
     order
@@ -167,23 +188,27 @@ fn build_help_result(original: &str) -> ManpageResult {
     // recursive --help probes dispatch on the lowercase name.
     let subcommands = dedup_subcommands(raw_subcommands)
         .into_iter()
-        .map(|subcommand| ManpageSubcommand {
-            name: subcommand.name.to_ascii_lowercase(),
-            desc: subcommand.desc,
-            aliases: subcommand
-                .aliases
-                .iter()
-                .map(|alias| alias.to_ascii_lowercase())
-                .collect(),
+        .map(|subcommand| {
+            ManpageSubcommand {
+                name:    subcommand.name.to_ascii_lowercase(),
+                desc:    subcommand.desc,
+                aliases: subcommand
+                    .aliases
+                    .iter()
+                    .map(|alias| alias.to_ascii_lowercase())
+                    .collect(),
+            }
         })
         .collect();
     // cli11 positional section carries types and optionality, prefer it over
     // the usage-line scan.
     let positionals_raw = match extract_cli11_positionals(original) {
         Ok((_, found)) if !found.is_empty() => found,
-        _ => extract_usage_positionals(original)
-            .map(|(_, found)| found)
-            .unwrap_or_default(),
+        _ => {
+            extract_usage_positionals(original)
+                .map(|(_, found)| found)
+                .unwrap_or_default()
+        },
     };
     let positionals = positionals_raw
         .into_iter()

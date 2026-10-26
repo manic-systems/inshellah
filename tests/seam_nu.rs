@@ -15,15 +15,31 @@
 //! runs it where nu is guaranteed.
 #![cfg(test)]
 
-use std::env;
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
-use std::process::{self, Command};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    env,
+    fs,
+    os::unix::fs::PermissionsExt as _,
+    path::{
+        Path,
+        PathBuf,
+    },
+    process::{
+        self,
+        Command,
+    },
+    time::{
+        SystemTime,
+        UNIX_EPOCH,
+    },
+};
 
-use inshellah::parsers::manpage::{ManpageResult, ManpageSubcommand};
-use inshellah::store::write_result;
+use inshellah::{
+    parsers::manpage::{
+        ManpageResult,
+        ManpageSubcommand,
+    },
+    store::write_result,
+};
 
 fn nu_available() -> bool {
     Command::new("nu")
@@ -51,14 +67,14 @@ fn write_stub_executable(bin_dir: &Path, name: &str) {
 
 fn subs(pairs: &[(&str, &str)]) -> ManpageResult {
     ManpageResult {
-        entries: Vec::new(),
-        subcommands: pairs
+        entries:            Vec::new(),
+        subcommands:        pairs
             .iter()
             .map(|(name, desc)| ManpageSubcommand::new(name.to_string(), desc.to_string()))
             .collect(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     }
 }
 

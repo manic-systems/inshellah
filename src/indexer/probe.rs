@@ -1,16 +1,28 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! binary classification and help/native completion probing.
 
-use std::borrow::Cow;
-use std::collections::HashSet;
-use std::fs;
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    fs,
+    io::Read as _,
+    path::{
+        Path,
+        PathBuf,
+    },
+    time::{
+        Duration,
+        Instant,
+    },
+};
 
-use crate::parsers::help::help_parser;
-use crate::parsers::manpage::ManpageResult;
-use crate::subprocess::run_cmd;
+use crate::{
+    parsers::{
+        help::help_parser,
+        manpage::ManpageResult,
+    },
+    subprocess::run_cmd,
+};
 
 pub fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
@@ -41,14 +53,14 @@ const fn is_scannable_magic(magic: [u8; 4]) -> bool {
     {
         matches!(
             magic,
-            [0xce | 0xcf, 0xfa, 0xed, 0xfe]
-                | [0xfe, 0xed, 0xfa, 0xce | 0xcf]
-                | [0xca, 0xfe, 0xba, 0xbe | 0xbf]
+            [0xCE | 0xCF, 0xFA, 0xED, 0xFE]
+                | [0xFE, 0xED, 0xFA, 0xCE | 0xCF]
+                | [0xCA, 0xFE, 0xBA, 0xBE | 0xBF]
         )
     }
     #[cfg(not(target_os = "macos"))]
     {
-        matches!(magic, [0x7f, b'E', b'L', b'F'])
+        matches!(magic, [0x7F, b'E', b'L', b'F'])
     }
 }
 
@@ -313,16 +325,18 @@ pub(super) fn remaining_ms(deadline: Instant) -> u64 {
     .unwrap_or(u64::MAX)
 }
 
-// the ECMA-48 escapes and the C0 controls a terminal acts on, keeping tab, LF and CR
+// the ECMA-48 escapes and the C0 controls a terminal acts on, keeping tab, LF
+// and CR
 fn strip_ansi(text: &str) -> Cow<'_, str> {
-    const ESC: u8 = 0x1b;
+    const ESC: u8 = 0x1B;
     let is_control =
-        |byte: u8| (byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r')) || byte == 0x7f;
+        |byte: u8| (byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r')) || byte == 0x7F;
 
     let bytes = text.as_bytes();
     let byte_at = |idx: usize| bytes.get(idx).copied();
 
-    // a branch-free fold per 32-byte chunk vectorizes, scanning 4x faster than `position`
+    // a branch-free fold per 32-byte chunk vectorizes, scanning 4x faster than
+    // `position`
     let next_control = |from: usize| {
         let mut base = from;
         for chunk in bytes[from..].chunks(32) {
@@ -360,7 +374,7 @@ fn strip_ansi(text: &str) -> Cow<'_, str> {
                     if let Some(b'@'..=b'~') = byte_at(at) {
                         at += 1;
                     }
-                }
+                },
                 Some(b']' | b'P' | b'X' | b'^' | b'_') => {
                     at += 1;
                     while let Some(body) = byte_at(at)
@@ -371,7 +385,7 @@ fn strip_ansi(text: &str) -> Cow<'_, str> {
                             break;
                         }
                     }
-                }
+                },
                 Some(b' '..=b'/') => {
                     at += 1;
                     while let Some(b' '..=b'/') = byte_at(at) {
@@ -380,9 +394,9 @@ fn strip_ansi(text: &str) -> Cow<'_, str> {
                     if let Some(b'0'..=b'~') = byte_at(at) {
                         at += 1;
                     }
-                }
+                },
                 Some(b'0'..=b'~') => at += 1,
-                _ => {}
+                _ => {},
             }
         }
         start = at;
@@ -390,8 +404,8 @@ fn strip_ansi(text: &str) -> Cow<'_, str> {
     }
     out.extend_from_slice(&bytes[start..]);
 
-    // SAFETY: each removed run starts at an ASCII byte and ends before one or at
-    // the end of `text`, so every UTF-8 sequence survives whole
+    // SAFETY: each removed run starts at an ASCII byte and ends before one or
+    // at the end of `text`, so every UTF-8 sequence survives whole
     Cow::Owned(unsafe { String::from_utf8_unchecked(out) })
 }
 
@@ -437,10 +451,18 @@ pub fn try_help_args(bin_s: &str, sub_args: &[String], timeout_ms: u64) -> Optio
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env,
+        io,
+        process,
+        thread,
+        time::{
+            SystemTime,
+            UNIX_EPOCH,
+        },
+    };
+
     use super::*;
-    use std::io;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{env, process, thread};
 
     #[test]
     fn non_executable_magic_is_never_scannable() {
@@ -452,8 +474,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_scans_mach_o_only() {
-        assert!(is_scannable_magic([0xcf, 0xfa, 0xed, 0xfe]));
-        assert!(is_scannable_magic([0xca, 0xfe, 0xba, 0xbe]));
+        assert!(is_scannable_magic([0xCF, 0xFA, 0xED, 0xFE]));
+        assert!(is_scannable_magic([0xCA, 0xFE, 0xBA, 0xBE]));
         assert!(!is_scannable_magic(*b"\x7fELF"));
     }
 
@@ -461,8 +483,8 @@ mod tests {
     #[test]
     fn elf_targets_scan_elf_only() {
         assert!(is_scannable_magic(*b"\x7fELF"));
-        assert!(!is_scannable_magic([0xca, 0xfe, 0xba, 0xbe]));
-        assert!(!is_scannable_magic([0xcf, 0xfa, 0xed, 0xfe]));
+        assert!(!is_scannable_magic([0xCA, 0xFE, 0xBA, 0xBE]));
+        assert!(!is_scannable_magic([0xCF, 0xFA, 0xED, 0xFE]));
     }
 
     #[test]

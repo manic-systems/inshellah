@@ -3,14 +3,14 @@
 
 mod commands;
 
-use std::path::PathBuf;
-use std::process;
-
-use pound::Parse;
-
-use inshellah::config::Config;
+use std::{
+    path::PathBuf,
+    process,
+};
 
 use commands::common::Dirs;
+use inshellah::config::Config;
+use pound::Parse;
 
 /// nushell completions engine
 #[derive(Parse, Debug)]
@@ -23,7 +23,8 @@ use commands::common::Dirs;
   INSHELLAH_FLAG_ON_EMPTY   1 to also surface flags on an empty token
   INSHELLAH_MAX_COMPLETIONS cap on candidates returned, 0 for none
   INSHELLAH_TIMEOUT_MS      default --help resolve timeout
-  INSHELLAH_CACHE_TTL_SECS  rescrape user-cached sets older than this, 604800 by default, 0 for never
+  INSHELLAH_CACHE_TTL_SECS  rescrape user-cached sets older than this, 604800 by default, 0 for \
+                  never
 
 Read by `index`:
   INSHELLAH_MAX_INDEX_NODES cap on subcommand nodes per root command, 10000 by default"
@@ -51,20 +52,20 @@ enum Cli {
     /// cached in the first --dir.
     Complete {
         #[pound(flatten)]
-        dirs: Dirs,
+        dirs:       Dirs,
         /// --help resolve timeout in milliseconds
         #[pound(long, value_name = "MS")]
         timeout_ms: Option<u64>,
         /// the command line being completed
         #[pound(trailing, value_name = "SPAN")]
-        spans: Vec<String>,
+        spans:      Vec<String>,
     },
     /// print stored completion data
     Query {
         #[pound(flatten)]
         dirs: Dirs,
         #[pound(value_name = "CMD", min_values = 1)]
-        cmd: Vec<String>,
+        cmd:  Vec<String>,
     },
     /// list indexed commands
     Dump {
@@ -76,15 +77,15 @@ enum Cli {
     Diff {
         /// audit every command under a prefix
         #[pound(long, group = target)]
-        scan: Option<PathBuf>,
+        scan:       Option<PathBuf>,
         /// extra colon-separated man directories
         #[pound(long, value_name = "PATHS", delimiter = ':')]
-        dir: Vec<PathBuf>,
+        dir:        Vec<PathBuf>,
         /// --help scrape timeout in milliseconds
         #[pound(long, value_name = "MS")]
         timeout_ms: Option<u64>,
         #[pound(value_name = "CMD", group = target)]
-        cmd: Vec<String>,
+        cmd:        Vec<String>,
     },
     /// delete the writable user cache, leaving system dirs alone
     Purge {
@@ -97,9 +98,10 @@ enum Cli {
 
 fn main() {
     // rust ignores SIGPIPE, so a broken-pipe write becomes a BrokenPipe error
-    // that `println!` panics on. restore the default so piping into `head` exits
-    // quietly.
-    // SAFETY: runs first in main, before any thread exists, and SIG_DFL is a valid handler.
+    // that `println!` panics on. restore the default so piping into `head`
+    // exits quietly.
+    // SAFETY: runs first in main, before any thread exists, and SIG_DFL is a
+    // valid handler.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
@@ -109,13 +111,13 @@ fn main() {
                 eprintln!("index failed: {err}");
                 process::exit(1);
             }
-        }
+        },
         Cli::Merge { args } => {
             if let Err(err) = commands::merge::run(&args) {
                 eprintln!("merge failed: {err}");
                 process::exit(1);
             }
-        }
+        },
         Cli::Manpage { file } => commands::manpage::run(&file),
         Cli::ManpageDir { dir } => commands::manpage_dir::run(&dir),
         Cli::Complete {
@@ -134,13 +136,13 @@ fn main() {
                 eprintln!("complete failed: {err}");
                 process::exit(1);
             }
-        }
+        },
         Cli::Query { dirs, cmd } => {
             if let Err(err) = commands::query::run(&cmd.join(" "), &dirs.resolve()) {
                 eprintln!("{err}");
                 process::exit(1);
             }
-        }
+        },
         Cli::Dump { dirs } => commands::dump::run(&dirs.resolve()),
         Cli::Diff {
             scan,
@@ -156,9 +158,9 @@ fn main() {
                         eprintln!("error: {err}");
                         process::exit(1);
                     }
-                }
+                },
             }
-        }
+        },
         Cli::Purge { dirs } => {
             // only the writable user dir is purged, never the system overlays
             let mut resolved = dirs.resolve();
@@ -166,12 +168,12 @@ fn main() {
                 eprintln!("purge failed: {err}");
                 process::exit(1);
             }
-        }
+        },
         Cli::Completions => {
             if let Err(err) = commands::completions::run(Cli::SPEC) {
                 eprintln!("completions failed: {err}");
                 process::exit(1);
             }
-        }
+        },
     }
 }

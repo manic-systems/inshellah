@@ -14,12 +14,20 @@
 //! Re-bless: `INSHELLAH_BLESS=1 cargo test --test golden_parser`.
 #![cfg(test)]
 
-use std::fmt::Write as _;
-use std::fs;
-use std::path::Path;
+use std::{
+    fmt::Write as _,
+    fs,
+    path::Path,
+};
 
-use inshellah::parsers::help::help_parser;
-use inshellah::parsers::manpage::{ManpageResult, OwnedSwitch, parse_manpage_string};
+use inshellah::parsers::{
+    help::help_parser,
+    manpage::{
+        ManpageResult,
+        OwnedSwitch,
+        parse_manpage_string,
+    },
+};
 
 mod common;
 

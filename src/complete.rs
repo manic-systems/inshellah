@@ -2,18 +2,31 @@
 //! completion candidates: the shared scorer, the typed `Candidate`, and JSON
 //! rendering.
 
-use std::cmp::Reverse;
-use std::fmt::{self, Display, Formatter, Write as _};
-use std::iter;
+use std::{
+    cmp::Reverse,
+    fmt::{
+        self,
+        Display,
+        Formatter,
+        Write as _,
+    },
+    iter,
+};
 
-use crate::config::Config;
-use crate::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
+use crate::{
+    config::Config,
+    parsers::manpage::{
+        ManpageEntry,
+        ManpageResult,
+        ManpageSubcommand,
+        OwnedParam,
+        OwnedSwitch,
+    },
 };
 
 #[derive(Clone, Debug)]
 pub struct Candidate {
-    pub value: String,
+    pub value:       String,
     pub description: String,
 }
 
@@ -24,7 +37,7 @@ impl Candidate {
         Desc: Into<String>,
     {
         Self {
-            value: value.into(),
+            value:       value.into(),
             description: description.into(),
         }
     }
@@ -55,7 +68,7 @@ impl Display for JsonEscaped<'_> {
                 '\t' => f.write_str("\\t")?,
                 control if control < '\x20' => {
                     write!(f, "\\u{:04x}", u32::from(control))?;
-                }
+                },
                 other => f.write_char(other)?,
             }
         }
@@ -186,14 +199,14 @@ pub fn entry_completion_desc(entry: &ManpageEntry) -> String {
             } else {
                 format!("{} <{param}>", entry.desc)
             }
-        }
+        },
         Some(OwnedParam::Optional(param)) => {
             if entry.desc.is_empty() {
                 format!("[{param}]")
             } else {
                 format!("{} [{param}]", entry.desc)
             }
-        }
+        },
         None => entry.desc.clone(),
     }
 }
@@ -227,7 +240,8 @@ pub fn generate_candidates(
     );
 
     if matched_depth >= resolve_depth {
-        // subcommands and positional-arg choices (getent db names) share one slot.
+        // subcommands and positional-arg choices (getent db names) share one
+        // slot.
         let choices = subs.iter().chain(result.positional_choices.iter());
         for sc in choices {
             // exact match on the name or any alias hands off to a dynamic
@@ -247,7 +261,7 @@ pub fn generate_candidates(
                     Some((bs, bf)) if fs > bs => {
                         others.push(bf);
                         best = Some((fs, form));
-                    }
+                    },
                     Some(_) => others.push(form),
                     None => best = Some((fs, form)),
                 }
@@ -265,8 +279,8 @@ pub fn generate_candidates(
         }
     }
 
-    // bare-vs-dashed scoring depends on the trigger typed (Config::flag_needle),
-    // default "-" keeps the dashed form.
+    // bare-vs-dashed scoring depends on the trigger typed
+    // (Config::flag_needle), default "-" keeps the dashed form.
     if typing_flag {
         let fneedle = cfg.flag_needle(last_token);
         let score_against = |dashed: &str, bare_name: &str| -> i32 {
@@ -284,13 +298,13 @@ pub fn generate_candidates(
                     let flag = format!("--{long}");
                     let score = score_against(&flag, long);
                     (flag, None, score)
-                }
+                },
                 OwnedSwitch::Short(short) => {
                     let flag = format!("-{short}");
                     let short_bare = short.to_string();
                     let score = score_against(&flag, &short_bare);
                     (flag, None, score)
-                }
+                },
                 OwnedSwitch::Both(short, long) => {
                     let long_flag = format!("--{long}");
                     let short_flag = format!("-{short}");
@@ -302,7 +316,7 @@ pub fn generate_candidates(
                     } else {
                         (long_flag, Some(short_flag), ls)
                     }
-                }
+                },
             };
             if score > 0 {
                 let base_desc = entry_completion_desc(entry);
@@ -348,14 +362,14 @@ mod tests {
 
     fn result_with_subs(names: &[&str]) -> ManpageResult {
         ManpageResult {
-            entries: Vec::new(),
-            subcommands: names
+            entries:            Vec::new(),
+            subcommands:        names
                 .iter()
                 .map(|name| ManpageSubcommand::new(name.to_string(), String::new()))
                 .collect(),
             positional_choices: Vec::new(),
-            positionals: Vec::new(),
-            description: String::new(),
+            positionals:        Vec::new(),
+            description:        String::new(),
         }
     }
 
@@ -397,8 +411,8 @@ mod tests {
     fn exact_short_flag_is_kept_for_preview() {
         let result = result_with_flags(vec![ManpageEntry {
             switch: OwnedSwitch::Both('x', "catalog".to_owned()),
-            param: None,
-            desc: "explain log messages".to_owned(),
+            param:  None,
+            desc:   "explain log messages".to_owned(),
         }]);
         let cfg = Config::default();
         let out = generate_candidates(&result, 1, 1, "-x", &[], true, &cfg);
@@ -414,13 +428,13 @@ mod tests {
         let result = result_with_flags(vec![
             ManpageEntry {
                 switch: OwnedSwitch::Long("image".to_owned()),
-                param: None,
-                desc: "use an image".to_owned(),
+                param:  None,
+                desc:   "use an image".to_owned(),
             },
             ManpageEntry {
                 switch: OwnedSwitch::Long("image-policy".to_owned()),
-                param: None,
-                desc: "set image policy".to_owned(),
+                param:  None,
+                desc:   "set image policy".to_owned(),
             },
         ]);
         let cfg = Config::default();
@@ -438,13 +452,13 @@ mod tests {
         let result = result_with_flags(vec![
             ManpageEntry {
                 switch: OwnedSwitch::Long("no-write-lock-file".to_owned()),
-                param: None,
-                desc: "do not update the lock file".to_owned(),
+                param:  None,
+                desc:   "do not update the lock file".to_owned(),
             },
             ManpageEntry {
                 switch: OwnedSwitch::Long("command".to_owned()),
-                param: None,
-                desc: "run a command".to_owned(),
+                param:  None,
+                desc:   "run a command".to_owned(),
             },
         ]);
         let cfg = Config::default();

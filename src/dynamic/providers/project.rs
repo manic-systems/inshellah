@@ -1,12 +1,25 @@
 // SPDX-License-Identifier: EUPL-1.2
-use std::collections::HashSet;
-use std::fmt;
-use std::fs;
+use std::{
+    collections::HashSet,
+    fmt,
+    fs,
+};
 
-use serde_core::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde_core::de::{
+    Deserialize,
+    Deserializer,
+    IgnoredAny,
+    MapAccess,
+    Visitor,
+};
 
-use crate::complete::Candidate;
-use crate::dynamic::shared::{DynCtx, run};
+use crate::{
+    complete::Candidate,
+    dynamic::shared::{
+        DynCtx,
+        run,
+    },
+};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match spans[0].as_str() {
@@ -35,7 +48,8 @@ fn npm_like_completions(spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate
     (!candidates.is_empty()).then_some(candidates)
 }
 
-// serde_json's `Value` sorts object keys, and scripts list in package.json order
+// serde_json's `Value` sorts object keys, and scripts list in package.json
+// order
 struct Package(Option<Scripts>);
 
 struct Scripts(Vec<Candidate>);

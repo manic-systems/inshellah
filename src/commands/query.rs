@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah query`.
 
-use std::io;
-use std::path::PathBuf;
+use std::{
+    io,
+    path::PathBuf,
+};
 
 use inshellah::store::lookup_raw;
 

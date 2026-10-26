@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah completions`.
 
-use std::io::{self, BufWriter, Write};
+use std::io::{
+    self,
+    BufWriter,
+    Write,
+};
 
-use pound::{ArgSpec, Command, CommandSpec, Hint};
+use pound::{
+    ArgSpec,
+    Command,
+    CommandSpec,
+    Hint,
+};
 
 pub fn run(spec: &'static CommandSpec) -> io::Result<()> {
     let mut out = BufWriter::new(io::stdout().lock());
@@ -70,7 +79,8 @@ where
     }
 }
 
-// a delimited list such as `a:b` is not one path, so nushell must not expand it as one
+// a delimited list such as `a:b` is not one path, so nushell must not expand it
+// as one
 const fn nu_type(arg: &ArgSpec) -> &'static str {
     match arg.hint {
         Hint::Path if arg.delimiter.is_none() => "path",

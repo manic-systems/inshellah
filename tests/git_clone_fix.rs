@@ -1,5 +1,10 @@
-use inshellah::parsers::help::help_parser;
-use inshellah::parsers::manpage::{OwnedParam, OwnedSwitch};
+use inshellah::parsers::{
+    help::help_parser,
+    manpage::{
+        OwnedParam,
+        OwnedSwitch,
+    },
+};
 
 #[test]
 fn parser_recovers_past_no_bracket_long_form() {

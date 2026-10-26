@@ -6,7 +6,10 @@
 //! express every difference.
 
 use crate::parsers::manpage::groff::{
-    GroffLine, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
+    GroffLine,
+    strip_groff_escapes,
+    strip_inline_macro_args,
+    strip_space_macro_args,
 };
 
 /// which inline-format macros render to text inside a description body.
@@ -26,7 +29,7 @@ impl TagMacros {
             Self::Common => matches!(name, "B" | "BI" | "BR" | "I" | "IR" | "RI"),
             Self::Wide => {
                 matches!(name, "B" | "BI" | "BR" | "I" | "IR" | "IB" | "RB" | "RI")
-            }
+            },
         }
     }
 }
@@ -35,13 +38,13 @@ impl TagMacros {
 #[derive(Clone, Copy)]
 pub struct DescOpts {
     /// macro names that terminate the body (e.g. `["TP", "SH", "SS"]`).
-    pub boundaries: &'static [&'static str],
+    pub boundaries:    &'static [&'static str],
     /// skip whole `.RS/.RE` blocks (sub-value example listings).
-    pub skip_rs: bool,
+    pub skip_rs:       bool,
     /// a blank line ends the body once text has been collected (leading
     /// blanks between tag and first line are always skipped).
     pub stop_on_blank: bool,
-    pub tags: TagMacros,
+    pub tags:          TagMacros,
 }
 
 /// render an inline-format macro's args as the strategies do: .B/.I keep
@@ -49,9 +52,11 @@ pub struct DescOpts {
 fn render_tag(name: &str, args: &str) -> String {
     match name {
         "B" | "I" => strip_space_macro_args(args),
-        _ => strip_groff_escapes(&strip_inline_macro_args(args))
-            .trim()
-            .to_owned(),
+        _ => {
+            strip_groff_escapes(&strip_inline_macro_args(args))
+                .trim()
+                .to_owned()
+        },
     }
 }
 
@@ -64,18 +69,18 @@ pub fn collect(lines: &[GroffLine], start: usize, opts: DescOpts) -> (String, us
             GroffLine::Macro { name, .. } if opts.boundaries.contains(&name.as_str()) => break,
             GroffLine::Macro { name, .. } if opts.skip_rs && name == "RS" => {
                 i = skip_rs_block(lines, i + 1);
-            }
+            },
             GroffLine::Text(text) => {
                 acc.push(text.clone());
                 i += 1;
-            }
+            },
             GroffLine::Macro { name, args } if opts.tags.renders(name) => {
                 let text = render_tag(name, args);
                 if !text.is_empty() {
                     acc.push(text);
                 }
                 i += 1;
-            }
+            },
             GroffLine::Blank if opts.stop_on_blank && !acc.is_empty() => break,
             GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => i += 1,
         }

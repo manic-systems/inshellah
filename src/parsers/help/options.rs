@@ -1,6 +1,13 @@
-use crate::make_parser;
-use crate::parsers::help::helpers::is_option_char;
-use crate::parsers::manpage::{OwnedParam, OwnedSwitch};
+use crate::{
+    make_parser,
+    parsers::{
+        help::helpers::is_option_char,
+        manpage::{
+            OwnedParam,
+            OwnedSwitch,
+        },
+    },
+};
 
 // zero-copy intermediates, live only between nom combinators here. public
 // parsers emit the owned model.
@@ -34,18 +41,34 @@ impl From<Param<'_>> for OwnedParam {
     }
 }
 
-use nom::bytes::complete::{take_till, take_till1};
-use nom::character::complete::{space0, space1};
-use nom::combinator::{map, opt};
-use nom::multi::many0;
-use nom::sequence::separated_pair;
 use nom::{
-    IResult, Parser as _,
+    IResult,
+    Parser as _,
     branch::alt,
-    bytes::complete::{tag, take_while1},
-    character::complete::{char, satisfy},
-    combinator::{value, verify},
-    sequence::{delimited, preceded},
+    bytes::complete::{
+        tag,
+        take_till,
+        take_till1,
+        take_while1,
+    },
+    character::complete::{
+        char,
+        satisfy,
+        space0,
+        space1,
+    },
+    combinator::{
+        map,
+        opt,
+        value,
+        verify,
+    },
+    multi::many0,
+    sequence::{
+        delimited,
+        preceded,
+        separated_pair,
+    },
 };
 
 make_parser!(short_switch -> char,
@@ -129,7 +152,7 @@ make_parser!(param_parser_borrowed<'src> -> Param<'src>, alt((
 make_parser!(pub param_parser -> OwnedParam, param_parser_borrowed => OwnedParam::from);
 
 macro_rules! switch_pair {
-    ($name:ident, $left:expr, $sep:expr, $right:expr => |$a:ident, $b:ident| $body:expr) => {
+    ($name:ident, $left:expr, $sep:expr, $right:expr => | $a:ident, $b:ident | $body:expr) => {
         fn $name(input: &str) -> IResult<&str, Switch<'_>> {
             use nom::sequence::separated_pair;
             let (rem, ($a, $b)) = separated_pair($left, $sep, $right).parse(input)?;

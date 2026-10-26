@@ -7,11 +7,20 @@
 //! budget (`INSHELLAH_MAX_INDEX_NODES`) bounds it.
 #![cfg(test)]
 
-use std::env;
-use std::fs;
-use std::path::PathBuf;
-use std::process::{self, Command};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    env,
+    fs,
+    path::PathBuf,
+    process::{
+        self,
+        Command,
+    },
+    time::{
+        Instant,
+        SystemTime,
+        UNIX_EPOCH,
+    },
+};
 
 fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

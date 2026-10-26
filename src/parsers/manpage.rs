@@ -8,15 +8,29 @@ mod mdoc;
 pub mod sections;
 mod strategies;
 
-use std::collections::{HashMap, HashSet};
-use std::io::{self, Read as _};
-use std::path::Path;
-use std::{fs, mem};
+use std::{
+    collections::{
+        HashMap,
+        HashSet,
+    },
+    fs,
+    io::{
+        self,
+        Read as _,
+    },
+    mem,
+    path::Path,
+};
 
 use flate2::read::GzDecoder;
 
-use crate::parsers::manpage::groff::{GroffLine, classify_line};
-use crate::types::Positional;
+use crate::{
+    parsers::manpage::groff::{
+        GroffLine,
+        classify_line,
+    },
+    types::Positional,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedSwitch {
@@ -34,16 +48,17 @@ pub enum OwnedParam {
 #[derive(Debug, Clone)]
 pub struct ManpageEntry {
     pub switch: OwnedSwitch,
-    pub param: Option<OwnedParam>,
-    pub desc: String,
+    pub param:  Option<OwnedParam>,
+    pub desc:   String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ManpageSubcommand {
-    pub name: String,
-    pub desc: String,
-    /// alternate invocations (cargo `b` for build, pw-cli `lm` for load-module);
-    /// rendered as `(aka ...)` and accepted during descent, like switch shorts.
+    pub name:    String,
+    pub desc:    String,
+    /// alternate invocations (cargo `b` for build, pw-cli `lm` for
+    /// load-module); rendered as `(aka ...)` and accepted during descent, like
+    /// switch shorts.
     pub aliases: Vec<String>,
 }
 
@@ -59,13 +74,14 @@ impl ManpageSubcommand {
 
 #[derive(Debug, Clone, Default)]
 pub struct ManpageResult {
-    pub entries: Vec<ManpageEntry>,
-    pub subcommands: Vec<ManpageSubcommand>,
-    /// prose-mined positional-slot values, kept out of `subcommands` so they never
-    /// flow into real-child paths (recursion, supplement, prefix stripping).
+    pub entries:            Vec<ManpageEntry>,
+    pub subcommands:        Vec<ManpageSubcommand>,
+    /// prose-mined positional-slot values, kept out of `subcommands` so they
+    /// never flow into real-child paths (recursion, supplement, prefix
+    /// stripping).
     pub positional_choices: Vec<ManpageSubcommand>,
-    pub positionals: Vec<(String, Positional)>,
-    pub description: String,
+    pub positionals:        Vec<(String, Positional)>,
+    pub description:        String,
 }
 
 impl ManpageResult {
@@ -144,18 +160,20 @@ pub fn dedup_entries(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
     for (idx, entry) in entries.iter().enumerate() {
         let key = entry_key(entry);
         match best.get(&key) {
-            Some(&prev) if entry_score(&entries[prev]) >= entry_score(entry) => {}
+            Some(&prev) if entry_score(&entries[prev]) >= entry_score(entry) => {},
             _ => {
                 best.insert(key, idx);
-            }
+            },
         }
     }
 
     let covered: HashSet<char> = best
         .values()
-        .filter_map(|&idx| match &entries[idx].switch {
-            OwnedSwitch::Both(short, _) => Some(*short),
-            OwnedSwitch::Short(_) | OwnedSwitch::Long(_) => None,
+        .filter_map(|&idx| {
+            match &entries[idx].switch {
+                OwnedSwitch::Both(short, _) => Some(*short),
+                OwnedSwitch::Short(_) | OwnedSwitch::Long(_) => None,
+            }
         })
         .collect();
 
@@ -182,14 +200,14 @@ pub fn dedup_entries(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
 /// `-h` and `--help` as independent .TP/.IP blocks, not the comma-joined form
 /// `combine_short_long_alternates` handles.
 ///
-/// conservative since a wrong alias is worse than a missing one: the two must be
-/// the only entries sharing that exact non-empty description, the short must
+/// conservative since a wrong alias is worse than a missing one: the two must
+/// be the only entries sharing that exact non-empty description, the short must
 /// abbreviate the long, and tiny generic descriptions pair only for obvious
 /// aliases.
 pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
-    // a flag restated across sections can yield all three forms (Both, standalone
-    // Short, standalone Long); index existing Both so pairing doesn't emit a
-    // second Both with the same (c, l).
+    // a flag restated across sections can yield all three forms (Both,
+    // standalone Short, standalone Long); index existing Both so pairing
+    // doesn't emit a second Both with the same (c, l).
     let mut existing_both: HashSet<(char, &str)> = HashSet::new();
     for entry in &entries {
         if let OwnedSwitch::Both(short, long) = &entry.switch {
@@ -233,7 +251,8 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
         {
             let (s_idx, short, s_param) = &shorts[0];
             if existing_both.contains(&(*short, long.as_str())) {
-                // matching Both already present; drop the redundant standalone pair.
+                // matching Both already present; drop the redundant standalone
+                // pair.
                 to_drop.insert(*s_idx);
                 to_drop.insert(idx);
                 out.push(entry.clone());
@@ -244,8 +263,8 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
                 to_drop.insert(*s_idx);
                 out.push(ManpageEntry {
                     switch: OwnedSwitch::Both(*short, long.clone()),
-                    param: entry.param.clone().or_else(|| s_param.clone()),
-                    desc: entry.desc.clone(),
+                    param:  entry.param.clone().or_else(|| s_param.clone()),
+                    desc:   entry.desc.clone(),
                 });
             } else {
                 out.push(entry.clone());
@@ -297,24 +316,28 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
     } else {
         let options_section = sections::extract_options_section(lines);
         let mut entries = strategies::extract_entries(&options_section);
-        // flags declared only in the synopsis, never in OPTIONS. body wins on dup
-        // names since it carries the description.
+        // flags declared only in the synopsis, never in OPTIONS. body wins on
+        // dup names since it carries the description.
         let synopsis_flags = sections::extract_synopsis_flags(lines);
         if !synopsis_flags.is_empty() {
             let have_long: HashSet<String> = entries
                 .iter()
-                .filter_map(|entry| match &entry.switch {
-                    OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => {
-                        Some(long.to_ascii_lowercase())
+                .filter_map(|entry| {
+                    match &entry.switch {
+                        OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => {
+                            Some(long.to_ascii_lowercase())
+                        },
+                        OwnedSwitch::Short(_) => None,
                     }
-                    OwnedSwitch::Short(_) => None,
                 })
                 .collect();
             let have_short: HashSet<char> = entries
                 .iter()
-                .filter_map(|entry| match &entry.switch {
-                    OwnedSwitch::Short(short) | OwnedSwitch::Both(short, _) => Some(*short),
-                    OwnedSwitch::Long(_) => None,
+                .filter_map(|entry| {
+                    match &entry.switch {
+                        OwnedSwitch::Short(short) | OwnedSwitch::Both(short, _) => Some(*short),
+                        OwnedSwitch::Long(_) => None,
+                    }
                 })
                 .collect();
             for flag in synopsis_flags {
@@ -323,7 +346,7 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
                     OwnedSwitch::Short(short) => have_short.contains(short),
                     OwnedSwitch::Both(short, long) => {
                         have_short.contains(short) || have_long.contains(&long.to_ascii_lowercase())
-                    }
+                    },
                 };
                 if !dup {
                     entries.push(flag);
@@ -334,8 +357,8 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
         let commands_section = sections::extract_commands_section(lines);
         let mut subcommands = commands::extract_subcommands_from_commands(&commands_section);
         if subcommands.is_empty() {
-            // jj/clap group pages list children as `.SH SUBCOMMANDS` xref entries
-            // instead of an inline COMMANDS layout.
+            // jj/clap group pages list children as `.SH SUBCOMMANDS` xref
+            // entries instead of an inline COMMANDS layout.
             let xref_section = sections::extract_subcommand_list_section(lines);
             if !xref_section.is_empty() {
                 subcommands = commands::extract_subcommand_xrefs(&xref_section);
@@ -351,8 +374,8 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
                 )
             });
         }
-        // prose-mined choices go to their own channel; skip collisions with a real
-        // subcommand name.
+        // prose-mined choices go to their own channel; skip collisions with a
+        // real subcommand name.
         let positional_choices = sections::extract_description_positionals(lines)
             .into_iter()
             .filter(|choice| {
@@ -380,9 +403,9 @@ pub fn parse_manpage_string(contents: &str) -> ManpageResult {
     result
 }
 
-/// also pull clap-style `.SH SUBCOMMAND` sections out as separate per-subcommand
-/// results; the parent's subcommand list comes from their names. each sub keyed
-/// by full command ("nh os").
+/// also pull clap-style `.SH SUBCOMMAND` sections out as separate
+/// per-subcommand results; the parent's subcommand list comes from their names.
+/// each sub keyed by full command ("nh os").
 pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, ManpageResult)>) {
     let lines: Vec<GroffLine> = contents.split('\n').map(classify_line).collect();
     let mut result = parse_manpage_lines(&lines);
@@ -401,9 +424,10 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
             })
             .collect();
     }
-    // clap puts flags directly under the .SH SUBCOMMAND header with no inner .SH,
-    // so parse_manpage_lines (which wants a child OPTIONS) comes back empty; parse
-    // each body with the same strategy-picker as top-level OPTIONS.
+    // clap puts flags directly under the .SH SUBCOMMAND header with no inner
+    // .SH, so parse_manpage_lines (which wants a child OPTIONS) comes back
+    // empty; parse each body with the same strategy-picker as top-level
+    // OPTIONS.
     let subs: Vec<(String, ManpageResult)> = sub_sections
         .into_iter()
         .map(|(name, desc, body)| {
@@ -429,7 +453,8 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
 ///
 /// # Errors
 ///
-/// fails when the file is unreadable, the gzip stream is corrupt, or the text is not UTF-8.
+/// fails when the file is unreadable, the gzip stream is corrupt, or the text
+/// is not UTF-8.
 pub fn read_manpage_file<P>(path: P) -> io::Result<String>
 where
     P: AsRef<Path>,
@@ -584,8 +609,8 @@ mod tests {
         let entries = vec![
             ManpageEntry {
                 switch: OwnedSwitch::Both('h', "help".to_owned()),
-                param: None,
-                desc: "show help".to_owned(),
+                param:  None,
+                desc:   "show help".to_owned(),
             },
             entry(OwnedSwitch::Short('h'), "show help"),
             entry(OwnedSwitch::Long("help".to_owned()), "show help"),
@@ -610,8 +635,8 @@ mod tests {
         let entries = vec![
             ManpageEntry {
                 switch: OwnedSwitch::Both('v', "verbose".to_owned()),
-                param: None,
-                desc: "be verbose".to_owned(),
+                param:  None,
+                desc:   "be verbose".to_owned(),
             },
             entry(OwnedSwitch::Short('v'), "print version"),
             entry(OwnedSwitch::Long("version".to_owned()), "print version"),
@@ -633,8 +658,8 @@ mod tests {
         let entries = vec![
             ManpageEntry {
                 switch: OwnedSwitch::Short('o'),
-                param: Some(OwnedParam::Mandatory("FILE".to_owned())),
-                desc: "write command output to file".to_owned(),
+                param:  Some(OwnedParam::Mandatory("FILE".to_owned())),
+                desc:   "write command output to file".to_owned(),
             },
             entry(
                 OwnedSwitch::Long("output".to_owned()),

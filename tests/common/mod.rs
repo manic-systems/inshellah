@@ -2,9 +2,14 @@
 //! Shared golden-file helper for the characterization tests. Each integration
 //! test file is its own crate, so this is pulled in with `mod common;`.
 
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    fs,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
 
 fn golden_path(category: &str, name: &str, ext: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/golden/{category}/{name}.{ext}"))
@@ -30,7 +35,7 @@ pub fn check_golden(category: &str, name: &str, ext: &str, actual: &str) {
     let expected = golden.trim_end_matches('\n');
     assert_eq!(
         trimmed, expected,
-        "golden mismatch for {category}/{name}. \
-         If intentional, re-bless with INSHELLAH_BLESS=1 and review the diff."
+        "golden mismatch for {category}/{name}. If intentional, re-bless with INSHELLAH_BLESS=1 \
+         and review the diff."
     );
 }

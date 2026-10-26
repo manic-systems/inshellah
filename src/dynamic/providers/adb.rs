@@ -3,28 +3,40 @@
 //! completion (`providers::value_completions`) so `adb -s <tab>` offers live
 //! serials, not adb's own flags.
 
-use std::cmp::Reverse;
-use std::path::{Path, PathBuf};
+use std::{
+    cmp::Reverse,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
 
-use crate::complete::starts_with_ignore_ascii_case;
-
-use crate::complete::Candidate;
-use crate::dynamic::shared::{DynCtx, find_in_path, run_scrape};
+use crate::{
+    complete::{
+        Candidate,
+        starts_with_ignore_ascii_case,
+    },
+    dynamic::shared::{
+        DynCtx,
+        find_in_path,
+        run_scrape,
+    },
+};
 
 #[derive(Clone, Debug)]
 struct AdbDevice {
-    serial: String,
-    desc: String,
+    serial:       String,
+    desc:         String,
     transport_id: Option<String>,
 }
 
 enum AdbDeviceCompletion<'args> {
     Serial {
-        prefix: &'args str,
+        prefix:             &'args str,
         replacement_prefix: &'static str,
     },
     TransportId {
-        prefix: &'args str,
+        prefix:             &'args str,
         replacement_prefix: &'static str,
     },
 }
@@ -77,14 +89,18 @@ fn adb_device_completion<'args>(
         });
     }
     match ctx.slot.value_flag()? {
-        "-s" | "--serial" | "--one-device" => Some(AdbDeviceCompletion::Serial {
-            prefix: current,
-            replacement_prefix: "",
-        }),
-        "-t" | "--transport-id" => Some(AdbDeviceCompletion::TransportId {
-            prefix: current,
-            replacement_prefix: "",
-        }),
+        "-s" | "--serial" | "--one-device" => {
+            Some(AdbDeviceCompletion::Serial {
+                prefix:             current,
+                replacement_prefix: "",
+            })
+        },
+        "-t" | "--transport-id" => {
+            Some(AdbDeviceCompletion::TransportId {
+                prefix:             current,
+                replacement_prefix: "",
+            })
+        },
         _ => None,
     }
 }
@@ -186,7 +202,7 @@ fn adb_device_candidates(
                         ),
                     ));
                 }
-            }
+            },
             AdbDeviceCompletion::TransportId {
                 prefix,
                 replacement_prefix,
@@ -203,7 +219,7 @@ fn adb_device_candidates(
                         ));
                     }
                 }
-            }
+            },
         }
     }
     scored.sort_by_key(|(score, _)| Reverse(*score));

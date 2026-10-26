@@ -6,9 +6,15 @@
 //!   Start (activate) one or more units.
 //!   .RE
 
-use crate::parsers::manpage::ManpageSubcommand;
-use crate::parsers::manpage::desc;
-use crate::parsers::manpage::groff::{GroffLine, strip_groff_escapes, strip_inline_macro_args};
+use crate::parsers::manpage::{
+    ManpageSubcommand,
+    desc,
+    groff::{
+        GroffLine,
+        strip_groff_escapes,
+        strip_inline_macro_args,
+    },
+};
 
 fn is_valid_subcmd(name: &str) -> bool {
     name.len() >= 2
@@ -60,7 +66,7 @@ fn extract_command_name_from_line(line: &GroffLine) -> Option<String> {
         {
             let rendered = strip_groff_escapes(&strip_inline_macro_args(args));
             extract_bold_command_name(&rendered)
-        }
+        },
         GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => None,
     }
 }
@@ -81,11 +87,11 @@ pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubc
             GroffLine::Macro { name, .. } if name == "RS" => {
                 rs_depth += 1;
                 i += 1;
-            }
+            },
             GroffLine::Macro { name, .. } if name == "RE" => {
                 rs_depth = rs_depth.saturating_sub(1);
                 i += 1;
-            }
+            },
             GroffLine::Macro { name, .. } if rs_depth == 0 && (name == "PP" || name == "TP") => {
                 i += 1;
                 if i >= lines.len() {
@@ -102,13 +108,13 @@ pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubc
                 } else {
                     i += 1;
                 }
-            }
+            },
             GroffLine::Macro { .. }
             | GroffLine::Text(_)
             | GroffLine::Blank
             | GroffLine::Comment => {
                 i += 1;
-            }
+            },
         }
     }
     // a tool may repeat a command name across `.TP` tags (bash repeats `bind`
@@ -214,16 +220,12 @@ fn shared_dash_prefix<'src>(tokens: impl Iterator<Item = &'src str>) -> String {
 /// xref description: text lines until the next .TP/.SH/.SS. Text is already
 /// groff-stripped at classify time, so no inline-macro rendering here.
 fn collect_xref_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
-    desc::collect(
-        lines,
-        start,
-        desc::DescOpts {
-            boundaries: &["TP", "SH", "SS"],
-            skip_rs: false,
-            stop_on_blank: false,
-            tags: desc::TagMacros::None,
-        },
-    )
+    desc::collect(lines, start, desc::DescOpts {
+        boundaries:    &["TP", "SH", "SS"],
+        skip_rs:       false,
+        stop_on_blank: false,
+        tags:          desc::TagMacros::None,
+    })
 }
 
 /// subcommand description: handles .RS/.RE blocks, stops at the next
@@ -239,28 +241,28 @@ fn collect_subcmd_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
                     match &lines[i] {
                         GroffLine::Macro { name: inner, .. } if inner == "RE" => {
                             return (acc.join(" "), i + 1);
-                        }
+                        },
                         GroffLine::Text(text) => {
                             acc.push(text.clone());
                             i += 1;
-                        }
+                        },
                         GroffLine::Macro { name: inner, .. }
                             if inner == "PP" || inner == "SH" || inner == "SS" =>
                         {
                             return (acc.join(" "), i);
-                        }
+                        },
                         GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => i += 1,
                     }
                 }
                 return (acc.join(" "), i);
-            }
+            },
             GroffLine::Text(text) => {
                 acc.push(text.clone());
                 i += 1;
-            }
+            },
             GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => {
                 return (acc.join(" "), i);
-            }
+            },
         }
     }
     (acc.join(" "), i)
@@ -290,7 +292,8 @@ mod tests {
     #[test]
     fn tp_flat_command_list() {
         // widget-style `.SH COMMANDS`: `.TP` + `.B name` + one-line desc.
-        let src = ".TP\n.B create\nCreate a new widget.\n.TP\n.B list\nList existing widgets.\n.TP\n.B remove\nRemove a widget by name.\n";
+        let src = ".TP\n.B create\nCreate a new widget.\n.TP\n.B list\nList existing \
+                   widgets.\n.TP\n.B remove\nRemove a widget by name.\n";
         let got = commands_of(src);
         assert_eq!(
             got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
@@ -303,7 +306,9 @@ mod tests {
     fn nested_rs_entries_are_not_mined() {
         // a command's own option sublist lives in an `.RS` block; those `.TP`
         // tags must not be mined as sibling commands (bash's builtin flags).
-        let src = ".TP\n.B complete\nGenerate completions.\n.RS\n.TP\n.B nospace\ninner option value\n.TP\n.B plusdirs\nanother option value\n.RE\n.TP\n.B alias\nDefine an alias.\n";
+        let src = ".TP\n.B complete\nGenerate completions.\n.RS\n.TP\n.B nospace\ninner option \
+                   value\n.TP\n.B plusdirs\nanother option value\n.RE\n.TP\n.B alias\nDefine an \
+                   alias.\n";
         let got = commands_of(src);
         assert_eq!(
             got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),

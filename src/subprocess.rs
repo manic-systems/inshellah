@@ -5,15 +5,33 @@
 //! wrapped `--help` and forked grandchildren go too. pipes are non-blocking so
 //! poll-then-read never blocks on the next chunk.
 
-use std::env;
-use std::ffi::OsString;
-use std::io::{self, ErrorKind, Read};
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::process::CommandExt as _;
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    env,
+    ffi::OsString,
+    io::{
+        self,
+        ErrorKind,
+        Read,
+    },
+    os::{
+        fd::{
+            AsRawFd,
+            RawFd,
+        },
+        unix::process::CommandExt as _,
+    },
+    process::{
+        Command,
+        ExitStatus,
+        Stdio,
+    },
+    sync::OnceLock,
+    thread,
+    time::{
+        Duration,
+        Instant,
+    },
+};
 
 /// drop DISPLAY-family vars so gui tools don't pop windows during `--help`.
 /// cached: indexing spawns thousands of times.
@@ -44,7 +62,8 @@ fn safe_env_key(key: &str) -> bool {
 
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
-/// scrape runner: stdout+stderr merged, cwd /tmp so `--help` can't read repo state.
+/// scrape runner: stdout+stderr merged, cwd /tmp so `--help` can't read repo
+/// state.
 pub fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
     run_cmd_inner(args, timeout_ms, false, false, |_| {})
 }
@@ -84,7 +103,7 @@ fn drain(reader: &mut dyn Read, chunk: &mut [u8], buf: &mut Vec<u8>) -> Drained 
                 if buf.len() >= MAX_CAPTURE_BYTES {
                     return Drained::Capped;
                 }
-            }
+            },
             Err(err) if err.kind() == ErrorKind::WouldBlock => return Drained::Pending,
             Err(_) => return Drained::Closed,
         }
@@ -166,17 +185,17 @@ where
 
         let mut fds: [libc::pollfd; 2] = [
             libc::pollfd {
-                fd: if stdout_open { stdout_fd } else { -1 },
-                events: libc::POLLIN,
+                fd:      if stdout_open { stdout_fd } else { -1 },
+                events:  libc::POLLIN,
                 revents: 0,
             },
             libc::pollfd {
-                fd: if stderr_open {
+                fd:      if stderr_open {
                     stderr_fd.unwrap_or(-1)
                 } else {
                     -1
                 },
-                events: libc::POLLIN,
+                events:  libc::POLLIN,
                 revents: 0,
             },
         ];
@@ -205,12 +224,12 @@ where
                 }
             };
             match drain(reader, &mut chunk, &mut buf) {
-                Drained::Pending => {}
+                Drained::Pending => {},
                 Drained::Closed => *open = false,
                 Drained::Capped => {
                     capped = true;
                     break 'capture;
-                }
+                },
             }
             if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
                 *open = false;

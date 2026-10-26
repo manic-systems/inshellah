@@ -1,16 +1,38 @@
 #![cfg(test)]
 
-use std::env;
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
-use std::process::{self, Command};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use inshellah::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
+use std::{
+    env,
+    fs,
+    os::unix::fs::PermissionsExt as _,
+    path::{
+        Path,
+        PathBuf,
+    },
+    process::{
+        self,
+        Command,
+    },
+    time::{
+        Duration,
+        SystemTime,
+        UNIX_EPOCH,
+    },
 };
-use inshellah::store::{filename_of_command, write_native, write_result};
+
+use inshellah::{
+    parsers::manpage::{
+        ManpageEntry,
+        ManpageResult,
+        ManpageSubcommand,
+        OwnedParam,
+        OwnedSwitch,
+    },
+    store::{
+        filename_of_command,
+        write_native,
+        write_result,
+    },
+};
 
 fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -117,14 +139,14 @@ exit 2
     fs::set_permissions(&fakecmd, perms).expect("chmod");
 
     let parent = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![ManpageSubcommand::new(
+        entries:            Vec::new(),
+        subcommands:        vec![ManpageSubcommand::new(
             "clone".to_owned(),
             "Clone a repository".to_owned(),
         )],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "fakecmd", "help", &parent).expect("parent cache");
 
@@ -196,15 +218,15 @@ exit 2
     fs::set_permissions(&fakecmd, perms).expect("chmod");
 
     let parent = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![ManpageSubcommand {
-            name: "clone".to_owned(),
-            desc: "Clone a repository".to_owned(),
+        entries:            Vec::new(),
+        subcommands:        vec![ManpageSubcommand {
+            name:    "clone".to_owned(),
+            desc:    "Clone a repository".to_owned(),
             aliases: vec!["cl".to_owned()],
         }],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "fakealias", "help", &parent).expect("parent cache");
 
@@ -308,29 +330,29 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let parent = ManpageResult {
-        entries: vec![ManpageEntry {
+        entries:            vec![ManpageEntry {
             switch: OwnedSwitch::Long("config".to_owned()),
-            param: Some(OwnedParam::Mandatory("FILE".to_owned())),
-            desc: "config file".to_owned(),
+            param:  Some(OwnedParam::Mandatory("FILE".to_owned())),
+            desc:   "config file".to_owned(),
         }],
-        subcommands: vec![ManpageSubcommand::new(
+        subcommands:        vec![ManpageSubcommand::new(
             "sub".to_owned(),
             "subcommand".to_owned(),
         )],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     let child = ManpageResult {
-        entries: vec![ManpageEntry {
+        entries:            vec![ManpageEntry {
             switch: OwnedSwitch::Long("child".to_owned()),
-            param: None,
-            desc: "child flag".to_owned(),
+            param:  None,
+            desc:   "child flag".to_owned(),
         }],
-        subcommands: Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "demo", "help", &parent).expect("parent cache");
     write_result(&cache_dir, "demo sub", "help", &child).expect("child cache");
@@ -458,24 +480,24 @@ exit 0
     );
 
     let nix_root = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![ManpageSubcommand::new(
+        entries:            Vec::new(),
+        subcommands:        vec![ManpageSubcommand::new(
             "develop".to_owned(),
             "Run a development shell".to_owned(),
         )],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     let nix_develop = ManpageResult {
-        entries: Vec::new(),
-        subcommands: Vec::new(),
+        entries:            Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: vec![ManpageSubcommand::new(
             "nixpkgs#zinc".to_owned(),
             "cached installable".to_owned(),
         )],
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "nix", "help", &nix_root).expect("nix cache");
     write_result(&cache_dir, "nix develop", "help", &nix_develop).expect("nix develop cache");
@@ -526,15 +548,15 @@ exit 0
     );
 
     let nix_develop = ManpageResult {
-        entries: vec![ManpageEntry {
+        entries:            vec![ManpageEntry {
             switch: OwnedSwitch::Long("no-write-lock-file".to_owned()),
-            param: None,
-            desc: "do not update the lock file".to_owned(),
+            param:  None,
+            desc:   "do not update the lock file".to_owned(),
         }],
-        subcommands: Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "nix develop .", "help", &nix_develop).expect("nix develop cache");
 
@@ -601,14 +623,14 @@ fn complete_ignores_cached_command_missing_from_path() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let result = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![ManpageSubcommand::new(
+        entries:            Vec::new(),
+        subcommands:        vec![ManpageSubcommand::new(
             "start".to_owned(),
             "start it".to_owned(),
         )],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "vanished", "help", &result).expect("cache");
 
@@ -640,14 +662,14 @@ fn complete_uses_boundary_aware_fuzzy_ranking() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let result = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![
+        entries:            Vec::new(),
+        subcommands:        vec![
             ManpageSubcommand::new("load".to_owned(), "load something".to_owned()),
             ManpageSubcommand::new("clone".to_owned(), "clone something".to_owned()),
         ],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "demo", "help", &result).expect("cache");
 
@@ -686,15 +708,15 @@ fn complete_returns_flags_only_after_hyphen() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let result = ManpageResult {
-        entries: vec![ManpageEntry {
+        entries:            vec![ManpageEntry {
             switch: OwnedSwitch::Long("verbose".to_owned()),
-            param: None,
-            desc: "verbose output".to_owned(),
+            param:  None,
+            desc:   "verbose output".to_owned(),
         }],
-        subcommands: Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "demo", "help", &result).expect("cache");
 
@@ -754,15 +776,15 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let parent = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![
+        entries:            Vec::new(),
+        subcommands:        vec![
             ManpageSubcommand::new("status".to_owned(), "show status".to_owned()),
             ManpageSubcommand::new("poweroff".to_owned(), "power off".to_owned()),
             ManpageSubcommand::new("preset".to_owned(), "set preset".to_owned()),
         ],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "fakectl", "manpage", &parent).expect("cache");
 
@@ -822,14 +844,14 @@ fn complete_drops_exact_subcommand_match() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let result = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![
+        entries:            Vec::new(),
+        subcommands:        vec![
             ManpageSubcommand::new("status".to_owned(), "show status".to_owned()),
             ManpageSubcommand::new("start".to_owned(), "start unit".to_owned()),
         ],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "demo", "manpage", &result).expect("cache");
 
@@ -1085,18 +1107,20 @@ fn flag_demo_cache(name: &str, flags: &[&str]) -> PathBuf {
     write_stub_executable(&bin_dir, "demo");
     fs::create_dir_all(&cache_dir).expect("cache dir");
     let result = ManpageResult {
-        entries: flags
+        entries:            flags
             .iter()
-            .map(|flag| ManpageEntry {
-                switch: OwnedSwitch::Long((*flag).to_owned()),
-                param: None,
-                desc: format!("{flag} flag"),
+            .map(|flag| {
+                ManpageEntry {
+                    switch: OwnedSwitch::Long((*flag).to_owned()),
+                    param:  None,
+                    desc:   format!("{flag} flag"),
+                }
             })
             .collect(),
-        subcommands: Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "demo", "help", &result).expect("cache");
     cache_dir
@@ -1115,11 +1139,11 @@ fn purge_clears_user_cache_but_not_system_dirs() {
     fs::create_dir_all(&system_dir).expect("system dir");
 
     let result = ManpageResult {
-        entries: Vec::new(),
-        subcommands: Vec::new(),
+        entries:            Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&user_dir, "usercmd", "help", &result).expect("user cache");
     write_result(&system_dir, "syscmd", "manpage", &result).expect("system cache");
@@ -1166,26 +1190,26 @@ fn complete_dir_overlay_uses_user_before_system() {
     fs::create_dir_all(&system_dir).expect("system dir");
 
     let user = ManpageResult {
-        entries: vec![ManpageEntry {
+        entries:            vec![ManpageEntry {
             switch: OwnedSwitch::Long("user".to_owned()),
-            param: None,
-            desc: "user flag".to_owned(),
+            param:  None,
+            desc:   "user flag".to_owned(),
         }],
-        subcommands: Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     let system = ManpageResult {
-        entries: vec![ManpageEntry {
+        entries:            vec![ManpageEntry {
             switch: OwnedSwitch::Long("system".to_owned()),
-            param: None,
-            desc: "system flag".to_owned(),
+            param:  None,
+            desc:   "system flag".to_owned(),
         }],
-        subcommands: Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&user_dir, "demo", "help", &user).expect("user cache");
     write_result(&system_dir, "demo", "manpage", &system).expect("system cache");
@@ -1229,15 +1253,15 @@ fn complete_empty_native_file_does_not_shadow_json() {
     )
     .expect("native cache");
     let json = ManpageResult {
-        entries: vec![ManpageEntry {
+        entries:            vec![ManpageEntry {
             switch: OwnedSwitch::Long("json".to_owned()),
-            param: None,
-            desc: "json flag".to_owned(),
+            param:  None,
+            desc:   "json flag".to_owned(),
         }],
-        subcommands: Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "demo", "help", &json).expect("json cache");
 
@@ -1269,18 +1293,18 @@ fn complete_discovers_underscored_subcommand_from_encoded_cache() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let parent = ManpageResult {
-        entries: Vec::new(),
-        subcommands: Vec::new(),
+        entries:            Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     let child = ManpageResult {
-        entries: Vec::new(),
-        subcommands: Vec::new(),
+        entries:            Vec::new(),
+        subcommands:        Vec::new(),
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: "underscored child".to_owned(),
+        positionals:        Vec::new(),
+        description:        "underscored child".to_owned(),
     };
     write_result(&cache_dir, "demo", "manpage", &parent).expect("parent cache");
     write_result(&cache_dir, "demo foo_bar", "manpage", &child).expect("child cache");
@@ -1617,14 +1641,14 @@ exit 2
 
     // seed a cache whose subcommand differs from what --help now emits.
     let stale = ManpageResult {
-        entries: Vec::new(),
-        subcommands: vec![ManpageSubcommand::new(
+        entries:            Vec::new(),
+        subcommands:        vec![ManpageSubcommand::new(
             "staleonly".to_owned(),
             "Only in the stale cache".to_owned(),
         )],
         positional_choices: Vec::new(),
-        positionals: Vec::new(),
-        description: String::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
     };
     write_result(&cache_dir, "fakerefresh", "help", &stale).expect("stale cache");
     let cache_file = cache_dir.join(format!("{}.json", filename_of_command("fakerefresh")));
@@ -1650,8 +1674,8 @@ exit 2
             .expect("run inshellah complete")
     };
 
-    // order matters: the ttl=1 run below rewrites the cache, so the stale-served
-    // case must be asserted first.
+    // order matters: the ttl=1 run below rewrites the cache, so the
+    // stale-served case must be asserted first.
     // ttl disabled: the stale set is served, the cache untouched.
     let disabled = run("0");
     assert!(
@@ -1671,7 +1695,8 @@ exit 2
         "disabled ttl must not rewrite the cache"
     );
 
-    // ttl exceeded: the entry is re-resolved from --help and the cache rewritten.
+    // ttl exceeded: the entry is re-resolved from --help and the cache
+    // rewritten.
     let refreshed = run("1");
     assert!(
         refreshed.status.success(),
@@ -1743,7 +1768,8 @@ fn index_skips_commands_reported_by_nushell_discovery() {
     write_executable(
         &bin_dir,
         "ls",
-        "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf 'Usage: ls\\nOptions:\\n  --demo demo\\n'; fi\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf 'Usage: ls\\nOptions:\\n  --demo \
+         demo\\n'; fi\n",
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
@@ -1777,10 +1803,9 @@ fn index_skips_commands_reported_by_nushell_discovery() {
 
 #[test]
 fn complete_max_completions_caps_results() {
-    let cache_dir = flag_demo_cache(
-        "inshellah-max-completions",
-        &["verbose", "version", "verify", "verbatim"],
-    );
+    let cache_dir = flag_demo_cache("inshellah-max-completions", &[
+        "verbose", "version", "verify", "verbatim",
+    ]);
 
     let capped = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .env("INSHELLAH_MAX_COMPLETIONS", "2")

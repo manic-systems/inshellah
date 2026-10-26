@@ -1,16 +1,35 @@
 //! one strategy per groff formatting pattern, since authors use different macro
 //! combinations for the same purpose.
 
-use nom::{Parser as _, combinator::opt};
-
-use crate::make_macro_walker;
-use crate::parsers::help::help_parser;
-use crate::parsers::help::options::{param_parser, switch_parser};
-use crate::parsers::manpage::desc;
-use crate::parsers::manpage::groff::{
-    GroffLine, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
+use nom::{
+    Parser as _,
+    combinator::opt,
 };
-use crate::parsers::manpage::{ManpageEntry, OwnedParam, OwnedSwitch};
+
+use crate::{
+    make_macro_walker,
+    parsers::{
+        help::{
+            help_parser,
+            options::{
+                param_parser,
+                switch_parser,
+            },
+        },
+        manpage::{
+            ManpageEntry,
+            OwnedParam,
+            OwnedSwitch,
+            desc,
+            groff::{
+                GroffLine,
+                strip_groff_escapes,
+                strip_inline_macro_args,
+                strip_space_macro_args,
+            },
+        },
+    },
+};
 
 fn collect_text_lines(lines: &[GroffLine]) -> (String, &[GroffLine]) {
     let mut acc: Vec<&str> = Vec::new();
@@ -27,16 +46,12 @@ fn collect_text_lines(lines: &[GroffLine]) -> (String, &[GroffLine]) {
 
 fn collect_description_lines(lines: &[GroffLine], start: usize) -> (String, usize) {
     // stop_on_blank caps clap-style "summary\n\nbody" entries at the summary
-    desc::collect(
-        lines,
-        start,
-        desc::DescOpts {
-            boundaries: &["TP", "TQ", "IP", "PP", "SH", "SS"],
-            skip_rs: false,
-            stop_on_blank: true,
-            tags: desc::TagMacros::Wide,
-        },
-    )
+    desc::collect(lines, start, desc::DescOpts {
+        boundaries:    &["TP", "TQ", "IP", "PP", "SH", "SS"],
+        skip_rs:       false,
+        stop_on_blank: true,
+        tags:          desc::TagMacros::Wide,
+    })
 }
 
 /// parse a tag string (e.g. "-v, --verbose FILE") into an entry, None if it
@@ -46,11 +61,13 @@ pub fn parse_tag_to_entry(tag: &str, desc: String) -> Option<ManpageEntry> {
     let result: nom::IResult<&str, (OwnedSwitch, Option<OwnedParam>)> =
         (switch_parser, opt(param_parser)).parse(rendered.trim());
     match result {
-        Ok((_, (switch, param))) => Some(ManpageEntry {
-            switch,
-            param,
-            desc,
-        }),
+        Ok((_, (switch, param))) => {
+            Some(ManpageEntry {
+                switch,
+                param,
+                desc,
+            })
+        },
         Err(_) => None,
     }
 }
@@ -60,9 +77,11 @@ pub fn parse_tag_to_entry(tag: &str, desc: String) -> Option<ManpageEntry> {
 pub fn tag_of_macro(name: &str, args: &str) -> String {
     match name {
         "B" | "I" => strip_space_macro_args(args),
-        _ => strip_groff_escapes(&strip_inline_macro_args(args))
-            .trim()
-            .to_owned(),
+        _ => {
+            strip_groff_escapes(&strip_inline_macro_args(args))
+                .trim()
+                .to_owned()
+        },
     }
 }
 
@@ -124,7 +143,7 @@ fn tag_from_line(line: &GroffLine) -> Option<String> {
             ) =>
         {
             Some(tag_of_macro(name, args))
-        }
+        },
         GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => None,
     }
 }
@@ -147,23 +166,27 @@ fn combine_short_long_alternates(
     right: &ManpageEntry,
 ) -> Option<ManpageEntry> {
     match (&left.switch, &right.switch) {
-        (OwnedSwitch::Long(long), OwnedSwitch::Short(short)) => Some(ManpageEntry {
-            switch: OwnedSwitch::Both(*short, long.clone()),
-            param: left.param.clone().or_else(|| right.param.clone()),
-            desc: left.desc.clone(),
-        }),
-        (OwnedSwitch::Short(short), OwnedSwitch::Long(long)) => Some(ManpageEntry {
-            switch: OwnedSwitch::Both(*short, long.clone()),
-            param: right.param.clone().or_else(|| left.param.clone()),
-            desc: left.desc.clone(),
-        }),
+        (OwnedSwitch::Long(long), OwnedSwitch::Short(short)) => {
+            Some(ManpageEntry {
+                switch: OwnedSwitch::Both(*short, long.clone()),
+                param:  left.param.clone().or_else(|| right.param.clone()),
+                desc:   left.desc.clone(),
+            })
+        },
+        (OwnedSwitch::Short(short), OwnedSwitch::Long(long)) => {
+            Some(ManpageEntry {
+                switch: OwnedSwitch::Both(*short, long.clone()),
+                param:  right.param.clone().or_else(|| left.param.clone()),
+                desc:   left.desc.clone(),
+            })
+        },
         _ => None,
     }
 }
 
-// .IP style (curl, hand-written manpages). inline tag arg `.IP "-v, --verbose"`.
-// nested .IP inside .RS lists example values that look like flags, so only
-// outer-scope .IP counts.
+// .IP style (curl, hand-written manpages). inline tag arg `.IP "-v,
+// --verbose"`. nested .IP inside .RS lists example values that look like flags,
+// so only outer-scope .IP counts.
 pub fn strategy_ip(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -175,12 +198,12 @@ pub fn strategy_ip(lines: &[GroffLine]) -> Vec<ManpageEntry> {
                     rs_depth += 1;
                     i += 1;
                     continue;
-                }
+                },
                 "RE" => {
                     rs_depth = rs_depth.saturating_sub(1);
                     i += 1;
                     continue;
-                }
+                },
                 "IP" if rs_depth == 0 => {
                     let tag = strip_groff_escapes(args);
                     let (desc, rest) = collect_text_lines(&lines[i + 1..]);
@@ -190,8 +213,8 @@ pub fn strategy_ip(lines: &[GroffLine]) -> Vec<ManpageEntry> {
                         i = new_i;
                         continue;
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         i += 1;
@@ -246,16 +269,12 @@ pub fn strategy_hp(lines: &[GroffLine]) -> Vec<ManpageEntry> {
 /// `.HP` description collector. `.RS/.RE` blocks are sub-value listings, not
 /// the flag's own description.
 fn collect_hp_description(lines: &[GroffLine], start: usize) -> (String, usize) {
-    desc::collect(
-        lines,
-        start,
-        desc::DescOpts {
-            boundaries: &["HP", "TP", "TQ", "PP", "SH", "SS"],
-            skip_rs: true,
-            stop_on_blank: true,
-            tags: desc::TagMacros::Wide,
-        },
-    )
+    desc::collect(lines, start, desc::DescOpts {
+        boundaries:    &["HP", "TP", "TQ", "PP", "SH", "SS"],
+        skip_rs:       true,
+        stop_on_blank: true,
+        tags:          desc::TagMacros::Wide,
+    })
 }
 
 // bare Text tag immediately followed by `.RS/.RE` (ripgrep, some help2man
@@ -281,11 +300,11 @@ pub fn strategy_text_rs(lines: &[GroffLine]) -> Vec<ManpageEntry> {
             GroffLine::Macro { name, .. } if name == "RS" => {
                 rs_depth += 1;
                 i += 1;
-            }
+            },
             GroffLine::Macro { name, .. } if name == "RE" => {
                 rs_depth = rs_depth.saturating_sub(1);
                 i += 1;
-            }
+            },
             GroffLine::Text(tag) if rs_depth == 0 && tag.trim_start().starts_with('-') => {
                 let mut j = i + 1;
                 while j < lines.len() && matches!(&lines[j], GroffLine::Blank | GroffLine::Comment)
@@ -303,13 +322,13 @@ pub fn strategy_text_rs(lines: &[GroffLine]) -> Vec<ManpageEntry> {
                     }
                 }
                 i += 1;
-            }
+            },
             GroffLine::Macro { .. }
             | GroffLine::Text(_)
             | GroffLine::Blank
             | GroffLine::Comment => {
                 i += 1;
-            }
+            },
         }
     }
     out
@@ -344,36 +363,37 @@ fn collect_pp_rs_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
                         GroffLine::Macro { name: inner, .. } if inner == "RS" => {
                             depth += 1;
                             i += 1;
-                        }
+                        },
                         GroffLine::Macro { name: inner, .. } if inner == "RE" => {
                             depth -= 1;
                             i += 1;
-                        }
+                        },
                         GroffLine::Text(text) => {
                             // deeper .RS Text is a sub-value listing, not desc.
                             if depth == 1 {
                                 acc.push(text.clone());
                             }
                             i += 1;
-                        }
+                        },
                         GroffLine::Macro { name: inner, .. }
                             if inner == "PP" || inner == "SH" || inner == "SS" =>
                         {
-                            // abort even on an unclosed .RS so this can't run to EOF.
+                            // abort even on an unclosed .RS so this can't run
+                            // to EOF.
                             return (acc.join(" "), i);
-                        }
+                        },
                         GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => i += 1,
                     }
                 }
                 return (acc.join(" "), i);
-            }
+            },
             GroffLine::Text(text) => {
                 acc.push(text.clone());
                 i += 1;
-            }
+            },
             GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => {
                 return (acc.join(" "), i);
-            }
+            },
         }
     }
     (acc.join(" "), i)
@@ -387,14 +407,14 @@ pub fn strategy_deroff(lines: &[GroffLine]) -> Vec<ManpageEntry> {
             GroffLine::Text(text) => {
                 buffer.push_str(text);
                 buffer.push('\n');
-            }
+            },
             GroffLine::Macro { name, args }
                 if matches!(name.as_str(), "BI" | "BR" | "IR" | "B" | "I") =>
             {
                 let text = strip_groff_escapes(&strip_inline_macro_args(args));
                 buffer.push_str(&text);
                 buffer.push('\n');
-            }
+            },
             GroffLine::Blank => buffer.push('\n'),
             GroffLine::Macro { .. } | GroffLine::Comment => (),
         }
@@ -454,23 +474,23 @@ fn collect_nix_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
             GroffLine::Text(text) => {
                 parts.push(text.clone());
                 i += 1;
-            }
+            },
             GroffLine::Macro { name, args } if name == "IP" => {
                 if !args.trim().is_empty() {
                     // bullet = next entry; non-bullet = continuation paragraph
                     return (parts.join(" "), i);
                 }
                 i += 1;
-            }
+            },
             GroffLine::Macro { name, .. } if name == "SS" || name == "SH" => {
                 return (parts.join(" "), i);
-            }
+            },
             GroffLine::Macro { name, .. } if name == "RS" => {
                 i = skip_rs(lines, i + 1, 1);
-            }
+            },
             GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => {
                 i += 1;
-            }
+            },
         }
     }
     (parts.join(" "), i)

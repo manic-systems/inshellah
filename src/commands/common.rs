@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! Shared CLI command helpers.
 
-use std::env;
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
 
+use inshellah::{
+    indexer::probe::is_executable,
+    store::default_store_path,
+};
 use pound::Parse;
-
-use inshellah::indexer::probe::is_executable;
-use inshellah::store::default_store_path;
 
 pub fn find_in_path(name: &str) -> Option<PathBuf> {
     let path_var = env::var("PATH").ok()?;

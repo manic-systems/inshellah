@@ -1,13 +1,48 @@
-use crate::parsers::help::helpers::rest_of_line;
-use crate::types::Positional;
-use crate::{make_parser, make_predicate};
-use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_till, take_till1, take_while, take_while1};
-use nom::character::complete::{char, line_ending, satisfy, space0, space1};
-use nom::combinator::{eof, map, map_opt, not, opt, peek, recognize, value, verify};
-use nom::multi::many0;
-use nom::sequence::{delimited, preceded, terminated};
-use nom::{AsChar as _, IResult, Parser as _};
+use nom::{
+    AsChar as _,
+    IResult,
+    Parser as _,
+    branch::alt,
+    bytes::complete::{
+        tag,
+        tag_no_case,
+        take_till,
+        take_till1,
+        take_while,
+        take_while1,
+    },
+    character::complete::{
+        char,
+        line_ending,
+        satisfy,
+        space0,
+        space1,
+    },
+    combinator::{
+        eof,
+        map,
+        map_opt,
+        not,
+        opt,
+        peek,
+        recognize,
+        value,
+        verify,
+    },
+    multi::many0,
+    sequence::{
+        delimited,
+        preceded,
+        terminated,
+    },
+};
+
+use crate::{
+    make_parser,
+    make_predicate,
+    parsers::help::helpers::rest_of_line,
+    types::Positional,
+};
 
 #[derive(Clone)]
 enum PositionalParse<'src> {
@@ -20,12 +55,13 @@ enum PositionalParse<'src> {
     OptVariadic(&'src str),
 }
 
-make_predicate!(is_word_char, |ch| ch.is_alphanumeric()
-    || matches!(ch, '-' | '_' | '/' | '.'));
+make_predicate!(is_word_char, |ch| {
+    ch.is_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')
+});
 
-make_predicate!(is_pos_char, |ch| ch.is_ascii_uppercase()
-    || ch.is_numeric()
-    || matches!(ch, '_' | '-'));
+make_predicate!(is_pos_char, |ch| {
+    ch.is_ascii_uppercase() || ch.is_numeric() || matches!(ch, '_' | '-')
+});
 
 make_parser!(section_label -> (),
     value((), alt((
@@ -322,8 +358,9 @@ make_parser!(pub extract_usage_positionals<'src> -> Vec<(&'src str, Positional)>
     )
 );
 
-make_predicate!(is_cli11_name_char, |ch| ch.is_alphanumeric()
-    || matches!(ch, '_' | '-'));
+make_predicate!(is_cli11_name_char, |ch| {
+    ch.is_alphanumeric() || matches!(ch, '_' | '-')
+});
 
 make_parser!(cli11_section_header -> (),
     value((),
@@ -380,19 +417,17 @@ mod tests {
 
     #[test]
     fn mandatory_optional_and_allcaps() {
-        assert_eq!(
-            args("<src> [dst] FILE"),
-            vec![
-                ("src".into(), false, false),
-                ("dst".into(), true, false),
-                ("FILE".into(), false, false),
-            ]
-        );
+        assert_eq!(args("<src> [dst] FILE"), vec![
+            ("src".into(), false, false),
+            ("dst".into(), true, false),
+            ("FILE".into(), false, false),
+        ]);
     }
 
     #[test]
     fn variadic_markers() {
-        // in-bracket `<files...>` and post-token `[paths] ...` both set variadic
+        // in-bracket `<files...>` and post-token `[paths] ...` both set
+        // variadic
         assert_eq!(args("<files...>"), vec![("files".into(), false, true)]);
         assert_eq!(args("[paths] ..."), vec![("paths".into(), true, true)]);
     }
@@ -400,10 +435,11 @@ mod tests {
     #[test]
     fn flags_and_braces_are_skipped() {
         // `--flag` and `{a|b}` are not positionals, only `<name>` survives
-        assert_eq!(
-            args("--flag {a|b} <name>"),
-            vec![("name".into(), false, false)]
-        );
+        assert_eq!(args("--flag {a|b} <name>"), vec![(
+            "name".into(),
+            false,
+            false
+        )]);
     }
 
     #[test]
@@ -412,7 +448,7 @@ mod tests {
         assert!(
             args("[OPTIONS] <cmd>")
                 .iter()
-                .all(|(name, _, _)| name != "OPTIONS")
+                .all(|(name, ..)| name != "OPTIONS")
         );
         assert_eq!(args("[OPTIONS] <cmd>"), vec![("cmd".into(), false, false)]);
     }
@@ -421,10 +457,11 @@ mod tests {
     fn parsing_stops_at_newline() {
         // many0 must not wander into a following OPTIONS block, the next-line
         // `--out <name>` must not be mined.
-        assert_eq!(
-            args("<input>\n  --out <name>\n"),
-            vec![("input".into(), false, false)]
-        );
+        assert_eq!(args("<input>\n  --out <name>\n"), vec![(
+            "input".into(),
+            false,
+            false
+        )]);
     }
 
     #[test]

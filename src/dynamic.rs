@@ -2,16 +2,26 @@
 //! per-command dynamic completion (git refs, systemctl units, ...). fires from
 //! `cmd_complete` when the static cache is empty.
 
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{
+        Duration,
+        Instant,
+    },
+};
 
-use crate::complete::Candidate;
-use crate::config::Config;
+use crate::{
+    complete::Candidate,
+    config::Config,
+};
 
 mod providers;
 mod shared;
 
-use shared::{DynCtx, filter_candidates};
+use shared::{
+    DynCtx,
+    filter_candidates,
+};
 
 /// what the word under the cursor fills.
 #[derive(Clone, Copy)]
@@ -121,10 +131,14 @@ pub fn dynamic_complete_candidates_with_path(
 
 #[cfg(test)]
 mod tests {
-    use super::providers::kubectl::kubectl_scope;
-    use super::providers::nix::looks_like_flake_pkg;
-    use super::shared::filter_candidates;
-    use super::*;
+    use super::{
+        providers::{
+            kubectl::kubectl_scope,
+            nix::looks_like_flake_pkg,
+        },
+        shared::filter_candidates,
+        *,
+    };
 
     fn cfg() -> Config {
         Config::default()

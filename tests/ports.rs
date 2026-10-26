@@ -5,16 +5,32 @@
 //! not included — it requires porting store.ml first.
 #![cfg(test)]
 
-use inshellah::parsers::help::help_parser;
-use inshellah::parsers::manpage::groff::strip_groff_escapes;
-use inshellah::parsers::manpage::sections::extract_synopsis_command;
-use inshellah::parsers::manpage::{ManpageResult, OwnedParam, OwnedSwitch, parse_manpage_string};
-use inshellah::parsers::nushell::{generate_extern, generate_module, parse_nu_completions};
-use inshellah::store::{json_of_result, result_from_json};
-
 // both parsers now produce the owned model; these aliases keep the ported
 // assertions (which match on `Switch::`/`Param::` variants) unchanged.
-use inshellah::parsers::manpage::{OwnedParam as Param, OwnedSwitch as Switch};
+use inshellah::{
+    parsers::{
+        help::help_parser,
+        manpage::{
+            ManpageResult,
+            OwnedParam as Param,
+            OwnedParam,
+            OwnedSwitch as Switch,
+            OwnedSwitch,
+            groff::strip_groff_escapes,
+            parse_manpage_string,
+            sections::extract_synopsis_command,
+        },
+        nushell::{
+            generate_extern,
+            generate_module,
+            parse_nu_completions,
+        },
+    },
+    store::{
+        json_of_result,
+        result_from_json,
+    },
+};
 
 fn parse(txt: &str) -> ManpageResult {
     match help_parser(txt) {
@@ -86,14 +102,18 @@ fn multiline_desc() {
 
 #[test]
 fn multiple_entries() {
-    let txt = "  -a, --all                  do not ignore entries starting with .\n  -A, --almost-all           do not list implied . and ..\n      --author               with -l, print the author of each file\n";
+    let txt = "  -a, --all                  do not ignore entries starting with .\n  -A, \
+               --almost-all           do not list implied . and ..\n      --author               \
+               with -l, print the author of each file\n";
     let result = parse(txt);
     assert_eq!(result.entries.len(), 3);
 }
 
 #[test]
 fn clap_short_sections() {
-    let txt = "INPUT OPTIONS:\n  -e, --regexp=PATTERN       A pattern to search for.\n  -f, --file=PATTERNFILE     Search for patterns from the given file.\nSEARCH OPTIONS:\n  -s, --case-sensitive       Search case sensitively.\n";
+    let txt = "INPUT OPTIONS:\n  -e, --regexp=PATTERN       A pattern to search for.\n  -f, \
+               --file=PATTERNFILE     Search for patterns from the given file.\nSEARCH OPTIONS:\n  \
+               -s, --case-sensitive       Search case sensitively.\n";
     let result = parse(txt);
     assert_eq!(result.entries.len(), 3);
     let entry = &result.entries[0];
@@ -103,7 +123,8 @@ fn clap_short_sections() {
 
 #[test]
 fn clap_long_style() {
-    let txt = "  -H, --hidden\n          Include hidden directories and files.\n\n      --no-ignore\n          Do not respect ignore files.\n";
+    let txt = "  -H, --hidden\n          Include hidden directories and files.\n\n      \
+               --no-ignore\n          Do not respect ignore files.\n";
     let result = parse(txt);
     assert_eq!(result.entries.len(), 2);
     let entry = &result.entries[0];
@@ -113,7 +134,8 @@ fn clap_long_style() {
 
 #[test]
 fn clap_long_angle_param() {
-    let txt = "      --nonprintable-notation <notation>\n          Set notation for non-printable characters.\n";
+    let txt = "      --nonprintable-notation <notation>\n          Set notation for non-printable \
+               characters.\n";
     let result = parse(txt);
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];
@@ -132,7 +154,8 @@ fn space_upper_param() {
 
 #[test]
 fn go_cobra_flags() {
-    let txt = "Flags:\n  -D, --debug              Enable debug mode\n  -H, --host string        Daemon socket to connect to\n  -v, --version            Print version information\n";
+    let txt = "Flags:\n  -D, --debug              Enable debug mode\n  -H, --host string        \
+               Daemon socket to connect to\n  -v, --version            Print version information\n";
     let result = parse(txt);
     assert_eq!(result.entries.len(), 3);
     let host = &result.entries[1];
@@ -142,7 +165,9 @@ fn go_cobra_flags() {
 
 #[test]
 fn go_cobra_subcommands() {
-    let txt = "Common Commands:\n  run         Create and run a new container from an image\n  exec        Execute a command in a running container\n  build       Build an image from a Dockerfile\n";
+    let txt = "Common Commands:\n  run         Create and run a new container from an image\n  \
+               exec        Execute a command in a running container\n  build       Build an image \
+               from a Dockerfile\n";
     let result = parse(txt);
     assert!(
         !result.subcommands.is_empty(),
@@ -155,7 +180,8 @@ fn go_cobra_subcommands() {
 fn aliased_subcommands_keep_canonical_name() {
     // cargo-style `name, alias` rows: the comma must not abort the entry.
     // the canonical (first) name is kept; the alias is discarded.
-    let txt = "Commands:\n  build, b    Compile the current package\n  check, c    Analyze the current package\n  clean       Remove the target directory\n";
+    let txt = "Commands:\n  build, b    Compile the current package\n  check, c    Analyze the \
+               current package\n  clean       Remove the target directory\n";
     let result = parse(txt);
     let names: Vec<&str> = result
         .subcommands
@@ -564,14 +590,16 @@ fn synopsis_standalone() {
 
 #[test]
 fn synopsis_nix3() {
-    let groff = ".SH Synopsis\n.LP\n\\f(CRnix run\\fR [\\fIoption\\fR] \\fIinstallable\\fR\n.SH Description\n";
+    let groff = ".SH Synopsis\n.LP\n\\f(CRnix run\\fR [\\fIoption\\fR] \\fIinstallable\\fR\n.SH \
+                 Description\n";
     let cmd = extract_synopsis_command(groff);
     assert_eq!(cmd.as_deref(), Some("nix run"));
 }
 
 #[test]
 fn italic_synopsis() {
-    let groff = ".SH Synopsis\n.LP\n\\f(CRnix-env\\fR \\fIoperation\\fR [\\fIoptions\\fR] [\\fIarguments\u{2026}\\fR]\n.SH Description\n";
+    let groff = ".SH Synopsis\n.LP\n\\f(CRnix-env\\fR \\fIoperation\\fR [\\fIoptions\\fR] \
+                 [\\fIarguments\u{2026}\\fR]\n.SH Description\n";
     let cmd = extract_synopsis_command(groff);
     assert_eq!(cmd.as_deref(), Some("nix-env"));
 }
@@ -581,7 +609,8 @@ fn synopsis_italic_command_name() {
     // git-am.1 (and many other git manpages) put the entire command
     // invocation in italics: `\fIgit am\fR [...]`. should still resolve
     // to "git am" rather than treating it as a placeholder.
-    let groff = ".SH \"SYNOPSIS\"\n.sp\n.nf\n\\fIgit am\\fR [\\-\\-signoff] [\\-\\-keep]\n.fi\n.SH \"DESCRIPTION\"\n";
+    let groff = ".SH \"SYNOPSIS\"\n.sp\n.nf\n\\fIgit am\\fR [\\-\\-signoff] \
+                 [\\-\\-keep]\n.fi\n.SH \"DESCRIPTION\"\n";
     let cmd = extract_synopsis_command(groff);
     assert_eq!(cmd.as_deref(), Some("git am"));
 }
@@ -804,7 +833,8 @@ fn nushell_basic() {
 
 #[test]
 fn nushell_param_types() {
-    let txt = "  -w, --width=COLS           set output width\n      --block-size=SIZE      scale sizes\n  -o, --output FILE          output file\n";
+    let txt = "  -w, --width=COLS           set output width\n      --block-size=SIZE      scale \
+               sizes\n  -o, --output FILE          output file\n";
     let result = parse(txt);
     let nu = generate_extern("ls", &result);
     assert!(nu.contains("--width(-w): int"), "nu = {nu}");
@@ -814,7 +844,8 @@ fn nushell_param_types() {
 
 #[test]
 fn nushell_subcommands() {
-    let txt = "Common Commands:\n  run         Create and run a new container\n  exec        Execute a command\n\nFlags:\n  -D, --debug              Enable debug mode\n";
+    let txt = "Common Commands:\n  run         Create and run a new container\n  exec        \
+               Execute a command\n\nFlags:\n  -D, --debug              Enable debug mode\n";
     let result = parse(txt);
     let nu = generate_extern("docker", &result);
     assert!(nu.contains("export extern \"docker\""), "nu = {nu}");
@@ -884,12 +915,14 @@ fn nushell_module() {
 #[test]
 fn long_switch_rejects_dash_only_separator_lines() {
     // less's `--help` (and therefore zstdless/bzless wrappers) is full of
-    // separator lines like `---------------------------------------------------`.
-    // the first two chars look like a `--` prefix; the rest is just dashes.
-    // without an alphanumeric-first guard, the parser would treat the whole
-    // separator as a flag named `------…`.
+    // separator lines like
+    // `---------------------------------------------------`. the first two
+    // chars look like a `--` prefix; the rest is just dashes. without an
+    // alphanumeric-first guard, the parser would treat the whole separator as a
+    // flag named `------…`.
     let result = parse(
-        "  ---------------------------------------------------\n  -a, --all                  show all\n",
+        "  ---------------------------------------------------\n  -a, --all                  show \
+         all\n",
     );
     assert_eq!(
         result.entries.len(),
@@ -902,7 +935,8 @@ fn long_switch_rejects_dash_only_separator_lines() {
 
 #[test]
 fn dedup_entries_help() {
-    let txt = "  -v, --verbose              verbose output\n  --verbose                  verbose mode\n  -v                         be verbose\n";
+    let txt = "  -v, --verbose              verbose output\n  --verbose                  verbose \
+               mode\n  -v                         be verbose\n";
     let result = parse(txt);
     let nu = generate_extern("test", &result);
     let count = nu.matches("--verbose").count();

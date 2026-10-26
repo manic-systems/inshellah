@@ -3,8 +3,13 @@
 
 use std::path::Path;
 
-use inshellah::indexer::{list_manpages, process_manpage};
-use inshellah::parsers::nushell::generate_extern;
+use inshellah::{
+    indexer::{
+        list_manpages,
+        process_manpage,
+    },
+    parsers::nushell::generate_extern,
+};
 
 pub fn run(dir: &Path) {
     for path in list_manpages(&[dir.to_path_buf()]) {

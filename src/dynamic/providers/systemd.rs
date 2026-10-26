@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2
-use crate::complete::Candidate;
-use crate::dynamic::shared::{DynCtx, run};
+use crate::{
+    complete::Candidate,
+    dynamic::shared::{
+        DynCtx,
+        run,
+    },
+};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match spans[0].as_str() {
@@ -128,9 +133,10 @@ fn coredumpctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candida
         return None;
     }
     let last = spans.last().map_or("", String::as_str);
-    // units are valid only as the `-u`/`--unit` value; the bare MATCH positional
-    // takes a PID, COMM, or exe path. only offer units for `-u` so they don't
-    // leak into the positional where they can never match a recorded coredump.
+    // units are valid only as the `-u`/`--unit` value; the bare MATCH
+    // positional takes a PID, COMM, or exe path. only offer units for `-u` so
+    // they don't leak into the positional where they can never match a recorded
+    // coredump.
     if let Some("-u" | "--unit") = ctx.slot.value_flag() {
         return unit_candidates(&[], last, ctx);
     }

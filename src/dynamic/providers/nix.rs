@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2
-use crate::complete::Candidate;
-use crate::dynamic::shared::{DynCtx, run_with};
+use crate::{
+    complete::Candidate,
+    dynamic::shared::{
+        DynCtx,
+        run_with,
+    },
+};
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if spans.len() < 2 {
         return None;
@@ -63,7 +68,7 @@ pub fn looks_like_flake_pkg(word: &str) -> bool {
 fn is_flake_ident(ident: &str) -> bool {
     let mut chars = ident.chars();
     match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() => {}
+        Some(first) if first.is_ascii_alphabetic() => {},
         _ => return false,
     }
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')

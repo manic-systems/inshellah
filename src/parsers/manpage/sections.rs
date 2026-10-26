@@ -1,21 +1,42 @@
 //! slice .SH sections (OPTIONS, NAME, SYNOPSIS, COMMANDS) out of a manpage.
 
-use std::collections::HashSet;
-use std::mem;
-
-use nom::{Parser as _, sequence::preceded};
-
-use crate::parsers::help::options::parse_usage_flags;
-use crate::parsers::help::positionals::{
-    extract_usage_positionals as help_extract_usage_positionals, parse_usage_args,
-    skip_command_name,
+use std::{
+    collections::HashSet,
+    mem,
 };
-use crate::parsers::manpage::desc;
-use crate::parsers::manpage::groff::{
-    GroffLine, classify_line, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
+
+use nom::{
+    Parser as _,
+    sequence::preceded,
 };
-use crate::parsers::manpage::{ManpageEntry, ManpageSubcommand, OwnedParam, OwnedSwitch};
-use crate::types::Positional;
+
+use crate::{
+    parsers::{
+        help::{
+            options::parse_usage_flags,
+            positionals::{
+                extract_usage_positionals as help_extract_usage_positionals,
+                parse_usage_args,
+                skip_command_name,
+            },
+        },
+        manpage::{
+            ManpageEntry,
+            ManpageSubcommand,
+            OwnedParam,
+            OwnedSwitch,
+            desc,
+            groff::{
+                GroffLine,
+                classify_line,
+                strip_groff_escapes,
+                strip_inline_macro_args,
+                strip_space_macro_args,
+            },
+        },
+    },
+    types::Positional,
+};
 
 fn is_options_section(name: &str) -> bool {
     let upper = name.trim().to_ascii_uppercase();
@@ -28,8 +49,8 @@ fn section_heading(line: &GroffLine, also_ss: bool, header: impl Fn(&str) -> boo
         if (name == "SH" || (also_ss && name == "SS")) && header(args))
 }
 
-/// body of the first `.SH`/`.SS` section whose heading passes `header`, up to the
-/// next `.SH` (and `.SS` when `also_ss`).
+/// body of the first `.SH`/`.SS` section whose heading passes `header`, up to
+/// the next `.SH` (and `.SS` when `also_ss`).
 fn first_section_body(
     lines: &[GroffLine],
     also_ss: bool,
@@ -46,8 +67,8 @@ fn first_section_body(
     Vec::new()
 }
 
-/// concatenate the bodies of every `.SH` section passing `header`, for tools that
-/// split one logical section across headings (git's COMMANDS groups).
+/// concatenate the bodies of every `.SH` section passing `header`, for tools
+/// that split one logical section across headings (git's COMMANDS groups).
 fn all_section_bodies(lines: &[GroffLine], header: impl Fn(&str) -> bool) -> Vec<GroffLine> {
     let mut acc: Vec<GroffLine> = Vec::new();
     let mut i = 0;
@@ -141,21 +162,21 @@ pub fn extract_name_description(lines: &[GroffLine]) -> Option<String> {
                         if !text.is_empty() {
                             acc.push(text.to_owned());
                         }
-                    }
+                    },
                     GroffLine::Macro { name, args } if name == "Nm" => {
                         let rendered = strip_groff_escapes(args);
                         let text = rendered.trim();
                         if !text.is_empty() {
                             acc.push(text.to_owned());
                         }
-                    }
+                    },
                     GroffLine::Macro { name, args } if name == "Nd" => {
                         let rendered = strip_groff_escapes(args);
                         let text = rendered.trim();
                         if !text.is_empty() {
                             acc.push(format!("\\- {text}"));
                         }
-                    }
+                    },
                     GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => (),
                 }
                 i += 1;
@@ -190,11 +211,12 @@ fn find_padded(text: &str, needle: &str) -> Option<usize> {
     text.find(needle)
 }
 
-/// command name from SYNOPSIS: leading word tokens until an argument-looking one
-/// (starts with [, <, -, etc.).
+/// command name from SYNOPSIS: leading word tokens until an argument-looking
+/// one (starts with [, <, -, etc.).
 pub fn extract_synopsis_command(contents: &str) -> Option<String> {
-    // italic marks a param, not a command word; rewrite \fI...\fR to angle brackets
-    // (in extract_cmd's stop set) before classification strips font info.
+    // italic marks a param, not a command word; rewrite \fI...\fR to angle
+    // brackets (in extract_cmd's stop set) before classification strips font
+    // info.
     let preprocessed: Vec<String> = contents
         .split('\n')
         .map(replace_italic_with_angles)
@@ -213,21 +235,21 @@ pub fn extract_synopsis_command(contents: &str) -> Option<String> {
                         if name == "SH" || (stop_on_ss && name == "SS") =>
                     {
                         return None;
-                    }
+                    },
                     GroffLine::Text(text) => {
                         let trimmed = text.trim();
                         if let Some(cmd) = synopsis_command_candidate(trimmed, true) {
                             return Some(cmd);
                         }
                         i += 1;
-                    }
+                    },
                     GroffLine::Macro { name, args } if name == "SY" => {
                         let text = strip_groff_escapes(args);
                         if let Some(cmd) = synopsis_command_candidate(text.trim(), false) {
                             return Some(cmd);
                         }
                         i += 1;
-                    }
+                    },
                     GroffLine::Macro { name, args }
                         if matches!(name.as_str(), "B" | "BI" | "BR") =>
                     {
@@ -236,7 +258,7 @@ pub fn extract_synopsis_command(contents: &str) -> Option<String> {
                             return Some(cmd);
                         }
                         i += 1;
-                    }
+                    },
                     GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => i += 1,
                 }
             }
@@ -265,7 +287,7 @@ fn synopsis_heading_at(lines: &[GroffLine], i: usize) -> Option<(bool, usize)> {
         match &lines[j] {
             GroffLine::Text(text) if text.trim().eq_ignore_ascii_case("SYNOPSIS") => {
                 return Some((name == "SS", j + 1));
-            }
+            },
             GroffLine::Blank | GroffLine::Comment => j += 1,
             GroffLine::Macro { .. } | GroffLine::Text(_) => return None,
         }
@@ -276,9 +298,11 @@ fn synopsis_heading_at(lines: &[GroffLine], i: usize) -> Option<(bool, usize)> {
 fn render_synopsis_command_macro(name: &str, args: &str) -> String {
     match name {
         "B" | "I" => strip_space_macro_args(args),
-        _ => strip_groff_escapes(&strip_inline_macro_args(args))
-            .trim()
-            .to_owned(),
+        _ => {
+            strip_groff_escapes(&strip_inline_macro_args(args))
+                .trim()
+                .to_owned()
+        },
     }
 }
 
@@ -331,12 +355,12 @@ fn looks_like_synopsis_prose(line: &str, cmd: &str, reject_long_unmarked: bool) 
         && !line_has_invocation_marker
 }
 
-/// replace \fI...\f[RP] with <...> so `extract_cmd` sees italic params as non-word
-/// tokens.
+/// replace \fI...\f[RP] with <...> so `extract_cmd` sees italic params as
+/// non-word tokens.
 ///
 /// exception: some synopses italicise the command name itself (git-am.1's
-/// `\fIgit am\fR`). when the first italic block sits at line start and looks like
-/// a command word, leave it bare so `extract_cmd` takes it as the command.
+/// `\fIgit am\fR`). when the first italic block sits at line start and looks
+/// like a command word, leave it bare so `extract_cmd` takes it as the command.
 fn replace_italic_with_angles(line: &str) -> String {
     let bytes = line.as_bytes();
     let len = bytes.len();
@@ -414,8 +438,8 @@ fn extract_cmd(line: &str) -> Option<String> {
 }
 
 /// the SYNOPSIS section lines. boundary follows the matched heading kind: `.SS
-/// SYNOPSIS` ends at the next `.SS`, `.SH SYNOPSIS` runs through any `.SS` until
-/// the next `.SH`.
+/// SYNOPSIS` ends at the next `.SS`, `.SH SYNOPSIS` runs through any `.SS`
+/// until the next `.SH`.
 fn extract_synopsis_section(lines: &[GroffLine]) -> Vec<GroffLine> {
     let mut i = 0;
     while i < lines.len() {
@@ -440,10 +464,11 @@ pub fn extract_synopsis_positionals(lines: &[GroffLine]) -> Vec<(String, Positio
     let result: nom::IResult<&str, Vec<(&str, Positional)>> =
         preceded(skip_command_name, parse_usage_args).parse(&full);
     match result {
-        Ok((_, map)) => map
-            .into_iter()
-            .map(|(name, positional)| (name.to_ascii_lowercase(), positional))
-            .collect(),
+        Ok((_, map)) => {
+            map.into_iter()
+                .map(|(name, positional)| (name.to_ascii_lowercase(), positional))
+                .collect()
+        },
         Err(_) => Vec::new(),
     }
 }
@@ -456,10 +481,12 @@ pub fn extract_usage_positionals_from_lines(lines: &[GroffLine]) -> Vec<(String,
         return Vec::new();
     }
     match help_extract_usage_positionals(&text) {
-        Ok((_, positionals)) => positionals
-            .into_iter()
-            .map(|(name, positional)| (name.to_ascii_lowercase(), positional))
-            .collect(),
+        Ok((_, positionals)) => {
+            positionals
+                .into_iter()
+                .map(|(name, positional)| (name.to_ascii_lowercase(), positional))
+                .collect()
+        },
         Err(_) => Vec::new(),
     }
 }
@@ -471,14 +498,14 @@ fn render_plain_text_lines(lines: &[GroffLine]) -> String {
             GroffLine::Text(text) => {
                 out.push_str(text);
                 out.push('\n');
-            }
+            },
             GroffLine::Macro { name, args } if name == "B" || name == "I" || name == "SY" => {
                 let text = strip_space_macro_args(args);
                 if !text.is_empty() {
                     out.push_str(&text);
                     out.push('\n');
                 }
-            }
+            },
             GroffLine::Macro { name, args }
                 if matches!(name.as_str(), "BI" | "BR" | "IB" | "IR" | "RB" | "RI") =>
             {
@@ -488,7 +515,7 @@ fn render_plain_text_lines(lines: &[GroffLine]) -> String {
                     out.push_str(text);
                     out.push('\n');
                 }
-            }
+            },
             GroffLine::Blank => out.push('\n'),
             GroffLine::Macro { name, .. } if name == "br" => out.push('\n'),
             GroffLine::Macro { .. } | GroffLine::Comment => (),
@@ -497,9 +524,9 @@ fn render_plain_text_lines(lines: &[GroffLine]) -> String {
     out
 }
 
-/// join the SYNOPSIS section into one line of plain text, stripping groff escapes
-/// and inline font macros. shared by the positional and flag extractors so both
-/// see identical input.
+/// join the SYNOPSIS section into one line of plain text, stripping groff
+/// escapes and inline font macros. shared by the positional and flag extractors
+/// so both see identical input.
 fn join_synopsis_text(lines: &[GroffLine]) -> String {
     let section = extract_synopsis_section(lines);
     let mut acc: Vec<String> = Vec::new();
@@ -511,31 +538,31 @@ fn join_synopsis_text(lines: &[GroffLine]) -> String {
                 if !text.is_empty() {
                     acc.push(text);
                 }
-            }
+            },
             GroffLine::Macro { name, args } if name == "I" => {
                 let text = strip_groff_escapes(&args).trim().to_owned();
                 if !text.is_empty() {
                     acc.push(format!("<{text}>"));
                 }
-            }
+            },
             GroffLine::Macro { name, args } if name == "IR" => {
                 let text = render_leading_italic_arg(&args);
                 if !text.is_empty() {
                     acc.push(text);
                 }
-            }
+            },
             GroffLine::Text(raw) => {
                 let text = strip_groff_escapes(&raw).trim().to_owned();
                 if !text.is_empty() {
                     acc.push(text);
                 }
-            }
+            },
             GroffLine::Macro { name, args } if name == "B" => {
                 let text = strip_space_macro_args(&args);
                 if !text.is_empty() {
                     acc.push(text);
                 }
-            }
+            },
             GroffLine::Macro { name, args }
                 if matches!(name.as_str(), "B" | "BI" | "BR" | "IB" | "RB" | "RI") =>
             {
@@ -544,7 +571,7 @@ fn join_synopsis_text(lines: &[GroffLine]) -> String {
                 if !text.is_empty() {
                     acc.push(text.to_owned());
                 }
-            }
+            },
             GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => (),
         }
     }
@@ -585,14 +612,18 @@ pub fn extract_synopsis_flags(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let result: nom::IResult<&str, Vec<(OwnedSwitch, Option<OwnedParam>)>> =
         preceded(skip_command_name, parse_usage_flags).parse(&full);
     match result {
-        Ok((_, pairs)) => pairs
-            .into_iter()
-            .map(|(switch, param)| ManpageEntry {
-                switch,
-                param,
-                desc: String::new(),
-            })
-            .collect(),
+        Ok((_, pairs)) => {
+            pairs
+                .into_iter()
+                .map(|(switch, param)| {
+                    ManpageEntry {
+                        switch,
+                        param,
+                        desc: String::new(),
+                    }
+                })
+                .collect()
+        },
         Err(_) => Vec::new(),
     }
 }
@@ -621,7 +652,7 @@ pub fn extract_description_positionals(lines: &[GroffLine]) -> Vec<ManpageSubcom
             {
                 in_database_list = true;
                 i += 1;
-            }
+            },
             GroffLine::Macro { name, .. } if name == "TP" && in_database_list => {
                 if i + 1 >= description.len() {
                     break;
@@ -639,13 +670,13 @@ pub fn extract_description_positionals(lines: &[GroffLine]) -> Vec<ManpageSubcom
                     out.push(ManpageSubcommand::new(choice, desc));
                 }
                 i = new_i;
-            }
+            },
             GroffLine::Macro { .. }
             | GroffLine::Text(_)
             | GroffLine::Blank
             | GroffLine::Comment => {
                 i += 1;
-            }
+            },
         }
     }
     out
@@ -661,7 +692,7 @@ fn description_mentions_listed_database(lines: &[GroffLine]) -> bool {
                 if matches!(name.as_str(), "B" | "BI" | "BR" | "I" | "IR" | "RI") =>
             {
                 strip_groff_escapes(&strip_inline_macro_args(args))
-            }
+            },
             GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => String::new(),
         };
         let lower = text.to_ascii_lowercase();
@@ -682,7 +713,7 @@ fn description_tag_name(line: &GroffLine) -> Option<String> {
                     .trim()
                     .to_owned(),
             )
-        }
+        },
         GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => None,
     }
 }
@@ -697,16 +728,12 @@ fn is_description_choice_name(name: &str) -> bool {
 }
 
 fn collect_description_choice_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
-    let (body, i) = desc::collect(
-        lines,
-        start,
-        desc::DescOpts {
-            boundaries: &["TP", "SH", "SS"],
-            skip_rs: false,
-            stop_on_blank: false,
-            tags: desc::TagMacros::Common,
-        },
-    );
+    let (body, i) = desc::collect(lines, start, desc::DescOpts {
+        boundaries:    &["TP", "SH", "SS"],
+        skip_rs:       false,
+        stop_on_blank: false,
+        tags:          desc::TagMacros::Common,
+    });
     (first_sentence(&body), i)
 }
 
@@ -725,8 +752,8 @@ fn first_sentence(text: &str) -> String {
 
 fn is_commands_section(name: &str) -> bool {
     let trimmed = name.trim();
-    // strip a trailing parenthetical so git.1's "HIGH-LEVEL COMMANDS (PORCELAIN)"
-    // is treated as "HIGH-LEVEL COMMANDS".
+    // strip a trailing parenthetical so git.1's "HIGH-LEVEL COMMANDS
+    // (PORCELAIN)" is treated as "HIGH-LEVEL COMMANDS".
     let core = match (trimmed.rsplit_once('('), trimmed.ends_with(')')) {
         (Some((head, _)), true) => head.trim(),
         _ => trimmed,
@@ -759,7 +786,8 @@ pub fn extract_subcommand_list_section(lines: &[GroffLine]) -> Vec<GroffLine> {
 /// SUBCOMMAND-style sections (clap-generated manpages put each subcommand under
 /// its own .SH SUBCOMMAND header with a Usage: line).
 ///
-/// (name, description, lines) triples so the caller can re-parse each as its own `help_result`.
+/// (name, description, lines) triples so the caller can re-parse each as its
+/// own `help_result`.
 pub fn extract_subcommand_sections(lines: &[GroffLine]) -> Vec<(String, String, Vec<GroffLine>)> {
     let mut sections: Vec<Vec<GroffLine>> = Vec::new();
     let mut current_name: Option<String> = None;
@@ -796,16 +824,18 @@ pub fn extract_subcommand_sections(lines: &[GroffLine]) -> Vec<(String, String, 
                 break;
             }
             match line {
-                GroffLine::Text(text) => match find_usage_name(text) {
-                    Some(name) => subcmd_name = Some(name),
-                    None => desc_lines.push(text.clone()),
+                GroffLine::Text(text) => {
+                    match find_usage_name(text) {
+                        Some(name) => subcmd_name = Some(name),
+                        None => desc_lines.push(text.clone()),
+                    }
                 },
                 GroffLine::Macro { name, args }
                     if matches!(name.as_str(), "TP" | "B" | "BI" | "BR") =>
                 {
                     let rendered = strip_groff_escapes(&strip_inline_macro_args(args));
                     subcmd_name = find_usage_name(rendered.trim());
-                }
+                },
                 GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => (),
             }
         }

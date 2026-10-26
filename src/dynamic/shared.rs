@@ -1,23 +1,32 @@
 // SPDX-License-Identifier: EUPL-1.2
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Instant;
-
-use crate::dynamic::Slot;
-use crate::subprocess;
+use std::{
+    env,
+    fs,
+    path::{
+        Path,
+        PathBuf,
+    },
+    process::Command,
+    time::Instant,
+};
 
 // the typed candidate and scorer are shared with the static completer.
-use crate::complete::{Candidate, fuzzy_score};
+use crate::complete::{
+    Candidate,
+    fuzzy_score,
+};
+use crate::{
+    dynamic::Slot,
+    subprocess,
+};
 
 #[derive(Clone, Copy)]
 pub struct DynCtx<'span> {
-    pub deadline: Option<Instant>,
-    pub limit: usize,
-    pub cmd_name: &'span str,
+    pub deadline:          Option<Instant>,
+    pub limit:             usize,
+    pub cmd_name:          &'span str,
     pub explicit_cmd_path: Option<&'span Path>,
-    pub slot: Slot<'span>,
+    pub slot:              Slot<'span>,
 }
 
 impl DynCtx<'_> {

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2
-use crate::complete::Candidate;
-use crate::dynamic::shared::{DynCtx, run};
+use crate::{
+    complete::Candidate,
+    dynamic::shared::{
+        DynCtx,
+        run,
+    },
+};
 const DOCKER_CONTAINER_VERBS: &[&str] = &[
     "exec", "logs", "inspect", "start", "stop", "restart", "rm", "kill", "attach", "cp", "top",
     "wait", "pause", "unpause", "port", "commit", "diff", "export",

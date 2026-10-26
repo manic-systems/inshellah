@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah merge`.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-
-use pound::Parse;
+use std::{
+    fs,
+    io,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
 
 use inshellah::indexer::cmd_merge;
+use pound::Parse;
 
 use super::index::Scrape;
 
@@ -18,12 +22,12 @@ pub struct Args {
     pub profile: PathBuf,
     /// output directory
     #[pound(long)]
-    pub dir: PathBuf,
+    pub dir:     PathBuf,
     /// file of `PACKAGE INDEX` lines, in priority order
     #[pound(long)]
     pub sources: PathBuf,
     #[pound(flatten)]
-    pub scrape: Scrape,
+    pub scrape:  Scrape,
 }
 
 pub fn run(args: &Args) -> io::Result<()> {

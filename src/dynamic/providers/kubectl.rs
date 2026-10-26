@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2
-use crate::complete::Candidate;
-use crate::dynamic::shared::{DynCtx, run};
+use crate::{
+    complete::Candidate,
+    dynamic::shared::{
+        DynCtx,
+        run,
+    },
+};
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !ctx.slot.positional() {
         return None;
@@ -31,7 +36,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
 
 pub struct KubeScope {
     pub args: Vec<String>,
-    pub all: bool,
+    pub all:  bool,
 }
 
 pub fn kubectl_scope(spans: &[String]) -> KubeScope {
@@ -41,7 +46,7 @@ pub fn kubectl_scope(spans: &[String]) -> KubeScope {
     if all_namespaces {
         return KubeScope {
             args: vec!["--all-namespaces".into()],
-            all: true,
+            all:  true,
         };
     }
     let mut namespace: Option<String> = None;
@@ -57,13 +62,17 @@ pub fn kubectl_scope(spans: &[String]) -> KubeScope {
         i += 1;
     }
     match namespace {
-        Some(ns) if !ns.is_empty() => KubeScope {
-            args: vec!["-n".into(), ns],
-            all: false,
+        Some(ns) if !ns.is_empty() => {
+            KubeScope {
+                args: vec!["-n".into(), ns],
+                all:  false,
+            }
         },
-        _ => KubeScope {
-            args: Vec::new(),
-            all: false,
+        _ => {
+            KubeScope {
+                args: Vec::new(),
+                all:  false,
+            }
         },
     }
 }

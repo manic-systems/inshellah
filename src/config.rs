@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! complete-path knobs, read from INSHELLAH_* env (also set by the nixos module).
+//! complete-path knobs, read from INSHELLAH_* env (also set by the nixos
+//! module).
 
 use std::env;
 
@@ -8,7 +9,8 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 1200;
 /// 0 disables the dynamic provider.
 pub const DEFAULT_DYNAMIC_TIMEOUT_MS: u64 = 5000;
 
-/// row cap for native list commands (git for-each-ref --count N), 0 omits the flag.
+/// row cap for native list commands (git for-each-ref --count N), 0 omits the
+/// flag.
 pub const DEFAULT_DYNAMIC_LIMIT: usize = 200;
 
 pub const DEFAULT_FLAG_TRIGGERS: &str = "-";
@@ -19,30 +21,30 @@ pub const DEFAULT_CACHE_TTL_SECS: u64 = 604_800;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// chars that, as a token's first byte, surface flags.
-    pub flag_triggers: Vec<char>,
+    pub flag_triggers:      Vec<char>,
     /// surface flags on an empty token (after a space).
-    pub flag_on_empty: bool,
+    pub flag_on_empty:      bool,
     /// cap on static candidates, 0 = no cap.
-    pub max_completions: usize,
+    pub max_completions:    usize,
     /// --help resolve + adb timeout (ms).
-    pub timeout_ms: u64,
+    pub timeout_ms:         u64,
     /// budget across dynamic provider subprocesses, distinct from `timeout_ms`.
     pub dynamic_timeout_ms: u64,
-    pub dynamic_limit: usize,
+    pub dynamic_limit:      usize,
     /// rescrape user-cached sets older than this many seconds, 0 disables.
-    pub cache_ttl_secs: u64,
+    pub cache_ttl_secs:     u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            flag_triggers: DEFAULT_FLAG_TRIGGERS.chars().collect(),
-            flag_on_empty: false,
-            max_completions: 0,
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            flag_triggers:      DEFAULT_FLAG_TRIGGERS.chars().collect(),
+            flag_on_empty:      false,
+            max_completions:    0,
+            timeout_ms:         DEFAULT_TIMEOUT_MS,
             dynamic_timeout_ms: DEFAULT_DYNAMIC_TIMEOUT_MS,
-            dynamic_limit: DEFAULT_DYNAMIC_LIMIT,
-            cache_ttl_secs: DEFAULT_CACHE_TTL_SECS,
+            dynamic_limit:      DEFAULT_DYNAMIC_LIMIT,
+            cache_ttl_secs:     DEFAULT_CACHE_TTL_SECS,
         }
     }
 }
@@ -81,7 +83,8 @@ impl Config {
         {
             cfg.cache_ttl_secs = value;
         }
-        // i64 so "-1" rejects instead of wrapping, negatives and garbage fall back.
+        // i64 so "-1" rejects instead of wrapping, negatives and garbage fall
+        // back.
         if let Some(raw) = get("INSHELLAH_DYNAMIC_TIMEOUT_MS")
             && let Ok(signed) = raw.trim().parse::<i64>()
             && let Ok(value) = u64::try_from(signed)
@@ -104,31 +107,39 @@ impl Config {
     }
 
     /// dash keeps the dashed form so `--ver` prefers `--verbose`; any other
-    /// trigger strips its lead char and matches the bare name (`+ver` -> verbose).
+    /// trigger strips its lead char and matches the bare name (`+ver` ->
+    /// verbose).
     pub fn flag_needle<'token>(&self, token: &'token str) -> FlagNeedle<'token> {
         let mut chars = token.chars();
         match chars.next() {
-            None => FlagNeedle {
-                needle: token,
-                bare: true,
+            None => {
+                FlagNeedle {
+                    needle: token,
+                    bare:   true,
+                }
             },
-            Some('-') => FlagNeedle {
-                needle: token,
-                bare: false,
+            Some('-') => {
+                FlagNeedle {
+                    needle: token,
+                    bare:   false,
+                }
             },
-            Some(_) => FlagNeedle {
-                needle: chars.as_str(),
-                bare: true,
+            Some(_) => {
+                FlagNeedle {
+                    needle: chars.as_str(),
+                    bare:   true,
+                }
             },
         }
     }
 }
 
-/// `bare` matches `needle` against the stripped flag name, else the dashed form.
+/// `bare` matches `needle` against the stripped flag name, else the dashed
+/// form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlagNeedle<'token> {
     pub needle: &'token str,
-    pub bare: bool,
+    pub bare:   bool,
 }
 
 fn parse_bool(raw: &str) -> bool {
@@ -140,8 +151,9 @@ fn parse_bool(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     fn cfg_from(pairs: &[(&str, &str)]) -> Config {
         let map: HashMap<String, String> = pairs
@@ -192,27 +204,18 @@ mod tests {
     #[test]
     fn dash_needle_keeps_dashes_other_triggers_go_bare() {
         let cfg = cfg_from(&[("INSHELLAH_FLAG_TRIGGERS", "-+")]);
-        assert_eq!(
-            cfg.flag_needle("--ver"),
-            FlagNeedle {
-                needle: "--ver",
-                bare: false
-            }
-        );
-        assert_eq!(
-            cfg.flag_needle("+ver"),
-            FlagNeedle {
-                needle: "ver",
-                bare: true
-            }
-        );
-        assert_eq!(
-            cfg.flag_needle(""),
-            FlagNeedle {
-                needle: "",
-                bare: true
-            }
-        );
+        assert_eq!(cfg.flag_needle("--ver"), FlagNeedle {
+            needle: "--ver",
+            bare:   false,
+        });
+        assert_eq!(cfg.flag_needle("+ver"), FlagNeedle {
+            needle: "ver",
+            bare:   true,
+        });
+        assert_eq!(cfg.flag_needle(""), FlagNeedle {
+            needle: "",
+            bare:   true,
+        });
     }
 
     #[test]

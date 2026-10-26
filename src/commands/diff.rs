@@ -1,14 +1,32 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! `inshellah diff`.
 
-use std::collections::BTreeSet;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    io,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
 
-use inshellah::indexer::probe::{parse_help_text, try_help, try_help_args};
-use inshellah::indexer::{find_manpage_path, list_manpages};
-use inshellah::parsers::manpage::{
-    ManpageEntry, ManpageResult, OwnedSwitch, parse_manpage_string, read_manpage_file,
+use inshellah::{
+    indexer::{
+        find_manpage_path,
+        list_manpages,
+        probe::{
+            parse_help_text,
+            try_help,
+            try_help_args,
+        },
+    },
+    parsers::manpage::{
+        ManpageEntry,
+        ManpageResult,
+        OwnedSwitch,
+        parse_manpage_string,
+        read_manpage_file,
+    },
 };
 
 use super::common::find_in_path;
@@ -207,25 +225,26 @@ pub fn run_scan(prefix: &Path, timeout_ms: u64) {
         );
     }
     eprintln!(
-        "scanned: {suspects} group suspects, {sibling_covered} body-parser gaps, {help_recoverable} help-only"
+        "scanned: {suspects} group suspects, {sibling_covered} body-parser gaps, \
+         {help_recoverable} help-only"
     );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use inshellah::types::Positional;
+
+    use super::*;
 
     #[test]
     fn detects_unenumerated_group_placeholder() {
         let mut result = ManpageResult::default();
-        result.positionals.push((
-            "subcommands".to_owned(),
-            Positional {
+        result
+            .positionals
+            .push(("subcommands".to_owned(), Positional {
                 optional: false,
                 variadic: false,
-            },
-        ));
+            }));
 
         assert!(looks_like_unenumerated_group(&result));
     }

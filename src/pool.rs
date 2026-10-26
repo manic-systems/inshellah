@@ -2,34 +2,50 @@
 //! bfs-queue worker pool for parallel subprocess scraping.
 //!
 //! workers pull jobs from a shared queue and call a handler that can push child
-//! jobs back via a `Submitter`; when in-flight hits zero the pool shuts down and
-//! `wait` returns.
+//! jobs back via a `Submitter`; when in-flight hits zero the pool shuts down
+//! and `wait` returns.
 //!
 //! queue-back (not spawn-in-place) keeps workers fed on lopsided help trees
 //! (one binary has 30 subs, another 1). a condvar parks idle
 //! workers; queue + in-flight + close state share one mutex so a wakeup can't
 //! be missed.
 
-use std::collections::VecDeque;
-use std::iter;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::thread::{self, JoinHandle};
+use std::{
+    collections::VecDeque,
+    iter,
+    panic::{
+        AssertUnwindSafe,
+        catch_unwind,
+    },
+    sync::{
+        Arc,
+        Condvar,
+        Mutex,
+        PoisonError,
+        atomic::{
+            AtomicUsize,
+            Ordering,
+        },
+    },
+    thread::{
+        self,
+        JoinHandle,
+    },
+};
 
 struct State<J> {
-    queue: VecDeque<J>,
-    /// queued + in-progress jobs. workers exit once `wait()` closed the pool and
-    /// this hits 0.
+    queue:     VecDeque<J>,
+    /// queued + in-progress jobs. workers exit once `wait()` closed the pool
+    /// and this hits 0.
     in_flight: usize,
-    /// set by `wait()`, once top-level submission is done. workers must not exit
-    /// on transient empties before this.
-    closed: bool,
+    /// set by `wait()`, once top-level submission is done. workers must not
+    /// exit on transient empties before this.
+    closed:    bool,
 }
 
 /// shared state behind an `Arc`, held by every worker and submitter.
 struct Inner<J> {
-    state: Mutex<State<J>>,
+    state:  Mutex<State<J>>,
     notify: Condvar,
 }
 
@@ -62,7 +78,8 @@ impl<J> Inner<J> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.in_flight -= 1;
         if state.closed && state.in_flight == 0 {
-            // last in-flight after wait() closed submission; wake workers to exit.
+            // last in-flight after wait() closed submission; wake workers to
+            // exit.
             self.notify.notify_all();
         }
     }
@@ -88,7 +105,7 @@ impl<J> Submitter<J> {
 }
 
 pub struct ScrapePool<J> {
-    inner: Arc<Inner<J>>,
+    inner:   Arc<Inner<J>>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -104,10 +121,10 @@ impl<J: Send + 'static> ScrapePool<J> {
         F: Fn(J, &Submitter<J>) + Send + Sync + 'static,
     {
         let inner = Arc::new(Inner {
-            state: Mutex::new(State {
-                queue: VecDeque::new(),
+            state:  Mutex::new(State {
+                queue:     VecDeque::new(),
                 in_flight: 0,
-                closed: false,
+                closed:    false,
             }),
             notify: Condvar::new(),
         });
@@ -132,7 +149,8 @@ impl<J: Send + 'static> ScrapePool<J> {
         Self { inner, workers }
     }
 
-    /// submit a top-level job (before `wait`); handlers use `Submitter::submit`.
+    /// submit a top-level job (before `wait`); handlers use
+    /// `Submitter::submit`.
     pub fn submit(&self, job: J) {
         self.inner.submit(job);
     }
@@ -209,9 +227,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        panic,
+        time::Duration,
+    };
+
     use super::*;
-    use std::panic;
-    use std::time::Duration;
 
     #[test]
     fn flat_jobs_processed_once_each() {

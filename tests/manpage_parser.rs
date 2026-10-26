@@ -1,5 +1,8 @@
 use inshellah::parsers::manpage::{
-    OwnedParam, OwnedSwitch, parse_manpage_string, parse_manpage_with_subs,
+    OwnedParam,
+    OwnedSwitch,
+    parse_manpage_string,
+    parse_manpage_with_subs,
 };
 
 const TP_MANPAGE: &str = r#".TH FOO 1 "2024" "1.0" "User Commands"
@@ -126,9 +129,11 @@ fn hp_strategy_extracts_flags_and_skips_rs_example_values() {
     let names: Vec<String> = result
         .entries
         .iter()
-        .map(|entry| match &entry.switch {
-            OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => long.clone(),
-            OwnedSwitch::Short(short) => short.to_string(),
+        .map(|entry| {
+            match &entry.switch {
+                OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => long.clone(),
+                OwnedSwitch::Short(short) => short.to_string(),
+            }
         })
         .collect();
     assert_eq!(
@@ -137,10 +142,12 @@ fn hp_strategy_extracts_flags_and_skips_rs_example_values() {
         "expected 3 flags, got {names:?}"
     );
     assert!(
-        !result.entries.iter().any(|entry| matches!(
-            &entry.switch,
-            OwnedSwitch::Long(long) if long == "caret" || long == "unicode"
-        )),
+        !result.entries.iter().any(|entry| {
+            matches!(
+                &entry.switch,
+                OwnedSwitch::Long(long) if long == "caret" || long == "unicode"
+            )
+        }),
         "inner .RS .IP example values must not be picked up as flags: {:?}",
         result.entries
     );
@@ -245,10 +252,12 @@ fn tp_strategy_stops_description_at_blank_line() {
         at_op.desc
     );
     // the second .TP block still parses (next entry not swallowed).
-    assert!(result.entries.iter().any(|entry| matches!(
-        &entry.switch,
-        OwnedSwitch::Both('h', long) if long == "help"
-    )));
+    assert!(result.entries.iter().any(|entry| {
+        matches!(
+            &entry.switch,
+            OwnedSwitch::Both('h', long) if long == "help"
+        )
+    }));
 }
 
 #[test]
@@ -313,18 +322,24 @@ Read patterns from a file.
 "#;
     let result = parse_manpage_string(groff);
     assert_eq!(result.entries.len(), 3, "entries: {:?}", result.entries);
-    assert!(result.entries.iter().any(|entry| matches!(
-        &entry.switch,
-        OwnedSwitch::Both('a', long) if long == "all"
-    )));
-    assert!(result.entries.iter().any(|entry| matches!(
-        &entry.switch,
-        OwnedSwitch::Both('e', long) if long == "regexp"
-    )));
-    assert!(result.entries.iter().any(|entry| matches!(
-        &entry.switch,
-        OwnedSwitch::Both('f', long) if long == "file"
-    )));
+    assert!(result.entries.iter().any(|entry| {
+        matches!(
+            &entry.switch,
+            OwnedSwitch::Both('a', long) if long == "all"
+        )
+    }));
+    assert!(result.entries.iter().any(|entry| {
+        matches!(
+            &entry.switch,
+            OwnedSwitch::Both('e', long) if long == "regexp"
+        )
+    }));
+    assert!(result.entries.iter().any(|entry| {
+        matches!(
+            &entry.switch,
+            OwnedSwitch::Both('f', long) if long == "file"
+        )
+    }));
 }
 
 #[test]
@@ -392,8 +407,10 @@ Limit history depth.
         "positionals: {:?}",
         result.positionals
     );
-    assert!(result.entries.iter().any(|entry| matches!(
-        &entry.switch,
-        OwnedSwitch::Long(long) if long == "depth"
-    )));
+    assert!(result.entries.iter().any(|entry| {
+        matches!(
+            &entry.switch,
+            OwnedSwitch::Long(long) if long == "depth"
+        )
+    }));
 }

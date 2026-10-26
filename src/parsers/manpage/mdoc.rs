@@ -5,9 +5,19 @@
 //!   .Bl/.It/.El -> list begin/item/end
 //!   .Sh      -> section header (lowercase 'h', vs groff's .SH)
 
-use crate::parsers::manpage::groff::{GroffLine, strip_groff_escapes};
-use crate::parsers::manpage::{ManpageEntry, ManpageResult, OwnedParam, OwnedSwitch};
-use crate::types::Positional;
+use crate::{
+    parsers::manpage::{
+        ManpageEntry,
+        ManpageResult,
+        OwnedParam,
+        OwnedSwitch,
+        groff::{
+            GroffLine,
+            strip_groff_escapes,
+        },
+    },
+    types::Positional,
+};
 
 /// mdoc is detected by any .Sh macro.
 pub fn is_mdoc(lines: &[GroffLine]) -> bool {
@@ -20,16 +30,18 @@ pub fn is_mdoc(lines: &[GroffLine]) -> bool {
 fn mdoc_text_of(line: &GroffLine) -> Option<String> {
     match line {
         GroffLine::Text(text) => Some(strip_groff_escapes(text)),
-        GroffLine::Macro { name, args } => match name.as_str() {
-            "Pp" | "Bl" | "El" | "Sh" | "Ss" | "Os" | "Dd" | "Dt" | "Oo" | "Oc" | "Op" => None,
-            _ => {
-                let rendered = strip_groff_escapes(args);
-                let text = rendered.trim();
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text.to_owned())
-                }
+        GroffLine::Macro { name, args } => {
+            match name.as_str() {
+                "Pp" | "Bl" | "El" | "Sh" | "Ss" | "Os" | "Dd" | "Dt" | "Oo" | "Oc" | "Op" => None,
+                _ => {
+                    let rendered = strip_groff_escapes(args);
+                    let text = rendered.trim();
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.to_owned())
+                    }
+                },
             }
         },
         GroffLine::Blank | GroffLine::Comment => None,
@@ -129,7 +141,7 @@ fn parse_option_list(entries: &mut Vec<ManpageEntry>, lines: &[GroffLine], start
             GroffLine::Macro { name, .. } if name == "El" => return i + 1,
             GroffLine::Macro { name, args } if name == "It" => {
                 i = parse_it(args, lines, i + 1, entries);
-            }
+            },
             GroffLine::Macro { .. }
             | GroffLine::Text(_)
             | GroffLine::Blank
@@ -153,7 +165,7 @@ fn parse_synopsis(
                     positionals.push((pos_name, false, variadic));
                 }
                 i += 1;
-            }
+            },
             GroffLine::Macro { name, args } if name == "Op" => {
                 let words: Vec<&str> = args.split(' ').filter(|w| !w.is_empty()).collect();
                 if matches!(words.first(), Some(&"Ar")) {
@@ -163,7 +175,7 @@ fn parse_synopsis(
                     }
                 }
                 i += 1;
-            }
+            },
             GroffLine::Macro { .. }
             | GroffLine::Text(_)
             | GroffLine::Blank

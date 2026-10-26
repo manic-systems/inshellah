@@ -6,15 +6,29 @@
 //! dir is always empty so the dynamic path fires.
 #![cfg(test)]
 
-use std::collections::BTreeMap;
-use std::env;
-use std::ffi::OsString;
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
-use std::process::{self, Command};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    env,
+    ffi::OsString,
+    fs,
+    os::unix::fs::PermissionsExt as _,
+    path::{
+        Path,
+        PathBuf,
+    },
+    process::{
+        self,
+        Command,
+    },
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
+    },
+    time::{
+        SystemTime,
+        UNIX_EPOCH,
+    },
+};
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -142,7 +156,7 @@ esac
 
 #[derive(Debug, Clone)]
 struct Cand {
-    value: String,
+    value:       String,
     description: String,
 }
 
@@ -155,24 +169,26 @@ fn parse_output(stdout: &str) -> Option<Vec<Cand>> {
     let arr = json.as_array()?;
     let out: Vec<Cand> = arr
         .iter()
-        .map(|item| Cand {
-            value: item
-                .get("value")
-                .and_then(|field| field.as_str())
-                .unwrap_or("")
-                .to_owned(),
-            description: item
-                .get("description")
-                .and_then(|field| field.as_str())
-                .unwrap_or("")
-                .to_owned(),
+        .map(|item| {
+            Cand {
+                value:       item
+                    .get("value")
+                    .and_then(|field| field.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                description: item
+                    .get("description")
+                    .and_then(|field| field.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+            }
         })
         .collect();
     Some(out)
 }
 
 struct Harness {
-    bin_dir: PathBuf,
+    bin_dir:   PathBuf,
     cache_dir: PathBuf,
     /// arg-capture files (`KUBECTL_ARGS_FILE`, `INSHELLAH_GIT_ARGS_FILE`) the
     /// fakes write into. wiped between runs.
@@ -275,20 +291,20 @@ fn nix_flake_pkg_gets_enriched_description() {
 #[test]
 fn nix_slow_completion_times_out_when_budget_is_short() {
     let harness = Harness::new("dyn-nix-slow");
-    let (stdout, _, _) = harness.run(
-        &["nix", "slow", ""],
-        &[("INSHELLAH_DYNAMIC_TIMEOUT_MS", "50")],
-    );
+    let (stdout, ..) = harness.run(&["nix", "slow", ""], &[(
+        "INSHELLAH_DYNAMIC_TIMEOUT_MS",
+        "50",
+    )]);
     assert_eq!(stdout.trim(), "null", "stdout={stdout}");
 }
 
 #[test]
 fn nix_dynamic_timeout_zero_disables_bound() {
     let harness = Harness::new("dyn-nix-no-timeout");
-    let (stdout, _, _) = harness.run(
-        &["nix", "slow", ""],
-        &[("INSHELLAH_DYNAMIC_TIMEOUT_MS", "0")],
-    );
+    let (stdout, ..) = harness.run(&["nix", "slow", ""], &[(
+        "INSHELLAH_DYNAMIC_TIMEOUT_MS",
+        "0",
+    )]);
     let cands = parse_output(&stdout).expect("slow eventually returns");
     assert_eq!(cands[0].value, "slow-package");
 }
@@ -298,17 +314,17 @@ fn nix_dynamic_timeout_zero_disables_bound() {
 #[test]
 fn systemctl_emits_units_only_for_unit_verbs() {
     let harness = Harness::new("dyn-systemctl");
-    let (no_units, _, _) = harness.run(&["systemctl", "daemon-reload", ""], &[]);
+    let (no_units, ..) = harness.run(&["systemctl", "daemon-reload", ""], &[]);
     assert!(
         parse_output(&no_units).is_none(),
         "non-unit verb should not offer units"
     );
 
-    let (units, _, _) = harness.run(&["systemctl", "status", ""], &[]);
+    let (units, ..) = harness.run(&["systemctl", "status", ""], &[]);
     let cands = parse_output(&units).expect("units returned");
     assert_eq!(cands[0].value, "demo.service");
 
-    let (prefixed_out, _, _) = harness.run(&["systemctl", "start", "g"], &[]);
+    let (prefixed_out, ..) = harness.run(&["systemctl", "start", "g"], &[]);
     let prefixed = parse_output(&prefixed_out).expect("prefix-filtered units");
     assert_eq!(prefixed[0].value, "greetd.service");
 }
@@ -318,7 +334,7 @@ fn systemctl_emits_units_only_for_unit_verbs() {
 #[test]
 fn kubectl_resource_names_complete_with_namespace_preserved() {
     let harness = Harness::new("dyn-kubectl");
-    let (stdout, _, _) = harness.run(&["kubectl", "get", "pods", "-n", "prod", ""], &[]);
+    let (stdout, ..) = harness.run(&["kubectl", "get", "pods", "-n", "prod", ""], &[]);
     let cands = parse_output(&stdout).expect("pods");
     assert_eq!(cands[0].value, "pod-a");
     let args = harness.read_aux("KUBECTL_ARGS_FILE");
@@ -328,7 +344,7 @@ fn kubectl_resource_names_complete_with_namespace_preserved() {
 #[test]
 fn kubectl_rollout_uses_resource_kind() {
     let harness = Harness::new("dyn-kubectl-rollout");
-    let (stdout, _, _) = harness.run(&["kubectl", "rollout", "status", "deployment", ""], &[]);
+    let (stdout, ..) = harness.run(&["kubectl", "rollout", "status", "deployment", ""], &[]);
     let cands = parse_output(&stdout).expect("rollout target");
     assert_eq!(cands[0].description, "deployment");
 }
@@ -338,7 +354,7 @@ fn kubectl_rollout_uses_resource_kind() {
 #[test]
 fn cargo_p_completes_packages_uniquely() {
     let harness = Harness::new("dyn-cargo-p");
-    let (stdout, _, _) = harness.run(&["cargo", "test", "-p", ""], &[]);
+    let (stdout, ..) = harness.run(&["cargo", "test", "-p", ""], &[]);
     let cands = parse_output(&stdout).expect("packages");
     assert_eq!(Harness::values(&cands), vec!["app-lib", "helper-lib"]);
 }
@@ -346,7 +362,7 @@ fn cargo_p_completes_packages_uniquely() {
 #[test]
 fn cargo_bin_completes_only_bin_targets() {
     let harness = Harness::new("dyn-cargo-bin");
-    let (stdout, _, _) = harness.run(&["cargo", "run", "--bin", ""], &[]);
+    let (stdout, ..) = harness.run(&["cargo", "run", "--bin", ""], &[]);
     let cands = parse_output(&stdout).expect("bin targets");
     assert_eq!(Harness::values(&cands), vec!["app-cli"]);
 }
@@ -356,7 +372,7 @@ fn cargo_bin_completes_only_bin_targets() {
 #[test]
 fn git_top_level_includes_common_verbs() {
     let harness = Harness::new("dyn-git-top");
-    let (stdout, _, _) = harness.run(&["git", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", ""], &[]);
     let cands = parse_output(&stdout).expect("top-level verbs");
     let values = Harness::values(&cands);
     assert!(values.iter().any(|value| value == "remote"));
@@ -366,7 +382,7 @@ fn git_top_level_includes_common_verbs() {
 #[test]
 fn git_push_completes_remotes_when_arg_position_is_first() {
     let harness = Harness::new("dyn-git-push");
-    let (stdout, _, _) = harness.run(&["git", "push", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "push", ""], &[]);
     let cands = parse_output(&stdout).expect("remotes");
     assert_eq!(Harness::values(&cands), vec!["origin", "upstream"]);
 }
@@ -374,37 +390,34 @@ fn git_push_completes_remotes_when_arg_position_is_first() {
 #[test]
 fn git_remote_subcommand_offers_verbs_then_filters_fuzzily() {
     let harness = Harness::new("dyn-git-remote");
-    let (verbs, _, _) = harness.run(&["git", "remote", ""], &[]);
+    let (verbs, ..) = harness.run(&["git", "remote", ""], &[]);
     let cands = parse_output(&verbs).expect("verbs");
-    assert_eq!(
-        Harness::values(&cands),
-        vec![
-            "add",
-            "rename",
-            "remove",
-            "rm",
-            "set-head",
-            "set-branches",
-            "get-url",
-            "set-url",
-            "show",
-            "prune",
-            "update",
-        ]
-    );
+    assert_eq!(Harness::values(&cands), vec![
+        "add",
+        "rename",
+        "remove",
+        "rm",
+        "set-head",
+        "set-branches",
+        "get-url",
+        "set-url",
+        "show",
+        "prune",
+        "update",
+    ]);
 
-    let (prefixed_out, _, _) = harness.run(&["git", "remote", "sho"], &[]);
+    let (prefixed_out, ..) = harness.run(&["git", "remote", "sho"], &[]);
     let prefixed = parse_output(&prefixed_out).expect("prefix-filtered");
     assert_eq!(Harness::values(&prefixed), vec!["show"]);
 
-    let (fuzzy_out, _, _) = harness.run(&["git", "remote", "shw"], &[]);
+    let (fuzzy_out, ..) = harness.run(&["git", "remote", "shw"], &[]);
     let fuzzy = parse_output(&fuzzy_out).expect("fuzzy-filtered");
     assert_eq!(Harness::values(&fuzzy), vec!["show"]);
 
-    let (exact, _, _) = harness.run(&["git", "remote", "show"], &[]);
+    let (exact, ..) = harness.run(&["git", "remote", "show"], &[]);
     assert_eq!(exact.trim(), "null", "stdout={exact}");
 
-    let (named_out, _, _) = harness.run(&["git", "remote", "show", ""], &[]);
+    let (named_out, ..) = harness.run(&["git", "remote", "show", ""], &[]);
     let named = parse_output(&named_out).expect("remote names");
     assert_eq!(Harness::values(&named), vec!["origin", "upstream"]);
 }
@@ -412,11 +425,11 @@ fn git_remote_subcommand_offers_verbs_then_filters_fuzzily() {
 #[test]
 fn git_fetch_then_ref() {
     let harness = Harness::new("dyn-git-fetch");
-    let (remotes, _, _) = harness.run(&["git", "fetch", ""], &[]);
+    let (remotes, ..) = harness.run(&["git", "fetch", ""], &[]);
     let cands = parse_output(&remotes).expect("remotes");
     assert_eq!(Harness::values(&cands), vec!["origin", "upstream"]);
 
-    let (refs, _, _) = harness.run(&["git", "fetch", "origin", ""], &[]);
+    let (refs, ..) = harness.run(&["git", "fetch", "origin", ""], &[]);
     let ref_cands = parse_output(&refs).expect("refs");
     assert!(
         Harness::values(&ref_cands)
@@ -428,7 +441,7 @@ fn git_fetch_then_ref() {
 #[test]
 fn git_branch_delete_completes_branches() {
     let harness = Harness::new("dyn-git-branch-d");
-    let (stdout, _, _) = harness.run(&["git", "branch", "-d", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "branch", "-d", ""], &[]);
     let cands = parse_output(&stdout).expect("branches");
     assert_eq!(Harness::values(&cands), vec!["main", "feature"]);
 }
@@ -436,7 +449,7 @@ fn git_branch_delete_completes_branches() {
 #[test]
 fn git_tag_delete_completes_tags() {
     let harness = Harness::new("dyn-git-tag-d");
-    let (stdout, _, _) = harness.run(&["git", "tag", "-d", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "tag", "-d", ""], &[]);
     let cands = parse_output(&stdout).expect("tags");
     assert_eq!(Harness::values(&cands), vec!["v1.0", "v2.0"]);
 }
@@ -444,7 +457,7 @@ fn git_tag_delete_completes_tags() {
 #[test]
 fn git_stash_apply_completes_stashes() {
     let harness = Harness::new("dyn-git-stash");
-    let (stdout, _, _) = harness.run(&["git", "stash", "apply", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "stash", "apply", ""], &[]);
     let cands = parse_output(&stdout).expect("stashes");
     assert_eq!(Harness::values(&cands), vec!["stash@{0}"]);
 }
@@ -452,7 +465,7 @@ fn git_stash_apply_completes_stashes() {
 #[test]
 fn git_submodule_update_completes_submodule_paths() {
     let harness = Harness::new("dyn-git-submodule");
-    let (stdout, _, _) = harness.run(&["git", "submodule", "update", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "submodule", "update", ""], &[]);
     let cands = parse_output(&stdout).expect("submodules");
     assert_eq!(Harness::values(&cands), vec!["deps/demo"]);
 }
@@ -460,11 +473,11 @@ fn git_submodule_update_completes_submodule_paths() {
 #[test]
 fn git_bisect_offers_subcommands_then_refs() {
     let harness = Harness::new("dyn-git-bisect");
-    let (verbs, _, _) = harness.run(&["git", "bisect", ""], &[]);
+    let (verbs, ..) = harness.run(&["git", "bisect", ""], &[]);
     let cands = parse_output(&verbs).expect("bisect verbs");
     assert!(Harness::values(&cands).iter().any(|value| value == "good"));
 
-    let (refs, _, _) = harness.run(&["git", "bisect", "good", ""], &[]);
+    let (refs, ..) = harness.run(&["git", "bisect", "good", ""], &[]);
     let ref_cands = parse_output(&refs).expect("refs");
     assert!(
         Harness::values(&ref_cands)
@@ -476,18 +489,19 @@ fn git_bisect_offers_subcommands_then_refs() {
 #[test]
 fn git_add_completes_changed_paths_including_renames() {
     let harness = Harness::new("dyn-git-add");
-    let (stdout, _, _) = harness.run(&["git", "add", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "add", ""], &[]);
     let cands = parse_output(&stdout).expect("changed paths");
-    assert_eq!(
-        Harness::values(&cands),
-        vec!["src/main.rs", "new-file.txt", "renamed.txt"]
-    );
+    assert_eq!(Harness::values(&cands), vec![
+        "src/main.rs",
+        "new-file.txt",
+        "renamed.txt"
+    ]);
 }
 
 #[test]
 fn git_rm_completes_tracked_paths() {
     let harness = Harness::new("dyn-git-rm");
-    let (stdout, _, _) = harness.run(&["git", "rm", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "rm", ""], &[]);
     let cands = parse_output(&stdout).expect("tracked");
     assert_eq!(Harness::values(&cands), vec!["src/main.rs", "README.md"]);
 }
@@ -495,14 +509,14 @@ fn git_rm_completes_tracked_paths() {
 #[test]
 fn git_worktree_add_first_arg_falls_through_to_files() {
     let harness = Harness::new("dyn-git-worktree-add");
-    let (stdout, _, _) = harness.run(&["git", "worktree", "add", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "worktree", "add", ""], &[]);
     assert_eq!(stdout.trim(), "null", "stdout={stdout}");
 }
 
 #[test]
 fn git_worktree_remove_completes_existing_worktrees() {
     let harness = Harness::new("dyn-git-worktree-rm");
-    let (stdout, _, _) = harness.run(&["git", "worktree", "remove", ""], &[]);
+    let (stdout, ..) = harness.run(&["git", "worktree", "remove", ""], &[]);
     let cands = parse_output(&stdout).expect("worktrees");
     assert_eq!(cands[0].value, "/repo/linked");
 }
@@ -510,10 +524,10 @@ fn git_worktree_remove_completes_existing_worktrees() {
 #[test]
 fn git_dynamic_limit_zero_omits_count_flag() {
     let harness = Harness::new("dyn-git-limit-zero");
-    let (_stdout, _, _) = harness.run(
-        &["git", "fetch", "origin", ""],
-        &[("INSHELLAH_DYNAMIC_LIMIT", "0")],
-    );
+    let (_stdout, ..) = harness.run(&["git", "fetch", "origin", ""], &[(
+        "INSHELLAH_DYNAMIC_LIMIT",
+        "0",
+    )]);
     let captured = harness.read_aux("INSHELLAH_GIT_ARGS_FILE");
     assert!(
         !captured.contains("--count"),
@@ -524,10 +538,10 @@ fn git_dynamic_limit_zero_omits_count_flag() {
 #[test]
 fn git_dynamic_limit_is_passed_to_native_provider() {
     let harness = Harness::new("dyn-git-limit");
-    let (_stdout, _, _) = harness.run(
-        &["git", "fetch", "origin", ""],
-        &[("INSHELLAH_DYNAMIC_LIMIT", "7")],
-    );
+    let (_stdout, ..) = harness.run(&["git", "fetch", "origin", ""], &[(
+        "INSHELLAH_DYNAMIC_LIMIT",
+        "7",
+    )]);
     let captured = harness.read_aux("INSHELLAH_GIT_ARGS_FILE");
     assert!(
         captured.contains("--count 7"),
@@ -558,18 +572,18 @@ fn git_explicit_path_after_elevation_uses_dynamic_provider() {
 #[test]
 fn jj_defers_to_native_completer() {
     let harness = Harness::new("dyn-jj-native");
-    let (stdout, _, _) = harness.run(&["jj", "-R", "repo", "log", "-r", "main.."], &[]);
+    let (stdout, ..) = harness.run(&["jj", "-R", "repo", "log", "-r", "main.."], &[]);
     let cands = parse_output(&stdout).expect("native candidates");
     assert_eq!(Harness::values(&cands), vec!["main..main", "main..feature"]);
-    assert_eq!(
-        Harness::descriptions(&cands),
-        vec!["main change", "feature change"]
-    );
+    assert_eq!(Harness::descriptions(&cands), vec![
+        "main change",
+        "feature change"
+    ]);
     assert_eq!(
         harness.read_aux("INSHELLAH_JJ_ARGS_FILE"),
         "--\njj\n-R\nrepo\nlog\n-r\nmain..\n"
     );
 
-    let (empty, _, _) = harness.run(&["jj", "nothing", ""], &[]);
+    let (empty, ..) = harness.run(&["jj", "nothing", ""], &[]);
     assert!(parse_output(&empty).is_none());
 }

@@ -3,7 +3,10 @@
 
 use std::path::PathBuf;
 
-use inshellah::store::{all_commands, file_type_of};
+use inshellah::store::{
+    all_commands,
+    file_type_of,
+};
 
 pub fn run(dirs: &[PathBuf]) {
     let cmds = all_commands(dirs);

@@ -1,9 +1,18 @@
 use nom::{
-    AsChar as _, IResult, Parser,
+    AsChar as _,
+    IResult,
+    Parser,
     branch::alt,
-    bytes::complete::{take_till, take_while},
+    bytes::complete::{
+        take_till,
+        take_while,
+    },
     character::complete::line_ending,
-    combinator::{eof, peek, verify},
+    combinator::{
+        eof,
+        peek,
+        verify,
+    },
     error::Error,
 };
 

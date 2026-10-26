@@ -1,16 +1,27 @@
 use nom::{
-    IResult, Parser as _,
+    IResult,
+    Parser as _,
     character::complete::space0,
     combinator::verify,
     multi::many0,
-    sequence::{preceded, terminated},
+    sequence::{
+        preceded,
+        terminated,
+    },
 };
 
-use crate::make_parser;
-use crate::parsers::help::helpers::{at_least_indent, eol, rest_of_line};
+use crate::{
+    make_parser,
+    parsers::help::helpers::{
+        at_least_indent,
+        eol,
+        rest_of_line,
+    },
+};
 
 // indented (≥8 visual cols), non-flag-shaped line belonging to the previous
-// flag's desc. blank-but-indented lines accepted, filtered by the caller's join.
+// flag's desc. blank-but-indented lines accepted, filtered by the caller's
+// join.
 make_parser!(continuation_line<'src> -> &'src str,
     verify(
         preceded(

@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2
-use crate::complete::Candidate;
-use crate::dynamic::Slot;
-use crate::dynamic::shared::{DynCtx, parse_tabular, run};
+use crate::{
+    complete::Candidate,
+    dynamic::{
+        Slot,
+        shared::{
+            DynCtx,
+            parse_tabular,
+            run,
+        },
+    },
+};
 const GIT_TOP_VERBS: &[&str] = &[
     "add",
     "bisect",
@@ -130,7 +138,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
 #[derive(Clone, Copy)]
 enum GitCompletion {
     Static {
-        values: &'static [&'static str],
+        values:      &'static [&'static str],
         description: &'static str,
     },
     Refs,
@@ -170,7 +178,7 @@ fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
     }
     if span_len <= 2 {
         return Some(GitCompletion::Static {
-            values: GIT_TOP_VERBS,
+            values:      GIT_TOP_VERBS,
             description: "git subcommand",
         });
     }
@@ -251,21 +259,21 @@ fn nested_verb_completion(
     match sub {
         "worktree" if ["remove", "move", "lock", "unlock", "repair"].contains(&verb) => {
             Some(GitCompletion::Worktrees)
-        }
+        },
         "worktree" if verb == "add" && spans.len() >= 5 => Some(GitCompletion::Refs),
         "remote" if GIT_REMOTE_VERBS.contains(&verb) && verb != "add" => {
             Some(GitCompletion::Remotes)
-        }
+        },
         "stash"
             if ["show", "drop", "pop", "apply", "store"].contains(&verb)
                 || (verb == "branch" && positionals_after_sub.len() >= 2) =>
         {
             Some(GitCompletion::Stashes)
-        }
+        },
         "submodule" if GIT_SUBMODULE_PATH_VERBS.contains(&verb) => Some(GitCompletion::Submodules),
         "bisect" if ["bad", "good", "new", "old", "skip", "reset", "start"].contains(&verb) => {
             Some(GitCompletion::Refs)
-        }
+        },
         _ => None,
     }
 }
@@ -280,9 +288,11 @@ fn git_refs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
             .map(str::to_owned),
     );
     let out = run(&args, ctx)?;
-    Some(parse_tabular(&out, |parts| match parts {
-        [name, _, subject, ..] => Some(Candidate::new(*name, *subject)),
-        _ => None,
+    Some(parse_tabular(&out, |parts| {
+        match parts {
+            [name, _, subject, ..] => Some(Candidate::new(*name, *subject)),
+            _ => None,
+        }
     }))
 }
 
@@ -292,9 +302,11 @@ fn git_branches(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/heads".into());
     let out = run(&args, ctx)?;
-    Some(parse_tabular(&out, |parts| match parts {
-        [name, subject, ..] => Some(Candidate::new(*name, *subject)),
-        _ => None,
+    Some(parse_tabular(&out, |parts| {
+        match parts {
+            [name, subject, ..] => Some(Candidate::new(*name, *subject)),
+            _ => None,
+        }
     }))
 }
 
@@ -304,9 +316,11 @@ fn git_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/tags".into());
     let out = run(&args, ctx)?;
-    Some(parse_tabular(&out, |parts| match parts {
-        [name, subject, ..] => Some(Candidate::new(*name, *subject)),
-        _ => None,
+    Some(parse_tabular(&out, |parts| {
+        match parts {
+            [name, subject, ..] => Some(Candidate::new(*name, *subject)),
+            _ => None,
+        }
     }))
 }
 

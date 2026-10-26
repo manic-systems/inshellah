@@ -6,7 +6,10 @@
 //! testable; the index pool and the runtime walk supply their own executor and
 //! cache-write.
 
-use crate::parsers::manpage::{ManpageResult, ManpageSubcommand};
+use crate::parsers::manpage::{
+    ManpageResult,
+    ManpageSubcommand,
+};
 
 /// what a probe thinks a binary is. only `Skip` drives behaviour (the index
 /// skips it); the core uses `HasNativeCompletions` to decide whether to probe.
@@ -52,8 +55,8 @@ pub enum Outcome {
     /// structured manpage/`--help` content. `source` is the cache tag;
     /// `children` are subcommand tokens to recurse.
     Content {
-        result: ManpageResult,
-        source: &'static str,
+        result:   ManpageResult,
+        source:   &'static str,
         children: Vec<String>,
     },
     /// nothing usable: empty parse, or a sub-probe that echoed its parent.
@@ -69,7 +72,8 @@ pub fn full_cmd(base: &str, sub_args: &[String]) -> String {
     }
 }
 
-/// `base` + `sub_args` joined with hyphens, the manpage name (`git-stash-apply`).
+/// `base` + `sub_args` joined with hyphens, the manpage name
+/// (`git-stash-apply`).
 pub fn hyphenated_cmd(base: &str, sub_args: &[String]) -> String {
     if sub_args.is_empty() {
         base.to_owned()
@@ -170,9 +174,13 @@ pub fn resolve_node(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::parsers::manpage::{ManpageEntry, OwnedSwitch};
     use std::cell::Cell;
+
+    use super::*;
+    use crate::parsers::manpage::{
+        ManpageEntry,
+        OwnedSwitch,
+    };
 
     fn sub(name: &str) -> ManpageSubcommand {
         ManpageSubcommand::new(name.to_owned(), String::new())
@@ -180,45 +188,45 @@ mod tests {
 
     fn with_subs(names: &[&str]) -> ManpageResult {
         ManpageResult {
-            entries: Vec::new(),
-            subcommands: names.iter().map(|n| sub(n)).collect(),
+            entries:            Vec::new(),
+            subcommands:        names.iter().map(|n| sub(n)).collect(),
             positional_choices: Vec::new(),
-            positionals: Vec::new(),
-            description: String::new(),
+            positionals:        Vec::new(),
+            description:        String::new(),
         }
     }
 
     fn with_flag() -> ManpageResult {
         ManpageResult {
-            entries: vec![ManpageEntry {
+            entries:            vec![ManpageEntry {
                 switch: OwnedSwitch::Long("verbose".into()),
-                param: None,
-                desc: String::new(),
+                param:  None,
+                desc:   String::new(),
             }],
-            subcommands: Vec::new(),
+            subcommands:        Vec::new(),
             positional_choices: Vec::new(),
-            positionals: Vec::new(),
-            description: String::new(),
+            positionals:        Vec::new(),
+            description:        String::new(),
         }
     }
 
     /// counts native probes, to prove they don't fire for subcommands.
     struct FakeProbe {
-        class: NodeClass,
-        native: Option<String>,
+        class:        NodeClass,
+        native:       Option<String>,
         native_calls: Cell<u32>,
-        manpage: Option<String>,
-        help: Option<String>,
+        manpage:      Option<String>,
+        help:         Option<String>,
     }
 
     impl Default for FakeProbe {
         fn default() -> Self {
             Self {
-                class: NodeClass::TryHelp,
-                native: None,
+                class:        NodeClass::TryHelp,
+                native:       None,
                 native_calls: Cell::new(0),
-                manpage: None,
-                help: None,
+                manpage:      None,
+                help:         None,
             }
         }
     }
@@ -292,7 +300,7 @@ mod tests {
             Outcome::Native { nu } => assert_eq!(nu, "export extern foo []"),
             other @ (Outcome::Content { .. } | Outcome::Empty) => {
                 panic!("expected Native, got {other:?}")
-            }
+            },
         }
         assert_eq!(probe.native_calls.get(), 1);
     }
@@ -311,7 +319,7 @@ mod tests {
             Outcome::Content { source, .. } => assert_eq!(source, "help"),
             other @ (Outcome::Native { .. } | Outcome::Empty) => {
                 panic!("expected help Content, got {other:?}")
-            }
+            },
         }
         assert_eq!(
             probe.native_calls.get(),
@@ -333,10 +341,10 @@ mod tests {
             } => {
                 assert_eq!(source, "manpage");
                 assert_eq!(children, vec!["build".to_owned(), "check".to_owned()]);
-            }
+            },
             other @ (Outcome::Native { .. } | Outcome::Empty) => {
                 panic!("expected manpage Content, got {other:?}")
-            }
+            },
         }
     }
 
@@ -351,7 +359,7 @@ mod tests {
             Outcome::Content { source, .. } => assert_eq!(source, "help"),
             other @ (Outcome::Native { .. } | Outcome::Empty) => {
                 panic!("expected help Content, got {other:?}")
-            }
+            },
         }
     }
 
@@ -381,10 +389,10 @@ mod tests {
         match resolve(&probe, "foo", &[]) {
             Outcome::Content { children, .. } => {
                 assert!(!children.contains(&"help".to_owned()));
-            }
+            },
             other @ (Outcome::Native { .. } | Outcome::Empty) => {
                 panic!("expected Content, got {other:?}")
-            }
+            },
         }
     }
 }
