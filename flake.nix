@@ -4,7 +4,7 @@
     { self, ... }@args:
     let
       inputs = import ./.tack { overrides = args.tackOverrides or { }; };
-      inherit (inputs) nixpkgs;
+      inherit (inputs) fenix nixpkgs;
       inherit (nixpkgs) lib;
       forAllSystems =
         f:
@@ -18,7 +18,7 @@
           packages = with pkgs; [
             rustc
             cargo
-            rustfmt
+            (fenix.packages.${pkgs.stdenv.hostPlatform.system}.latest.rustfmt or rustfmt)
             rust-analyzer
             clippy
           ];

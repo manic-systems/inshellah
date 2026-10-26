@@ -1,6 +1,15 @@
 {
   "$declared": {
+    "fenix": "github:nix-community/fenix",
     "nixpkgs": "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz"
+  },
+  "fenix": {
+    "type": "github",
+    "owner": "nix-community",
+    "repo": "fenix",
+    "rev": "44ec3e059cf1631403a0faca34106be5fdb17631",
+    "narHash": "sha256-uLMpwLKdV5U1966bkbe5DzC+5Gp8O6g+wjydKmih7zQ=",
+    "lastModified": 1792926139
   },
   "nixpkgs": {
     "type": "tarball",

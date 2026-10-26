@@ -30,3 +30,9 @@ recomposable = true
 
 [inputs.nixpkgs]
 url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz"
+
+[inputs.fenix]
+url = "github:nix-community/fenix"
+
+[inputs.fenix.follows]
+nixpkgs = "nixpkgs"
