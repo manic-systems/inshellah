@@ -12,7 +12,7 @@ def assert-eq [actual expected msg: string] {
 # from the Rust binary and covered by the `dynamic_complete` integration
 # test suite under tests/. What remains here is the shim contract: the
 # closure must read `^inshellah complete`'s JSON, pass through valid
-# results, and fall back to null on anything malformed or empty.
+# results, and fall back to null on anything malformed.
 
 let completer = $env.config.completions.external.completer
 
@@ -22,7 +22,12 @@ assert-eq ($pass_through | get 0.value) "--demo" "shim returns the binary's JSON
 
 "[]" | save --force $env.INSHELLAH_STATIC_FILE
 let empty_list = do $completer {command: [demo ""]}
-assert-eq $empty_list null "empty list collapses to null so nu's file completer can take over"
+assert-eq $empty_list [] "empty list stays empty so nu offers nothing"
+
+'{"completions":[{"value":"main","description":"branch"}],"fallback":true}' | save --force $env.INSHELLAH_STATIC_FILE
+let with_files = do $completer {command: [demo ""]}
+assert-eq $with_files.fallback true "fallback record passes through"
+assert-eq ($with_files.completions | get 0.value) "main" "fallback record keeps its completions"
 
 "null" | save --force $env.INSHELLAH_STATIC_FILE
 let null_payload = do $completer {command: [demo ""]}

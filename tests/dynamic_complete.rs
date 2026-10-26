@@ -166,7 +166,7 @@ fn parse_output(stdout: &str) -> Option<Vec<Cand>> {
         return None;
     }
     let json: serde_json::Value = serde_json::from_str(trimmed).expect("valid JSON");
-    let arr = json.as_array()?;
+    let arr = json.get("completions").unwrap_or(&json).as_array()?;
     let out: Vec<Cand> = arr
         .iter()
         .map(|item| {

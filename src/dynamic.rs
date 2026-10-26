@@ -23,6 +23,13 @@ use shared::{
     filter_candidates,
 };
 
+/// whether nushell's file completion joins a provider's candidates.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Files {
+    Replace,
+    Alongside,
+}
+
 /// what the word under the cursor fills.
 #[derive(Clone, Copy)]
 pub enum Slot<'span> {
@@ -67,7 +74,7 @@ pub fn dynamic_value_completions(
     rest: &[String],
     explicit_cmd_path: Option<&Path>,
     timeout_ms: u64,
-) -> Option<Vec<String>> {
+) -> Option<Vec<Candidate>> {
     let mut spans = Vec::with_capacity(rest.len() + 1);
     spans.push(cmd_name.to_owned());
     spans.extend_from_slice(rest);
@@ -83,8 +90,7 @@ pub fn dynamic_value_completions(
         explicit_cmd_path,
         slot: Slot::from_spans(&spans),
     };
-    let raw = providers::value_completions(&spans, &ctx)?;
-    Some(raw.into_iter().map(Candidate::into_json).collect())
+    providers::value_completions(&spans, &ctx)
 }
 
 /// like `dynamic_complete` but runs `explicit_cmd_path` instead of resolving
@@ -95,7 +101,7 @@ pub fn dynamic_complete_with_path(
     cfg: &Config,
 ) -> Option<Vec<String>> {
     dynamic_complete_candidates_with_path(spans, explicit_cmd_path, Slot::from_spans(spans), cfg)
-        .map(|candidates| candidates.into_iter().map(Candidate::into_json).collect())
+        .map(|(candidates, _)| candidates.into_iter().map(Candidate::into_json).collect())
 }
 
 pub fn dynamic_complete_candidates_with_path(
@@ -103,7 +109,7 @@ pub fn dynamic_complete_candidates_with_path(
     explicit_cmd_path: Option<&Path>,
     slot: Slot<'_>,
     cfg: &Config,
-) -> Option<Vec<Candidate>> {
+) -> Option<(Vec<Candidate>, Files)> {
     if spans.is_empty() {
         return None;
     }
@@ -119,14 +125,10 @@ pub fn dynamic_complete_candidates_with_path(
         explicit_cmd_path,
         slot,
     };
-    let raw = providers::dispatch(spans, &ctx)?;
+    let (raw, files, matching) = providers::dispatch(spans, &ctx)?;
     let last = spans.last().map_or("", String::as_str);
-    let filtered = filter_candidates(raw, last)?;
-    if filtered.is_empty() {
-        None
-    } else {
-        Some(filtered)
-    }
+    let filtered = filter_candidates(raw, last, matching)?;
+    (!filtered.is_empty()).then_some((filtered, files))
 }
 
 #[cfg(test)]
@@ -136,7 +138,10 @@ mod tests {
             kubectl::kubectl_scope,
             nix::looks_like_flake_pkg,
         },
-        shared::filter_candidates,
+        shared::{
+            Matching,
+            filter_candidates,
+        },
         *,
     };
 
@@ -165,13 +170,13 @@ mod tests {
     #[test]
     fn fuzzy_filter_drops_exact_subcommand_matches() {
         let items = vec![Candidate::new("show", "remote subcommand")];
-        assert!(filter_candidates(items, "show").is_none());
+        assert!(filter_candidates(items, "show", Matching::Value).is_none());
     }
 
     #[test]
     fn fuzzy_filter_keeps_exact_when_description_does_not_mark_subcommand() {
         let items = vec![Candidate::new("show", "shows things")];
-        let filtered = filter_candidates(items, "show").expect("non-empty");
+        let filtered = filter_candidates(items, "show", Matching::Value).expect("non-empty");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].value, "show");
     }
@@ -179,7 +184,7 @@ mod tests {
     #[test]
     fn fuzzy_filter_empty_prefix_keeps_all() {
         let items = vec![Candidate::new("first", "a"), Candidate::new("second", "b")];
-        let filtered = filter_candidates(items, "").expect("non-empty");
+        let filtered = filter_candidates(items, "", Matching::Value).expect("non-empty");
         assert_eq!(filtered.len(), 2);
     }
 

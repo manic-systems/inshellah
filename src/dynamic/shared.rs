@@ -21,6 +21,12 @@ use crate::{
 };
 
 #[derive(Clone, Copy)]
+pub enum Matching {
+    Value,
+    ValueOrDescription,
+}
+
+#[derive(Clone, Copy)]
 pub struct DynCtx<'span> {
     pub deadline:          Option<Instant>,
     pub limit:             usize,
@@ -108,7 +114,11 @@ where
 
 /// drop exact-match subcommand/external candidates so a typed-out word isn't
 /// echoed back, masking downstream completers.
-pub fn filter_candidates(items: Vec<Candidate>, prefix: &str) -> Option<Vec<Candidate>> {
+pub fn filter_candidates(
+    items: Vec<Candidate>,
+    prefix: &str,
+    matching: Matching,
+) -> Option<Vec<Candidate>> {
     if items.is_empty() {
         return None;
     }
@@ -117,7 +127,12 @@ pub fn filter_candidates(items: Vec<Candidate>, prefix: &str) -> Option<Vec<Cand
     }
     let mut scored: Vec<(i32, usize, Candidate)> = Vec::with_capacity(items.len());
     for (idx, item) in items.into_iter().enumerate() {
-        let score = fuzzy_score(prefix, &item.value);
+        let score = match matching {
+            Matching::Value => fuzzy_score(prefix, &item.value),
+            Matching::ValueOrDescription => {
+                fuzzy_score(prefix, &item.value).max(fuzzy_score(prefix, &item.description))
+            },
+        };
         if score <= 0 {
             continue;
         }

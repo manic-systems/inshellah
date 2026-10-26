@@ -18,12 +18,14 @@ use std::{
 use inshellah::{
     complete::{
         Candidate,
+        Response,
         choice_candidates,
         entry_for_flag,
         generate_candidates,
     },
     config::Config,
     dynamic::{
+        Files,
         Slot,
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
@@ -32,9 +34,12 @@ use inshellah::{
         probe::is_executable,
         resolve_command_path_and_cache,
     },
-    parsers::manpage::{
-        ManpageEntry,
-        ManpageResult,
+    parsers::{
+        manpage::{
+            ManpageEntry,
+            ManpageResult,
+        },
+        nushell::nushell_type_of_param,
     },
     store::{
         self,
@@ -62,8 +67,7 @@ pub fn run(
 
     let (spans, explicit_cmd_path) = strip_elevation(raw_spans, &dirs);
     if spans.is_empty() || (explicit_cmd_path.is_none() && find_in_path(&spans[0]).is_none()) {
-        println!("null");
-        return Ok(());
+        return print_response(&Response::Defer);
     }
 
     let cmd_name = spans[0].clone();
@@ -72,7 +76,7 @@ pub fn run(
     if let Some(candidates) =
         dynamic_value_completions(&cmd_name, &rest, explicit_cmd_path.as_deref(), timeout_ms)
     {
-        return print_completion_candidates(&candidates);
+        return print_response(&Response::or_defer(candidates));
     }
 
     let last_token = rest.last().cloned().unwrap_or_default();
@@ -135,7 +139,7 @@ pub fn run(
 
     let slot = cmd_path.slot;
     if let Some(candidates) = flag_value_choices(found.as_ref(), slot, &last_token, cfg) {
-        return print_completion_candidate_values(candidates);
+        return print_response(&Response::Candidates(candidates));
     }
 
     let resolve_depth = cmd_path.depth;
@@ -188,13 +192,12 @@ pub fn run(
             )
         })
         .flatten();
-    let output = match dyn_candidates {
-        Some(dynamic) if candidates.is_empty() || want_files => dynamic,
-        Some(dynamic) => merge_completion_candidates(dynamic, candidates, cfg.max_completions),
-        None if want_files => Vec::new(),
-        None => candidates,
-    };
-    print_completion_candidate_values(output)
+    print_response(&combine(
+        dyn_candidates,
+        candidates,
+        want_files,
+        cfg.max_completions,
+    ))
 }
 
 /// also search the binary's own prefix for manpages.
@@ -280,6 +283,27 @@ fn command_name_for_path(path: &Path) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn combine(
+    answer: Option<(Vec<Candidate>, Files)>,
+    candidates: Vec<Candidate>,
+    want_files: bool,
+    max_completions: usize,
+) -> Response {
+    match answer {
+        Some((dynamic, Files::Alongside)) if want_files => Response::WithFiles(dynamic),
+        Some((dynamic, _)) if candidates.is_empty() || want_files => Response::Candidates(dynamic),
+        Some((dynamic, _)) => {
+            Response::Candidates(merge_completion_candidates(
+                dynamic,
+                candidates,
+                max_completions,
+            ))
+        },
+        None if want_files => Response::Defer,
+        None => Response::or_defer(candidates),
+    }
+}
+
 fn merge_completion_candidates(
     first: Vec<Candidate>,
     second: Vec<Candidate>,
@@ -298,26 +322,8 @@ fn merge_completion_candidates(
     out
 }
 
-fn print_completion_candidate_values(candidates: Vec<Candidate>) -> io::Result<()> {
-    let json: Vec<String> = candidates.into_iter().map(Candidate::into_json).collect();
-    print_completion_candidates(&json)
-}
-
-// `null` is nushell's no-match form.
-fn print_completion_candidates(candidates: &[String]) -> io::Result<()> {
-    if candidates.is_empty() {
-        println!("null");
-        return Ok(());
-    }
-    let mut out = io::stdout().lock();
-    out.write_all(b"[")?;
-    for (idx, candidate) in candidates.iter().enumerate() {
-        if idx > 0 {
-            out.write_all(b",")?;
-        }
-        out.write_all(candidate.as_bytes())?;
-    }
-    out.write_all(b"]\n")
+fn print_response(response: &Response) -> io::Result<()> {
+    writeln!(io::stdout().lock(), "{response}")
 }
 
 /// value choices for `--flag val` and `--flag=val`.
@@ -337,8 +343,12 @@ fn flag_value_choices(
     };
     let (_, result, _) = found?;
     let param = entry_for_flag(result, flag)?.param.as_ref()?;
+    if param.choices.is_empty() {
+        return None;
+    }
     let candidates = choice_candidates(&param.choices, typed, &prefix, cfg);
-    (!candidates.is_empty()).then_some(candidates)
+    let takes_path = nushell_type_of_param(&param.name) == "path";
+    (!candidates.is_empty() || !takes_path).then_some(candidates)
 }
 
 fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {

@@ -21,8 +21,8 @@ inshellah index /usr --dir ~/my-completions
 ```
 
 then wire up the completer in `~/.config/nushell/config.nu`. the bundled
-shim is preferred because it treats invalid JSON, `null`, and empty lists as
-"let nushell fall back" instead of throwing during completion:
+shim is preferred because it treats invalid JSON as "let nushell fall back"
+instead of throwing during completion:
 
 ```nu
 source /path/to/inshellah-completer.nu
@@ -30,11 +30,12 @@ source /path/to/inshellah-completer.nu
 
 that's it. tab-completion now works for every command indexed.
 
-the external completer contract is explicit: `[...]` means inshellah is
-answering this position, and `null` means "let nushell decide". inshellah
-returns `null` for file-like leaf positions with no static or live
-provider candidates, so nushell's normal file completion remains the
-fallback.
+the external completer contract is explicit. `[...]` means inshellah is
+answering this position, and `[]` means nothing fits, such as a flag value
+outside its known set. `{completions: [...], fallback: true}` adds nushell's
+file completion beside the candidates, for git refs next to paths. `null`
+means "let nushell decide", returned for file-like leaf positions with no
+static or live provider candidates.
 
 ## commands
 

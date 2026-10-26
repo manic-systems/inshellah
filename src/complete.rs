@@ -48,6 +48,54 @@ impl Candidate {
     }
 }
 
+/// `Defer` prints `null`, `WithFiles` keeps nushell's file completion.
+pub enum Response {
+    Defer,
+    Candidates(Vec<Candidate>),
+    WithFiles(Vec<Candidate>),
+}
+
+impl Response {
+    pub fn or_defer(candidates: Vec<Candidate>) -> Self {
+        if candidates.is_empty() {
+            Self::Defer
+        } else {
+            Self::Candidates(candidates)
+        }
+    }
+}
+
+impl Display for Response {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let (candidates, with_files) = match self {
+            Self::Defer => return f.write_str("null"),
+            Self::WithFiles(candidates) if candidates.is_empty() => return f.write_str("null"),
+            Self::Candidates(candidates) => (candidates, false),
+            Self::WithFiles(candidates) => (candidates, true),
+        };
+        if with_files {
+            f.write_str(r#"{"completions":"#)?;
+        }
+        f.write_char('[')?;
+        for (idx, candidate) in candidates.iter().enumerate() {
+            if idx > 0 {
+                f.write_char(',')?;
+            }
+            write!(
+                f,
+                r#"{{"value":"{}","description":"{}"}}"#,
+                JsonEscaped(&candidate.value),
+                JsonEscaped(&candidate.description)
+            )?;
+        }
+        f.write_char(']')?;
+        if with_files {
+            f.write_str(r#","fallback":true}"#)?;
+        }
+        Ok(())
+    }
+}
+
 pub fn completion_json(value: &str, desc: &str) -> String {
     format!(
         r#"{{"value":"{}","description":"{}"}}"#,

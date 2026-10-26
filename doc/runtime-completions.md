@@ -36,10 +36,10 @@ too.
 source /path/to/inshellah-completer.nu
 ```
 
-the bundled shim wraps `inshellah complete` defensively: malformed JSON,
-`null`, and empty candidate lists return `null`, which lets nushell fall
-back to its normal file completion. a raw `| from json` example is shorter
-but can throw errors while tab-completing.
+the bundled shim wraps `inshellah complete` defensively: malformed JSON
+returns `null`, which lets nushell fall back to its normal file completion.
+a raw `| from json` example is shorter but can throw errors while
+tab-completing.
 
 with the nixos module, no extra config is needed beyond enabling the
 module — the wrapper has the system paths baked in.

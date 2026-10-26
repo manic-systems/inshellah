@@ -6,6 +6,7 @@ use crate::{
     complete::Candidate,
     dynamic::shared::{
         DynCtx,
+        Matching,
         filter_candidates,
         run_with,
     },
@@ -27,7 +28,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
 
     let mut widened = head.to_vec();
     widened.push(String::new());
-    filter_candidates(native(&widened, ctx)?, word)
+    filter_candidates(native(&widened, ctx)?, word, Matching::Value)
 }
 
 fn native(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {

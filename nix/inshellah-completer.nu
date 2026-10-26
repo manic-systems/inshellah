@@ -23,20 +23,13 @@ let inshellah_max_results = do {
 def inshellah-complete-spans [spans: list<string>] {
     try {
         let completed = (^inshellah complete ...$spans | complete)
-        if $completed.exit_code != 0 {
-            null
-        } else {
-            let parsed = (try { $completed.stdout | from json } catch { null })
-            if $parsed == null {
-                null
-            } else {
-                let parsed_type = ($parsed | describe)
-                if (($parsed_type | str starts-with "list") or ($parsed_type | str starts-with "table")) {
-                    if ($parsed | is-empty) { null } else { $parsed }
-                } else {
-                    null
-                }
-            }
+        if $completed.exit_code != 0 { return null }
+        let parsed = ($completed.stdout | from json)
+        let kind = { describe | str replace --regex '<.*' '' }
+        match ($parsed | do $kind) {
+            list | table => $parsed
+            record if ($parsed.completions? | do $kind) in [list table] => $parsed
+            _ => null
         }
     } catch {
         null

@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: EUPL-1.2
 use crate::{
     complete::Candidate,
-    dynamic::shared::DynCtx,
+    dynamic::{
+        Files,
+        shared::{
+            DynCtx,
+            Matching,
+        },
+    },
 };
 
 pub mod adb;
@@ -28,12 +34,16 @@ enum Kind {
 trait Provider {
     fn commands(&self) -> &'static [&'static str];
     fn kind(&self) -> Kind;
+    fn files(&self) -> Files;
+    fn matching(&self) -> Matching;
     fn complete(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>>;
 }
 
 struct FunctionProvider {
     commands: &'static [&'static str],
     kind:     Kind,
+    files:    Files,
+    matching: Matching,
     complete: CompleteFn,
 }
 
@@ -46,6 +56,14 @@ impl Provider for FunctionProvider {
         self.kind
     }
 
+    fn files(&self) -> Files {
+        self.files
+    }
+
+    fn matching(&self) -> Matching {
+        self.matching
+    }
+
     fn complete(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
         (self.complete)(spans, ctx)
     }
@@ -55,11 +73,15 @@ const PROVIDERS: &[FunctionProvider] = &[
     FunctionProvider {
         commands: &["adb"],
         kind:     Kind::Value,
+        files:    Files::Replace,
+        matching: Matching::Value,
         complete: adb::complete,
     },
     FunctionProvider {
         commands: &["nix"],
         kind:     Kind::Fallback,
+        files:    Files::Alongside,
+        matching: Matching::Value,
         complete: nix::complete,
     },
     FunctionProvider {
@@ -72,41 +94,64 @@ const PROVIDERS: &[FunctionProvider] = &[
             "networkctl",
         ],
         kind:     Kind::Fallback,
+        files:    Files::Replace,
+        matching: Matching::Value,
         complete: systemd::complete,
     },
     FunctionProvider {
-        commands: &["ssh", "scp", "sftp"],
+        commands: &["ssh", "sftp"],
         kind:     Kind::Fallback,
+        files:    Files::Replace,
+        matching: Matching::Value,
+        complete: ssh::complete,
+    },
+    FunctionProvider {
+        commands: &["scp"],
+        kind:     Kind::Fallback,
+        files:    Files::Alongside,
+        matching: Matching::Value,
         complete: ssh::complete,
     },
     FunctionProvider {
         commands: &["docker", "podman"],
         kind:     Kind::Fallback,
+        files:    Files::Replace,
+        matching: Matching::Value,
         complete: containers::complete,
     },
     FunctionProvider {
         commands: &["kubectl"],
         kind:     Kind::Fallback,
+        files:    Files::Replace,
+        matching: Matching::Value,
         complete: kubectl::complete,
     },
     FunctionProvider {
         commands: &["git"],
         kind:     Kind::Fallback,
+        files:    Files::Alongside,
+        matching: Matching::Value,
         complete: git::complete,
     },
     FunctionProvider {
         commands: &["jj"],
         kind:     Kind::Value,
+        files:    Files::Replace,
+        matching: Matching::Value,
         complete: jj::complete,
     },
     FunctionProvider {
         commands: &["npm", "pnpm", "yarn", "make", "just", "cargo", "zig"],
         kind:     Kind::Fallback,
+        files:    Files::Replace,
+        matching: Matching::Value,
         complete: project::complete,
     },
     FunctionProvider {
         commands: &["kill", "pkill"],
         kind:     Kind::Fallback,
+        files:    Files::Replace,
+        matching: Matching::ValueOrDescription,
         complete: process::complete,
     },
 ];
@@ -119,10 +164,11 @@ fn provider_for(cmd: &str, kind: Kind) -> Option<&'static FunctionProvider> {
 
 /// fallback providers, called when static completion was empty. value providers
 /// answer earlier via `value_completions`.
-pub fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
+pub fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<(Vec<Candidate>, Files, Matching)> {
     let cmd = spans.first()?.as_str();
     let provider = provider_for(cmd, Kind::Fallback)?;
-    provider.complete(spans, ctx)
+    let candidates = provider.complete(spans, ctx)?;
+    Some((candidates, provider.files(), provider.matching()))
 }
 
 /// value providers that answer before static flag completion. `Some` (even
