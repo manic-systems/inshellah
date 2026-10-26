@@ -156,7 +156,7 @@ fn cargo_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 fn zig_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if spans[1] != "build" {
+    if spans.get(1).map(String::as_str) != Some("build") {
         return None;
     }
 
