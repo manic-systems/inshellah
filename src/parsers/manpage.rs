@@ -14,15 +14,12 @@ use std::{
         HashSet,
     },
     fs,
-    io::{
-        self,
-        Read as _,
-    },
+    io,
     mem,
     path::Path,
 };
 
-use flate2::read::GzDecoder;
+use miniz_oxide::inflate::decompress_to_vec;
 
 use crate::{
     parsers::manpage::groff::{
@@ -461,14 +458,56 @@ where
 {
     let file = path.as_ref();
     let bytes = fs::read(file)?;
-    if file.extension().and_then(|ext| ext.to_str()) == Some("gz") {
-        let mut decoder = GzDecoder::new(&*bytes);
-        let mut out = String::new();
-        decoder.read_to_string(&mut out)?;
-        Ok(out)
+    let text = if file.extension().and_then(|ext| ext.to_str()) == Some("gz") {
+        gunzip(&bytes)?
     } else {
-        String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+        bytes
+    };
+    String::from_utf8(text).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+#[expect(
+    clippy::little_endian_bytes,
+    reason = "RFC 1952 stores XLEN little-endian"
+)]
+fn gunzip(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    const FHCRC: u8 = 0x02;
+    const FEXTRA: u8 = 0x04;
+    const FNAME: u8 = 0x08;
+    const FCOMMENT: u8 = 0x10;
+
+    let invalid =
+        |reason: &str| io::Error::new(io::ErrorKind::InvalidData, format!("gzip: {reason}"));
+    let Some((&[0x1F, 0x8B, 0x08, flags, ..], mut rest)) = bytes.split_first_chunk::<10>() else {
+        return Err(invalid("not a deflate gzip header"));
+    };
+
+    if flags & FEXTRA != 0 {
+        let (&len, tail) = rest
+            .split_first_chunk::<2>()
+            .ok_or_else(|| invalid("truncated extra field"))?;
+        rest = tail
+            .get(usize::from(u16::from_le_bytes(len))..)
+            .ok_or_else(|| invalid("truncated extra field"))?;
     }
+
+    for field in [FNAME, FCOMMENT] {
+        if flags & field != 0 {
+            let nul = rest
+                .iter()
+                .position(|&byte| byte == 0)
+                .ok_or_else(|| invalid("unterminated header string"))?;
+            rest = &rest[nul + 1..];
+        }
+    }
+
+    if flags & FHCRC != 0 {
+        rest = rest
+            .get(2..)
+            .ok_or_else(|| invalid("truncated header crc"))?;
+    }
+
+    decompress_to_vec(rest).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
 /// # Errors
