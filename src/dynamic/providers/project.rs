@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
+use std::fmt;
+
+use serde_core::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
+
 use super::super::shared::{Candidate, DynCtx, run};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
@@ -23,14 +27,66 @@ fn npm_like_completions(spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate
         return None;
     }
     let contents = std::fs::read_to_string("package.json").ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&contents).ok()?;
-    let scripts = parsed.get("scripts")?.as_object()?;
-    let mut candidates = Vec::new();
-    for (name, value) in scripts {
-        let desc = value.as_str().unwrap_or("");
-        candidates.push(Candidate::new(name, desc));
-    }
+    let Package(scripts) = serde_json::from_str(&contents).ok()?;
+    let Scripts(candidates) = scripts?;
     (!candidates.is_empty()).then_some(candidates)
+}
+
+// serde_json's `Value` sorts object keys, and scripts list in package.json order
+struct Package(Option<Scripts>);
+
+struct Scripts(Vec<Candidate>);
+
+impl<'de> Deserialize<'de> for Package {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PackageVisitor;
+
+        impl<'de> Visitor<'de> for PackageVisitor {
+            type Value = Package;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a package.json object")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Package, M::Error> {
+                let mut scripts = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "scripts" {
+                        scripts = Some(map.next_value()?);
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(Package(scripts))
+            }
+        }
+
+        deserializer.deserialize_map(PackageVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for Scripts {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ScriptsVisitor;
+
+        impl<'de> Visitor<'de> for ScriptsVisitor {
+            type Value = Scripts;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an object of scripts")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Scripts, M::Error> {
+                let mut candidates = Vec::new();
+                while let Some((name, command)) = map.next_entry::<String, serde_json::Value>()? {
+                    candidates.push(Candidate::new(name, command.as_str().unwrap_or("")));
+                }
+                Ok(Scripts(candidates))
+            }
+        }
+
+        deserializer.deserialize_map(ScriptsVisitor)
+    }
 }
 
 fn make_completions(spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate>> {

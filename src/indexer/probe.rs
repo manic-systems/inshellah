@@ -323,10 +323,11 @@ pub(super) fn remaining_ms(deadline: Instant) -> u64 {
 // the ECMA-48 escapes and the C0 controls a terminal acts on, keeping tab, LF and CR
 fn strip_ansi(text: &str) -> Cow<'_, str> {
     const ESC: u8 = 0x1b;
-
-    let bytes = text.as_bytes();
     let is_control =
         |byte: u8| (byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r')) || byte == 0x7f;
+
+    let bytes = text.as_bytes();
+    let byte = |idx: usize| bytes.get(idx).copied();
 
     // a branch-free fold per 32-byte chunk vectorizes, scanning 4x faster than `position`
     let next_control = |from: usize| {
@@ -348,7 +349,6 @@ fn strip_ansi(text: &str) -> Cow<'_, str> {
         return Cow::Borrowed(text);
     }
 
-    let byte = |idx: usize| bytes.get(idx).copied();
     let mut out = Vec::with_capacity(bytes.len());
     let mut start = 0;
     while at < bytes.len() {
