@@ -32,8 +32,13 @@ use inshellah::{
     dynamic::{
         Files,
         Slot,
+        adapters::{
+            Detection,
+            Protocol,
+        },
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
+        provider_kind,
     },
     indexer::{
         probe::is_executable,
@@ -54,8 +59,10 @@ use inshellah::{
         lookup,
         purge_command,
         read_exe,
+        read_fact,
         recent_miss,
         subcommands_of,
+        write_fact,
     },
 };
 
@@ -84,13 +91,14 @@ pub struct Decision {
 
 #[derive(Default)]
 pub struct Trace {
-    pub spans:   Vec<String>,
-    pub bin:     Option<PathBuf>,
-    pub dropped: Vec<(PathBuf, ExeIdentity)>,
-    pub path:    Vec<String>,
-    pub node:    Option<String>,
-    pub slot:    Option<String>,
-    pub dynamic: Option<usize>,
+    pub spans:    Vec<String>,
+    pub bin:      Option<PathBuf>,
+    pub dropped:  Vec<(PathBuf, ExeIdentity)>,
+    pub path:     Vec<String>,
+    pub node:     Option<String>,
+    pub slot:     Option<String>,
+    pub dynamic:  Option<usize>,
+    pub protocol: Option<Protocol>,
 }
 
 pub enum Reason {
@@ -235,6 +243,7 @@ pub fn decide(
     let want_files = !typing_flag
         && (slot != ArgSlot::Free
             || (!has_subs && (last_token.is_empty() || candidates.is_empty())));
+    trace.protocol = protocol_of(user_dir, &trace);
     // spans are post-elevation, so `sudo nix ...` reaches this as
     // `[nix, ...]` and hits the nix branch.
     let dyn_candidates = (!typing_flag || candidates.is_empty())
@@ -247,7 +256,8 @@ pub fn decide(
                     ArgSlot::AfterDoubleDash => Slot::Positional,
                     ArgSlot::Free => Slot::from_spans(&spans),
                 },
-                &value_flags(&dirs, &cmd_name, found.as_ref()),
+                &value_flags(lookup(&dirs, &cmd_name).as_ref(), found.as_ref()),
+                trace.protocol,
                 cfg,
             )
         })
@@ -504,14 +514,30 @@ fn flag_value_choices(
     (!candidates.is_empty() || !takes_path).then_some(candidates)
 }
 
+/// the protocol a provider-less traced binary answers, scanned once and cached.
+fn protocol_of(user_dir: &Path, trace: &Trace) -> Option<Protocol> {
+    let cmd_name = trace.spans.first()?;
+    if provider_kind(cmd_name).is_some() {
+        return None;
+    }
+    let bin = trace.bin.as_deref()?;
+    let exe = ExeIdentity::of(bin)?;
+    if let Some(Detection(cached)) = read_fact(user_dir, cmd_name, &exe) {
+        return cached;
+    }
+    let detection = Detection(Protocol::detect(bin));
+    // an uncached scan would reread a large binary on every Tab.
+    write_fact(user_dir, cmd_name, &exe, &detection)
+        .ok()
+        .and(detection.0)
+}
+
 /// value-taking flags of the root command and the resolved subcommand.
 fn value_flags(
-    dirs: &[PathBuf],
-    cmd_name: &str,
+    root: Option<&ManpageResult>,
     found: Option<&(String, ManpageResult, usize)>,
 ) -> Vec<String> {
-    let root = lookup(dirs, cmd_name);
-    let nodes = root.iter().chain(found.map(|(_, result, _)| result));
+    let nodes = root.into_iter().chain(found.map(|(_, result, _)| result));
     nodes
         .flat_map(|result| &result.entries)
         .filter(|entry| entry.takes_next_word())

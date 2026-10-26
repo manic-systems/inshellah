@@ -13,13 +13,16 @@ use std::{
 use crate::{
     complete::Candidate,
     config::Config,
+    dynamic::adapters::Protocol,
 };
 
+pub mod adapters;
 mod providers;
 mod shared;
 
 use shared::{
     DynCtx,
+    Matching,
     filter_candidates,
 };
 
@@ -41,8 +44,15 @@ pub enum Slot<'span> {
 }
 
 impl<'span> Slot<'span> {
-    /// guessed from the previous word alone, for callers without a cache.
+    /// guessed from the words alone, for callers without a cache.
     pub fn from_spans(spans: &'span [String]) -> Self {
+        let attached = spans
+            .last()
+            .and_then(|word| word.split_once('='))
+            .filter(|(flag, _)| flag.starts_with("--"));
+        if let Some((flag, _)) = attached {
+            return Self::FlagValue(flag);
+        }
         match spans.len().checked_sub(2).map(|at| spans[at].as_str()) {
             Some(prev) if prev.starts_with('-') && prev != "--" => Self::MaybeFlagValue(prev),
             _ => Self::Positional,
@@ -110,6 +120,7 @@ pub fn dynamic_complete_with_path(
         explicit_cmd_path,
         Slot::from_spans(spans),
         &[],
+        None,
         cfg,
     )
     .map(|(candidates, _)| candidates.into_iter().map(Candidate::into_json).collect())
@@ -120,6 +131,7 @@ pub fn dynamic_complete_candidates_with_path(
     explicit_cmd_path: Option<&Path>,
     slot: Slot<'_>,
     value_flags: &[String],
+    protocol: Option<Protocol>,
     cfg: &Config,
 ) -> Option<(Vec<Candidate>, Files)> {
     if spans.is_empty() {
@@ -138,10 +150,38 @@ pub fn dynamic_complete_candidates_with_path(
         slot,
         value_flags,
     };
-    let (raw, files, matching) = providers::dispatch(spans, &ctx)?;
+    let (mut raw, files, matching, from_program) =
+        if let Some((candidates, files, matching)) = providers::dispatch(spans, &ctx) {
+            (candidates, files, matching, false)
+        } else {
+            let (candidates, files) = protocol?.complete(spans, &ctx)?;
+            (candidates, files, Matching::Value, true)
+        };
+
     let last = spans.last().map_or("", String::as_str);
-    let filtered = filter_candidates(raw, last, matching)?;
-    (!filtered.is_empty()).then_some((filtered, files))
+    let (inline, needle) = match (ctx.slot, last.split_once('=')) {
+        (Slot::FlagValue(flag), Some((typed, value))) if typed == flag => {
+            (Some(format!("{flag}=")), value)
+        },
+        _ => (None, last),
+    };
+    if let Some(prefix) = &inline {
+        for candidate in &mut raw {
+            if let Some(bare) = candidate.value.strip_prefix(prefix.as_str()) {
+                candidate.value = bare.to_owned();
+            }
+        }
+    }
+
+    let mut filtered = filter_candidates(raw, needle, matching).unwrap_or_default();
+    if let Some(prefix) = &inline {
+        for candidate in &mut filtered {
+            candidate.value.insert_str(0, prefix);
+        }
+    }
+    // a program's own completer forbidding files answers even when empty.
+    let final_answer = from_program && files == Files::Replace;
+    (final_answer || !filtered.is_empty()).then_some((filtered, files))
 }
 
 #[cfg(test)]

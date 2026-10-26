@@ -96,7 +96,12 @@ pub fn run(
         writeln!(out, "slot      {slot}")?;
     }
     if let Some(cmd) = trace.spans.first() {
-        match (provider_kind(cmd), trace.dynamic) {
+        let answerer = provider_kind(cmd).map(ToOwned::to_owned).or_else(|| {
+            trace
+                .protocol
+                .map(|protocol| format!("{protocol} completer"))
+        });
+        match (answerer, trace.dynamic) {
             (Some(kind), Some(count)) => writeln!(out, "provider  {kind}, {count} candidate(s)")?,
             (Some(kind), None) => writeln!(out, "provider  {kind}, no answer")?,
             (None, _) => writeln!(out, "provider  none")?,

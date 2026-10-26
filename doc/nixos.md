@@ -219,6 +219,8 @@ snippet's nushell `max_results`.
 | `make` / `just` | targets and recipes |
 | `cargo` | workspace targets for `--bin`, `--example`, and related slots |
 | `kill` / `pkill` | pid and command pairs |
+| cobra programs | the program's own `__complete` |
+| clap `CompleteEnv` programs | the program's own completer via `COMPLETE=fish` |
 
 ## home manager and user-level package managers
 

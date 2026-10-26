@@ -442,6 +442,36 @@ pub fn recent_miss(dir: &Path, command: &str, exe: Option<&ExeIdentity>) -> bool
         && read_file(&path).is_some_and(|stored| stored.parse::<ExeIdentity>().ok().as_ref() == exe)
 }
 
+/// a binary's fact, cached beside its command until the binary changes.
+pub trait ExeFact: Display + FromStr {
+    const EXTENSION: &'static str;
+}
+
+/// # Errors
+/// fails when the sidecar write fails.
+pub fn write_fact<Fact>(dir: &Path, command: &str, exe: &ExeIdentity, fact: &Fact) -> io::Result<()>
+where
+    Fact: ExeFact,
+{
+    let base = filename_of_command(command);
+    write_file(
+        &dir.join(format!("{base}.{}", Fact::EXTENSION)),
+        &format!("{fact}\t{exe}"),
+    )
+}
+
+pub fn read_fact<Fact>(dir: &Path, command: &str, exe: &ExeIdentity) -> Option<Fact>
+where
+    Fact: ExeFact,
+{
+    let base = filename_of_command(command);
+    let stored = read_file(&dir.join(format!("{base}.{}", Fact::EXTENSION)))?;
+    let (fact, identity) = stored.split_once('\t')?;
+    (identity.parse::<ExeIdentity>().ok()? == *exe)
+        .then(|| fact.parse().ok())
+        .flatten()
+}
+
 /// remove `command`'s entries and its subcommands', returning how many went.
 ///
 /// # Errors
@@ -464,7 +494,7 @@ pub fn purge_command(dir: &Path, command: &str) -> io::Result<usize> {
         let cache_ext = path
             .extension()
             .and_then(OsStr::to_str)
-            .is_some_and(|ext| matches!(ext, "json" | "nu" | "exe" | "miss"));
+            .is_some_and(|ext| matches!(ext, "json" | "nu" | "exe" | "miss" | "protocol"));
         if owned && cache_ext && path.is_file() {
             fs::remove_file(&path)?;
             removed += 1;
@@ -739,6 +769,7 @@ pub fn purge_dir(dir: &Path) -> io::Result<usize> {
                 chop_extension(name)
                     .or_else(|| name.strip_suffix(".exe"))
                     .or_else(|| name.strip_suffix(".miss"))
+                    .or_else(|| name.strip_suffix(".protocol"))
             })
             .is_some();
         if is_cache_file && path.is_file() {

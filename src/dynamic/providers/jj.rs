@@ -4,18 +4,20 @@
 
 use crate::{
     complete::Candidate,
-    dynamic::shared::{
-        DynCtx,
-        Matching,
-        Words,
-        filter_candidates,
-        run_with,
+    dynamic::{
+        adapters::clap,
+        shared::{
+            DynCtx,
+            Matching,
+            Words,
+            filter_candidates,
+        },
     },
 };
 
 pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let spans = words.spans();
-    if let Some(candidates) = native(spans, ctx) {
+    if let Some(candidates) = clap(spans, ctx) {
         return Some(candidates);
     }
 
@@ -30,25 +32,5 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
 
     let mut widened = head.to_vec();
     widened.push(String::new());
-    filter_candidates(native(&widened, ctx)?, word, Matching::Value)
-}
-
-fn native(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args = vec![ctx.bin("jj"), "--".to_owned()];
-    args.extend_from_slice(spans);
-
-    let out = run_with(&args, ctx, |cmd| {
-        cmd.env("COMPLETE", "fish");
-    })?;
-
-    let candidates: Vec<Candidate> = out
-        .lines()
-        .filter_map(|line| {
-            let (raw_value, description) = line.split_once('\t').unwrap_or((line, ""));
-            let value = raw_value.trim_end();
-            (!value.is_empty()).then(|| Candidate::new(value, description.trim()))
-        })
-        .collect();
-
-    (!candidates.is_empty()).then_some(candidates)
+    filter_candidates(clap(&widened, ctx)?, word, Matching::Value)
 }

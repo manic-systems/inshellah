@@ -157,6 +157,12 @@ with `null`.
 | `cargo` | workspace targets for `--bin`, `--example`, and related slots |
 | `zig` | build.zig steps |
 | `kill` / `pkill` | pid and command pairs |
+| cobra programs | the program's own `__complete` |
+| clap `CompleteEnv` programs | the program's own completer via `COMPLETE=fish` |
+
+commands without a provider are checked for cobra or clap's `CompleteEnv`
+by reading the binary for strings those libraries compile in. a binary is
+never run to find out. the result is cached per binary in the user cache.
 
 ## macOS developer toolchain
 

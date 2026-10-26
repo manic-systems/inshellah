@@ -64,29 +64,18 @@ const fn is_scannable_magic(magic: [u8; 4]) -> bool {
     }
 }
 
-// read failure reports all needles so the caller falls back to --help rather
-// than skipping.
-fn image_scan(path: &Path, needles: &[&str]) -> HashSet<String> {
+/// the needles a binary image holds, None when it cannot be read.
+fn image_scan(path: &Path, needles: &[&str]) -> Option<HashSet<String>> {
     let mut found: HashSet<String> = HashSet::new();
-    let Ok(real) = fs::canonicalize(path) else {
-        for n in needles {
-            found.insert((*n).to_owned());
-        }
-        return found;
-    };
-    let Ok(mut file) = fs::File::open(&real) else {
-        for n in needles {
-            found.insert((*n).to_owned());
-        }
-        return found;
-    };
+    let real = fs::canonicalize(path).ok()?;
+    let mut file = fs::File::open(&real).ok()?;
     let mut magic = [0_u8; 4];
     if file.read_exact(&mut magic).is_err() {
-        return found;
+        return Some(found);
     }
     if !is_scannable_magic(magic) {
         // empty lets the caller decide
-        return found;
+        return Some(found);
     }
     let max_needle = needles.iter().map(|needle| needle.len()).max().unwrap_or(0);
     let chunk_size = 64 * 1024_usize;
@@ -121,7 +110,19 @@ fn image_scan(path: &Path, needles: &[&str]) -> HashSet<String> {
         buf.copy_within(total - new_carry..total, 0);
         carry = new_carry;
     }
-    found
+    Some(found)
+}
+
+/// the real image behind a nix wrapper, else `full` itself.
+pub fn image_behind(full: &Path) -> PathBuf {
+    nix_wrapper_target(full)
+        .or_else(|| nix_script_wrapper_target(full))
+        .unwrap_or_else(|| full.to_path_buf())
+}
+
+/// the needles the image behind `full` holds, empty when it cannot be read.
+pub fn image_strings(full: &Path, needles: &[&str]) -> HashSet<String> {
+    image_scan(&image_behind(full), needles).unwrap_or_default()
 }
 
 fn read_to_string_capped(path: &Path, cap: usize) -> Option<String> {
@@ -198,8 +199,12 @@ pub(super) enum Classify {
     Skip,
 }
 
+// read failure reports all needles so the caller falls back to --help rather
+// than skipping.
 fn classify_image(path: &Path) -> Classify {
-    let found = image_scan(path, &["-h", "--help", "complet"]);
+    let needles = ["-h", "--help", "complet"];
+    let found = image_scan(path, &needles)
+        .unwrap_or_else(|| needles.iter().map(|needle| (*needle).to_owned()).collect());
     if found.contains("complet") {
         Classify::HasNativeCompletions
     } else if found.contains("-h") || found.contains("--help") {
@@ -213,13 +218,7 @@ pub(super) fn classify_binary(_bindir: &Path, full: &Path) -> Classify {
     if is_script(full) {
         return Classify::TryHelp;
     }
-    if let Some(target) = nix_wrapper_target(full) {
-        return classify_image(&target);
-    }
-    if let Some(target) = nix_script_wrapper_target(full) {
-        return classify_image(&target);
-    }
-    classify_image(full)
+    classify_image(&image_behind(full))
 }
 
 // skips the positional `help` variant: unlikely to differ, extra spawn
