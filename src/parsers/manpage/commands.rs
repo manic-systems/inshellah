@@ -207,7 +207,7 @@ fn shared_dash_prefix<'a>(tokens: impl Iterator<Item = &'a str>) -> String {
             .take_while(|(a, b)| a == b)
             .count();
     }
-    let common = &first[..len];
+    let common = &first[..first.floor_char_boundary(len)];
     match common.rfind('-') {
         Some(idx) => common[..=idx].to_string(),
         None => String::new(),
