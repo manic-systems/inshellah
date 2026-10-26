@@ -22,7 +22,6 @@ mod shared;
 
 use shared::{
     DynCtx,
-    Matching,
     filter_candidates,
 };
 
@@ -31,6 +30,14 @@ use shared::{
 pub enum Files {
     Replace,
     Alongside,
+    /// no files even when the candidates run out, so an empty answer is final.
+    Never,
+}
+
+/// what a provider or a program's own completer offers.
+pub struct Answer {
+    pub candidates: Vec<Candidate>,
+    pub files:      Files,
 }
 
 /// what the word under the cursor fills.
@@ -123,7 +130,13 @@ pub fn dynamic_complete_with_path(
         None,
         cfg,
     )
-    .map(|(candidates, _)| candidates.into_iter().map(Candidate::into_json).collect())
+    .map(|answer| {
+        answer
+            .candidates
+            .into_iter()
+            .map(Candidate::into_json)
+            .collect()
+    })
 }
 
 pub fn dynamic_complete_candidates_with_path(
@@ -133,7 +146,7 @@ pub fn dynamic_complete_candidates_with_path(
     value_flags: &[String],
     protocol: Option<Protocol>,
     cfg: &Config,
-) -> Option<(Vec<Candidate>, Files)> {
+) -> Option<Answer> {
     if spans.is_empty() {
         return None;
     }
@@ -150,13 +163,10 @@ pub fn dynamic_complete_candidates_with_path(
         slot,
         value_flags,
     };
-    let (mut raw, files, matching, from_program) =
-        if let Some((candidates, files, matching)) = providers::dispatch(spans, &ctx) {
-            (candidates, files, matching, false)
-        } else {
-            let (candidates, files) = protocol?.complete(spans, &ctx)?;
-            (candidates, files, Matching::Value, true)
-        };
+    let Answer {
+        candidates: mut raw,
+        files,
+    } = providers::dispatch(spans, &ctx).or_else(|| protocol?.complete(spans, &ctx))?;
 
     let last = spans.last().map_or("", String::as_str);
     let (inline, needle) = match (ctx.slot, last.split_once('=')) {
@@ -173,15 +183,17 @@ pub fn dynamic_complete_candidates_with_path(
         }
     }
 
+    let matching = providers::matching_of(&spans[0]);
     let mut filtered = filter_candidates(raw, needle, matching).unwrap_or_default();
     if let Some(prefix) = &inline {
         for candidate in &mut filtered {
             candidate.value.insert_str(0, prefix);
         }
     }
-    // a program's own completer forbidding files answers even when empty.
-    let final_answer = from_program && files == Files::Replace;
-    (final_answer || !filtered.is_empty()).then_some((filtered, files))
+    (files == Files::Never || !filtered.is_empty()).then_some(Answer {
+        candidates: filtered,
+        files,
+    })
 }
 
 #[cfg(test)]

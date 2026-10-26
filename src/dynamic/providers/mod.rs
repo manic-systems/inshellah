@@ -2,6 +2,7 @@
 use crate::{
     complete::Candidate,
     dynamic::{
+        Answer,
         Files,
         shared::{
             DynCtx,
@@ -258,11 +259,18 @@ pub fn kind_of(cmd: &str) -> Option<&'static str> {
 
 /// fallback providers, called when static completion was empty. value providers
 /// answer earlier via `value_completions`.
-pub fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<(Vec<Candidate>, Files, Matching)> {
+pub fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<Answer> {
     let cmd = spans.first()?.as_str();
     let provider = provider_for(cmd, Kind::Fallback)?;
-    let candidates = provider.complete(spans, ctx)?;
-    Some((candidates, provider.files(), provider.matching()))
+    Some(Answer {
+        candidates: provider.complete(spans, ctx)?,
+        files:      provider.files(),
+    })
+}
+
+/// a provider's own matching rule, plain value matching otherwise.
+pub fn matching_of(cmd: &str) -> Matching {
+    provider_for(cmd, Kind::Fallback).map_or(Matching::Value, Provider::matching)
 }
 
 /// value providers that answer before static flag completion. `Some` (even

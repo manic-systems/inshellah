@@ -14,6 +14,7 @@ use std::{
 use crate::{
     complete::Candidate,
     dynamic::{
+        Answer,
         Files,
         shared::{
             DynCtx,
@@ -105,19 +106,22 @@ impl Protocol {
         })
     }
 
-    pub(super) fn complete(
-        self,
-        spans: &[String],
-        ctx: &DynCtx,
-    ) -> Option<(Vec<Candidate>, Files)> {
+    pub(super) fn complete(self, spans: &[String], ctx: &DynCtx) -> Option<Answer> {
         match self {
             Self::Cobra => cobra(spans, ctx),
-            Self::Clap => clap(spans, ctx).map(|candidates| (candidates, Files::Replace)),
+            Self::Clap => {
+                clap(spans, ctx).map(|candidates| {
+                    Answer {
+                        candidates,
+                        files: Files::Replace,
+                    }
+                })
+            },
         }
     }
 }
 
-fn cobra(spans: &[String], ctx: &DynCtx) -> Option<(Vec<Candidate>, Files)> {
+fn cobra(spans: &[String], ctx: &DynCtx) -> Option<Answer> {
     let mut args = vec![ctx.bin(ctx.cmd_name), "__complete".to_owned()];
     args.extend_from_slice(spans.get(1..)?);
 
@@ -140,9 +144,9 @@ fn cobra(spans: &[String], ctx: &DynCtx) -> Option<(Vec<Candidate>, Files)> {
     let files = if directive & COBRA_NO_FILE_COMP == 0 {
         Files::Alongside
     } else {
-        Files::Replace
+        Files::Never
     };
-    Some((candidates, files))
+    Some(Answer { candidates, files })
 }
 
 pub(super) fn clap(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {

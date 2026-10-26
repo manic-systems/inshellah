@@ -51,12 +51,12 @@ pub fn run(
         },
         None => writeln!(out, "binary    not on PATH")?,
     }
-    for (dir, stored) in &trace.dropped {
+    for stale in &trace.dropped {
         writeln!(
             out,
             "stale     {} came from {}",
-            dir.display(),
-            stored.path().display()
+            stale.dir.display(),
+            stale.stored.path().display()
         )?;
     }
     if !trace.path.is_empty() {
@@ -65,7 +65,7 @@ pub fn run(
 
     let dirs = iter::once(user_dir)
         .chain(system_dirs.iter().map(PathBuf::as_path))
-        .filter(|dir| !trace.dropped.iter().any(|(stale, _)| stale == dir));
+        .filter(|dir| !trace.dropped.iter().any(|stale| stale.dir == *dir));
     match &trace.node {
         Some(node) => {
             let hit = dirs.into_iter().find_map(|dir| {

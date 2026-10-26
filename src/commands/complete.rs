@@ -30,6 +30,7 @@ use inshellah::{
     },
     config::Config,
     dynamic::{
+        Answer,
         Files,
         Slot,
         adapters::{
@@ -93,12 +94,25 @@ pub struct Decision {
 pub struct Trace {
     pub spans:    Vec<String>,
     pub bin:      Option<PathBuf>,
-    pub dropped:  Vec<(PathBuf, ExeIdentity)>,
+    pub dropped:  Vec<Stale>,
     pub path:     Vec<String>,
     pub node:     Option<String>,
     pub slot:     Option<String>,
     pub dynamic:  Option<usize>,
     pub protocol: Option<Protocol>,
+}
+
+/// a cache dir whose entries came from another binary.
+pub struct Stale {
+    pub dir:    PathBuf,
+    pub stored: ExeIdentity,
+}
+
+/// the deepest cached command for the typed path.
+pub struct Node {
+    name:   String,
+    result: ManpageResult,
+    depth:  usize,
 }
 
 pub enum Reason {
@@ -161,8 +175,7 @@ pub fn decide(
     trace.bin = explicit_cmd_path
         .clone()
         .or_else(|| find_in_path(&cmd_name));
-    let (dirs, dropped) = dirs_for_binary(all_dirs, user_dir, &cmd_name, trace.bin.as_deref());
-    trace.dropped = dropped;
+    let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, &mut trace);
 
     if let Some(candidates) =
         dynamic_value_completions(&cmd_name, &rest, explicit_cmd_path.as_deref(), timeout_ms)
@@ -193,7 +206,7 @@ pub fn decide(
         ttl_secs: cfg.cache_ttl_secs,
     });
     trace.path.clone_from(&cmd_path.path);
-    trace.node = found.as_ref().map(|(name, ..)| name.clone());
+    trace.node = found.as_ref().map(|node| node.name.clone());
 
     let slot = cmd_path.slot;
     trace.slot = Some(match slot {
@@ -212,23 +225,21 @@ pub fn decide(
     let resolve_depth = cmd_path.depth;
     let typing_flag = slot == ArgSlot::Free && cfg.triggers_flags(&last_token);
     let fallback_subcommands = match &found {
-        Some((matched_name, result, _)) if result.subcommands.is_empty() => {
-            subcommands_of(&dirs, matched_name)
-        },
+        Some(node) if node.result.subcommands.is_empty() => subcommands_of(&dirs, &node.name),
         _ => Vec::new(),
     };
     // positional value choices (getent databases) fill the same slot as
     // subcommands, so they suppress the file/dynamic handoff too.
-    let has_subs = found.as_ref().is_some_and(|(_, result, _)| {
-        !result.subcommands.is_empty()
-            || !result.positional_choices.is_empty()
+    let has_subs = found.as_ref().is_some_and(|node| {
+        !node.result.subcommands.is_empty()
+            || !node.result.positional_choices.is_empty()
             || !fallback_subcommands.is_empty()
     });
     let candidates: Vec<Candidate> = match &found {
-        Some((_, result, depth)) if slot == ArgSlot::Free => {
+        Some(node) if slot == ArgSlot::Free => {
             generate_candidates(
-                result,
-                *depth,
+                &node.result,
+                node.depth,
                 resolve_depth,
                 &last_token,
                 &fallback_subcommands,
@@ -262,7 +273,9 @@ pub fn decide(
             )
         })
         .flatten();
-    trace.dynamic = dyn_candidates.as_ref().map(|(dynamic, _)| dynamic.len());
+    trace.dynamic = dyn_candidates
+        .as_ref()
+        .map(|answer| answer.candidates.len());
     let (response, reason) = combine(dyn_candidates, candidates, want_files, cfg.max_completions);
     Decision {
         response,
@@ -283,16 +296,20 @@ struct Resolve<'ctx> {
 }
 
 /// the deepest cached node for the typed path, resolving missing or stale ones.
-fn resolve_node<'ctx>(
-    ctx: &Resolve<'ctx>,
-) -> (CommandPath<'ctx>, Option<(String, ManpageResult, usize)>) {
+fn resolve_node<'ctx>(ctx: &Resolve<'ctx>) -> (CommandPath<'ctx>, Option<Node>) {
     let mut cmd_path = command_path(ctx.dirs, None, ctx.cmd_name, ctx.rest);
 
     // try longest-prefix match: "git stash apply" -> "git stash" -> "git"
-    let find_result = |path: &[String]| -> Option<(String, ManpageResult, usize)> {
+    let find_result = |path: &[String]| -> Option<Node> {
         (1..=path.len()).rev().find_map(|len| {
             let name = path[..len].join(" ");
-            lookup(ctx.dirs, &name).map(|result| (name, result, len))
+            lookup(ctx.dirs, &name).map(|result| {
+                Node {
+                    name,
+                    result,
+                    depth: len,
+                }
+            })
         })
     };
 
@@ -302,7 +319,7 @@ fn resolve_node<'ctx>(
         && (cache_is_stale(ctx.user_dir, found.as_ref(), ctx.ttl_secs)
             || found
                 .as_ref()
-                .is_none_or(|(_, _, depth)| *depth < cmd_path.path.len()))
+                .is_none_or(|node| node.depth < cmd_path.path.len()))
         && !recent_miss(ctx.user_dir, &cmd_path.path.join(" "), exe.as_ref())
     {
         let Some(result) = resolve_command_path_and_cache(
@@ -319,10 +336,14 @@ fn resolve_node<'ctx>(
         };
         let resolved_len = cmd_path.path.len();
         let probed = cmd_path.probe;
-        found = Some((cmd_path.path.join(" "), result, resolved_len));
+        found = Some(Node {
+            name: cmd_path.path.join(" "),
+            result,
+            depth: resolved_len,
+        });
         let fresh = found
             .as_ref()
-            .map(|(name, cached, _)| (name.as_str(), cached));
+            .map(|node| (node.name.as_str(), &node.result));
         cmd_path = command_path(ctx.dirs, fresh, ctx.cmd_name, ctx.rest);
         // a probe's --help can echo the parent's, which caches it as a group
         // and would license another probe one word deeper.
@@ -330,7 +351,7 @@ fn resolve_node<'ctx>(
             break;
         }
         if let Some(hit) = find_result(&cmd_path.path)
-            && hit.2 > resolved_len
+            && hit.depth > resolved_len
         {
             found = Some(hit);
         }
@@ -338,28 +359,28 @@ fn resolve_node<'ctx>(
     (cmd_path, found)
 }
 
-/// dirs whose `cmd_name` entries match `bin`, purging stale user-cache ones.
+/// dirs matching the traced binary, purging stale user-cache entries.
 fn dirs_for_binary(
     dirs: Vec<PathBuf>,
     user_dir: &Path,
     cmd_name: &str,
-    bin: Option<&Path>,
-) -> (Vec<PathBuf>, Vec<(PathBuf, ExeIdentity)>) {
-    let Some(identity) = bin.and_then(ExeIdentity::of) else {
-        return (dirs, Vec::new());
+    trace: &mut Trace,
+) -> Vec<PathBuf> {
+    let Some(identity) = trace.bin.as_deref().and_then(ExeIdentity::of) else {
+        return dirs;
     };
-    let mut dropped = Vec::new();
-    let kept = dirs
-        .into_iter()
+    dirs.into_iter()
         .filter(|dir| {
             let Some(stored) = read_exe(dir, cmd_name).filter(|stored| *stored != identity) else {
                 return true;
             };
-            dropped.push((dir.clone(), stored));
+            trace.dropped.push(Stale {
+                dir: dir.clone(),
+                stored,
+            });
             dir == user_dir && purge_command(dir, cmd_name).is_ok()
         })
-        .collect();
-    (kept, dropped)
+        .collect()
 }
 
 /// also search the binary's own prefix for manpages.
@@ -446,29 +467,42 @@ fn command_name_for_path(path: &Path) -> Option<String> {
 }
 
 fn combine(
-    answer: Option<(Vec<Candidate>, Files)>,
+    provided: Option<Answer>,
     candidates: Vec<Candidate>,
     want_files: bool,
     max_completions: usize,
 ) -> (Response, Reason) {
-    match answer {
-        Some((dynamic, Files::Alongside)) if want_files => {
-            (Response::WithFiles(dynamic), Reason::ProviderWithFiles)
-        },
-        Some((dynamic, _)) if want_files => {
-            (Response::Candidates(dynamic), Reason::ProviderOverFiles)
-        },
-        Some((dynamic, _)) if candidates.is_empty() => {
-            (Response::Candidates(dynamic), Reason::Provider)
-        },
-        Some((dynamic, _)) => {
-            let merged = merge_completion_candidates(dynamic, candidates, max_completions);
-            (Response::Candidates(merged), Reason::Merged)
-        },
-        None if want_files => (Response::Defer, Reason::Files),
-        None if candidates.is_empty() => (Response::Defer, Reason::Nothing),
-        None => (Response::Candidates(candidates), Reason::Static),
+    let Some(answer) = provided else {
+        return if want_files {
+            (Response::Defer, Reason::Files)
+        } else if candidates.is_empty() {
+            (Response::Defer, Reason::Nothing)
+        } else {
+            (Response::Candidates(candidates), Reason::Static)
+        };
+    };
+
+    if want_files {
+        return match answer.files {
+            Files::Alongside => {
+                (
+                    Response::WithFiles(answer.candidates),
+                    Reason::ProviderWithFiles,
+                )
+            },
+            Files::Replace | Files::Never => {
+                (
+                    Response::Candidates(answer.candidates),
+                    Reason::ProviderOverFiles,
+                )
+            },
+        };
     }
+    if candidates.is_empty() {
+        return (Response::Candidates(answer.candidates), Reason::Provider);
+    }
+    let merged = merge_completion_candidates(answer.candidates, candidates, max_completions);
+    (Response::Candidates(merged), Reason::Merged)
 }
 
 fn merge_completion_candidates(
@@ -491,7 +525,7 @@ fn merge_completion_candidates(
 
 /// value choices for `--flag val` and `--flag=val`.
 fn flag_value_choices(
-    found: Option<&(String, ManpageResult, usize)>,
+    found: Option<&Node>,
     slot: ArgSlot<'_>,
     last_token: &str,
     cfg: &Config,
@@ -504,8 +538,7 @@ fn flag_value_choices(
         },
         ArgSlot::Free | ArgSlot::AfterDoubleDash => return None,
     };
-    let (_, result, _) = found?;
-    let param = entry_for_flag(result, flag)?.param.as_ref()?;
+    let param = entry_for_flag(&found?.result, flag)?.param.as_ref()?;
     if param.choices.is_empty() {
         return None;
     }
@@ -533,11 +566,8 @@ fn protocol_of(user_dir: &Path, trace: &Trace) -> Option<Protocol> {
 }
 
 /// value-taking flags of the root command and the resolved subcommand.
-fn value_flags(
-    root: Option<&ManpageResult>,
-    found: Option<&(String, ManpageResult, usize)>,
-) -> Vec<String> {
-    let nodes = root.into_iter().chain(found.map(|(_, result, _)| result));
+fn value_flags(root: Option<&ManpageResult>, found: Option<&Node>) -> Vec<String> {
+    let nodes = root.into_iter().chain(found.map(|node| &node.result));
     nodes
         .flat_map(|result| &result.entries)
         .filter(|entry| entry.takes_next_word())
@@ -669,14 +699,10 @@ fn listed_subcommand(result: &ManpageResult, token: &str) -> Option<String> {
 
 // a user-cache set is stale when its newest file is older than the ttl. ttl 0
 // disables; system-dir hits aren't in the user cache so they never go stale.
-fn cache_is_stale(
-    user_dir: &Path,
-    found: Option<&(String, ManpageResult, usize)>,
-    ttl_secs: u64,
-) -> bool {
+fn cache_is_stale(user_dir: &Path, found: Option<&Node>, ttl_secs: u64) -> bool {
     ttl_secs > 0
-        && found.is_some_and(|(name, ..)| {
-            store::user_cache_age(user_dir, name).is_some_and(|age| age.as_secs() > ttl_secs)
+        && found.is_some_and(|node| {
+            store::user_cache_age(user_dir, &node.name).is_some_and(|age| age.as_secs() > ttl_secs)
         })
 }
 
