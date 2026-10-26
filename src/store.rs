@@ -419,6 +419,29 @@ pub fn read_exe(dir: &Path, command: &str) -> Option<ExeIdentity> {
     read_file(&dir.join(format!("{base}.exe")))?.parse().ok()
 }
 
+const MISS_TTL: Duration = Duration::from_mins(10);
+
+/// mark `command` as unusable for binary `exe`, so completion skips probing it.
+///
+/// # Errors
+/// fails when the marker write fails.
+pub fn record_miss(dir: &Path, command: &str, exe: Option<&ExeIdentity>) -> io::Result<()> {
+    let base = filename_of_command(command);
+    let content = exe.map(ToString::to_string).unwrap_or_default();
+    write_file(&dir.join(format!("{base}.miss")), &content)
+}
+
+pub fn recent_miss(dir: &Path, command: &str, exe: Option<&ExeIdentity>) -> bool {
+    let path = dir.join(format!("{}.miss", filename_of_command(command)));
+    let fresh = fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age < MISS_TTL);
+    fresh
+        && read_file(&path).is_some_and(|stored| stored.parse::<ExeIdentity>().ok().as_ref() == exe)
+}
+
 /// remove `command`'s entries and its subcommands', returning how many went.
 ///
 /// # Errors
@@ -441,7 +464,7 @@ pub fn purge_command(dir: &Path, command: &str) -> io::Result<usize> {
         let cache_ext = path
             .extension()
             .and_then(OsStr::to_str)
-            .is_some_and(|ext| matches!(ext, "json" | "nu" | "exe"));
+            .is_some_and(|ext| matches!(ext, "json" | "nu" | "exe" | "miss"));
         if owned && cache_ext && path.is_file() {
             fs::remove_file(&path)?;
             removed += 1;
@@ -695,7 +718,7 @@ pub fn all_commands(dirs: &[PathBuf]) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// only `.json`/`.nu`/`.exe` go, so a misaimed dir keeps unrelated files.
+/// only cache extensions go, so a misaimed dir keeps unrelated files.
 /// missing dir counts as already empty.
 ///
 /// # Errors
@@ -712,7 +735,11 @@ pub fn purge_dir(dir: &Path) -> io::Result<usize> {
         let is_cache_file = path
             .file_name()
             .and_then(OsStr::to_str)
-            .and_then(|name| chop_extension(name).or_else(|| name.strip_suffix(".exe")))
+            .and_then(|name| {
+                chop_extension(name)
+                    .or_else(|| name.strip_suffix(".exe"))
+                    .or_else(|| name.strip_suffix(".miss"))
+            })
             .is_some();
         if is_cache_file && path.is_file() {
             fs::remove_file(&path)?;

@@ -78,6 +78,7 @@ use crate::{
         ensure_dir,
         json_strings,
         read_result,
+        record_miss,
         write_exe,
         write_file,
         write_native,
@@ -1441,10 +1442,16 @@ pub fn resolve_command_path_and_cache(
                 result: Some(parse_nu_completions(&full, &nu)),
             }
         },
-        Outcome::Empty => {
+        Outcome::Empty if probe.timed_out.get() => {
             Resolved {
                 result: None,
                 saved:  Ok(()),
+            }
+        },
+        Outcome::Empty => {
+            Resolved {
+                result: None,
+                saved:  record_miss(user_dir, &full, ExeIdentity::of(path).as_ref()),
             }
         },
         Outcome::Content {

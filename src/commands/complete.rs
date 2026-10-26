@@ -54,6 +54,7 @@ use inshellah::{
         lookup,
         purge_command,
         read_exe,
+        recent_miss,
         subcommands_of,
     },
 };
@@ -286,11 +287,13 @@ fn resolve_node<'ctx>(
     };
 
     let mut found = find_result(&cmd_path.path);
+    let exe = ctx.bin.and_then(ExeIdentity::of);
     while let Some(bin) = ctx.bin
         && (cache_is_stale(ctx.user_dir, found.as_ref(), ctx.ttl_secs)
             || found
                 .as_ref()
                 .is_none_or(|(_, _, depth)| *depth < cmd_path.path.len()))
+        && !recent_miss(ctx.user_dir, &cmd_path.path.join(" "), exe.as_ref())
     {
         let Some(result) = resolve_command_path_and_cache(
             ctx.user_dir,
