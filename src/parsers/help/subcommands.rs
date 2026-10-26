@@ -1,20 +1,20 @@
 use nom::{
+    AsChar as _, IResult, Parser as _,
     branch::alt,
     bytes::complete::{tag, take_till, take_while1},
     character::complete::{char, space0},
     combinator::{not, value, verify},
     multi::many0,
     sequence::{delimited, preceded, terminated},
-    AsChar, IResult, Parser,
 };
 
 use crate::make_parser;
 use crate::parsers::help::helpers::{eol, is_option_char};
 use crate::parsers::manpage::ManpageSubcommand;
 
-fn is_placeholder(c: char) -> bool {
-    match c {
-        _ if c.is_alphanumeric() => true,
+fn is_placeholder(ch: char) -> bool {
+    match ch {
+        _ if ch.is_alphanumeric() => true,
         '_' | '-' | '.' | '|' | ',' => true,
         _ => false,
     }
@@ -22,8 +22,8 @@ fn is_placeholder(c: char) -> bool {
 
 /// chars in a bare placeholder token. excludes lowercase so mixed-case words
 /// like "NixOS" aren't swallowed.
-fn is_bare_placeholder_char(c: char) -> bool {
-    matches!(c, 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | '|' | ',')
+const fn is_bare_placeholder_char(ch: char) -> bool {
+    matches!(ch, 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | '|' | ',')
 }
 
 make_parser!(
@@ -38,9 +38,11 @@ make_parser!(
                 // first char uppercase or digit rejects "NixOS"-style mixed-case.
                 verify(
                     take_while1(is_bare_placeholder_char),
-                    |s: &str| {
-                        let first = s.chars().next().unwrap();
-                        first.is_ascii_uppercase() || first.is_ascii_digit()
+                    |token: &str| {
+                        token
+                            .chars()
+                            .next()
+                            .is_some_and(|first| first.is_ascii_uppercase() || first.is_ascii_digit())
                     }
                 ),
             )),
@@ -51,17 +53,17 @@ make_parser!(
 // aliases before the desc gap, comma- (cargo `build, b`) or pipe-separated
 // (pw-cli `help | h`). captured as alternates; the canonical first name leads.
 make_parser!(
-    collect_subcommand_aliases -> Vec<&'a str>,
+    collect_subcommand_aliases<'src> -> Vec<&'src str>,
     many0(preceded(alt((tag(", "), tag(" | "))), take_while1(is_option_char)))
 );
 
-make_parser!(pub subcommand_entry -> ManpageSubcommand,
+make_parser!(pub subcommand_entry<'src> -> ManpageSubcommand,
     (
         preceded(
             space0,
             verify(
                 preceded(not(char('-')), take_while1(is_option_char)),
-                |n: &str| n.len() >= 2,
+                |name: &str| name.len() >= 2,
             ),
         ),
         collect_subcommand_aliases,
@@ -70,15 +72,15 @@ make_parser!(pub subcommand_entry -> ManpageSubcommand,
         // bare tab with no padding spaces.
         alt((tag("  "), tag("\t"))),
         space0,
-        terminated(take_till(|c: char| c.is_newline()), eol),
-    ) => |(name, aliases, _, _, _, desc): (&'a str, Vec<&'a str>, _, _, _, &'a str)| {
-        let d = desc.trim_start();
-        let desc = d.strip_prefix("- ").map(|s| s.trim_start()).unwrap_or(d);
+        terminated(take_till(|ch: char| ch.is_newline()), eol),
+    ) => |(name, aliases, (), _, _, desc): (&'src str, Vec<&'src str>, _, _, _, &'src str)| {
+        let trimmed = desc.trim_start();
+        let clean_desc = trimmed.strip_prefix("- ").map_or(trimmed, str::trim_start);
         // name/aliases kept as-parsed, build_help_result lowercases at assembly.
         ManpageSubcommand {
-            name: name.to_string(),
-            desc: desc.to_string(),
-            aliases: aliases.into_iter().map(str::to_string).collect(),
+            name: name.to_owned(),
+            desc: clean_desc.to_owned(),
+            aliases: aliases.into_iter().map(str::to_owned).collect(),
         }
     }
 );
@@ -106,8 +108,8 @@ mod tests {
         let (name, desc) = parse("    build, b    Compile the current package\n");
         assert_eq!(name, "build");
         assert_eq!(desc, "Compile the current package");
-        let (name, _) = parse("    check, c    Analyze the package\n");
-        assert_eq!(name, "check");
+        let (check_name, _) = parse("    check, c    Analyze the package\n");
+        assert_eq!(check_name, "check");
     }
 
     #[test]
@@ -128,10 +130,10 @@ mod tests {
 
     #[test]
     fn aliases_are_captured_pipe_and_comma() {
-        let (_, sc) = subcommand_entry("    help | h    Show this help\n").expect("pipe");
-        assert_eq!(sc.aliases, vec!["h"]);
-        let (_, sc) = subcommand_entry("    build, b    Compile\n").expect("comma");
-        assert_eq!(sc.aliases, vec!["b"]);
+        let (_, pipe) = subcommand_entry("    help | h    Show this help\n").expect("pipe");
+        assert_eq!(pipe.aliases, vec!["h"]);
+        let (_, comma) = subcommand_entry("    build, b    Compile\n").expect("comma");
+        assert_eq!(comma.aliases, vec!["b"]);
     }
 
     #[test]
@@ -151,11 +153,11 @@ mod tests {
 
     #[test]
     fn flag_line_is_rejected() {
-        assert!(subcommand_entry("    --verbose    be loud\n").is_err());
+        subcommand_entry("    --verbose    be loud\n").unwrap_err();
     }
 
     #[test]
     fn single_char_name_is_rejected() {
-        assert!(subcommand_entry("    x    too short\n").is_err());
+        subcommand_entry("    x    too short\n").unwrap_err();
     }
 }

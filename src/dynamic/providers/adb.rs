@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! adb device-serial and package-name value completions. preempts static flag
-//! completion (providers::value_completions) so `adb -s <tab>` offers live
+//! completion (`providers::value_completions`) so `adb -s <tab>` offers live
 //! serials, not adb's own flags.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
 use crate::complete::starts_with_ignore_ascii_case;
 
-use super::super::shared::{Candidate, DynCtx, find_in_path, run_scrape};
+use crate::complete::Candidate;
+use crate::dynamic::shared::{DynCtx, find_in_path, run_scrape};
 
 #[derive(Clone, Debug)]
 struct AdbDevice {
@@ -16,13 +18,13 @@ struct AdbDevice {
     transport_id: Option<String>,
 }
 
-enum AdbDeviceCompletion<'a> {
+enum AdbDeviceCompletion<'args> {
     Serial {
-        prefix: &'a str,
+        prefix: &'args str,
         replacement_prefix: &'static str,
     },
     TransportId {
-        prefix: &'a str,
+        prefix: &'args str,
         replacement_prefix: &'static str,
     },
 }
@@ -33,7 +35,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
     let rest = &spans[1..];
     let path = resolve_adb(ctx)?;
     if let Some(completion) = adb_device_completion(rest, ctx) {
-        return Some(adb_device_candidates(&path, completion, ctx));
+        return Some(adb_device_candidates(&path, &completion, ctx));
     }
     if let Some(prefix) = adb_package_completion_prefix(rest) {
         let selectors = adb_selector_args(rest);
@@ -48,11 +50,14 @@ fn resolve_adb(ctx: &DynCtx) -> Option<PathBuf> {
         .or_else(|| find_in_path(ctx.cmd_name))
 }
 
-fn adb_device_completion<'a>(rest: &'a [String], ctx: &DynCtx) -> Option<AdbDeviceCompletion<'a>> {
+fn adb_device_completion<'args>(
+    rest: &'args [String],
+    ctx: &DynCtx,
+) -> Option<AdbDeviceCompletion<'args>> {
     if !adb_command_tokens(rest).is_empty() {
         return None;
     }
-    let current = rest.last().map(String::as_str).unwrap_or("");
+    let current = rest.last().map_or("", String::as_str);
     if let Some(prefix) = current.strip_prefix("--serial=") {
         return Some(AdbDeviceCompletion::Serial {
             prefix,
@@ -121,16 +126,16 @@ fn parse_adb_devices(output: &str) -> Vec<AdbDevice> {
             } else if let Some(product) = part.strip_prefix("product:") {
                 details.push(product.replace('_', " "));
             } else if let Some(id) = part.strip_prefix("transport_id:") {
-                transport_id = Some(id.to_string());
+                transport_id = Some(id.to_owned());
             }
         }
         let desc = if details.is_empty() {
-            state.to_string()
+            state.to_owned()
         } else {
             format!("{state} {}", details.join(" "))
         };
         out.push(AdbDevice {
-            serial: serial.to_string(),
+            serial: serial.to_owned(),
             desc,
             transport_id,
         });
@@ -153,20 +158,20 @@ fn is_adb_device_state(state: &str) -> bool {
 
 fn adb_device_candidates(
     path: &Path,
-    completion: AdbDeviceCompletion<'_>,
+    completion: &AdbDeviceCompletion<'_>,
     ctx: &DynCtx,
 ) -> Vec<Candidate> {
     let args = vec![
         path.to_string_lossy().to_string(),
-        "devices".to_string(),
-        "-l".to_string(),
+        "devices".to_owned(),
+        "-l".to_owned(),
     ];
     let Some(output) = run_scrape(&args, ctx) else {
         return Vec::new();
     };
     let mut scored = Vec::new();
     for device in parse_adb_devices(&output) {
-        match &completion {
+        match completion {
             AdbDeviceCompletion::Serial {
                 prefix,
                 replacement_prefix,
@@ -176,7 +181,7 @@ fn adb_device_candidates(
                     scored.push((
                         score,
                         Candidate::new(
-                            format!("{replacement_prefix}{}", &device.serial),
+                            format!("{replacement_prefix}{}", device.serial),
                             device.desc.clone(),
                         ),
                     ));
@@ -193,7 +198,7 @@ fn adb_device_candidates(
                             score,
                             Candidate::new(
                                 format!("{replacement_prefix}{id}"),
-                                format!("{} {}", &device.serial, &device.desc),
+                                format!("{} {}", device.serial, device.desc),
                             ),
                         ));
                     }
@@ -201,11 +206,11 @@ fn adb_device_candidates(
             }
         }
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.into_iter().map(|(_, c)| c).collect()
+    scored.sort_by_key(|(score, _)| Reverse(*score));
+    scored.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
-/// exact serial wins, then case-insensitive prefix. not fuzzy_score, serials
+/// exact serial wins, then case-insensitive prefix. not `fuzzy_score`, serials
 /// aren't subcommands.
 fn prefix_score(prefix: &str, value: &str) -> i32 {
     if prefix.is_empty() {
@@ -285,7 +290,10 @@ fn adb_package_completion_prefix(rest: &[String]) -> Option<&str> {
     None
 }
 
-fn package_prefix_for_arg_tail<'a>(args: &[&'a str], value_flags: &[&str]) -> Option<&'a str> {
+fn package_prefix_for_arg_tail<'args>(
+    args: &[&'args str],
+    value_flags: &[&str],
+) -> Option<&'args str> {
     let current = *args.last()?;
     if current.starts_with('-') {
         return None;
@@ -293,8 +301,8 @@ fn package_prefix_for_arg_tail<'a>(args: &[&'a str], value_flags: &[&str]) -> Op
     if args.len() >= 2 && value_flags.contains(&args[args.len() - 2]) {
         return None;
     }
-    let mut positional_count = 0usize;
-    let mut i = 0usize;
+    let mut positional_count = 0_usize;
+    let mut i = 0_usize;
     let end = args.len().saturating_sub(1);
     while i < end {
         let token = args[i];
@@ -313,12 +321,8 @@ fn package_prefix_for_arg_tail<'a>(args: &[&'a str], value_flags: &[&str]) -> Op
 }
 
 fn parse_adb_package_line(line: &str) -> Option<&str> {
-    let package = line.trim().strip_prefix("package:")?;
-    let package = package
-        .rsplit_once('=')
-        .map(|(_, rhs)| rhs)
-        .unwrap_or(package)
-        .trim();
+    let entry = line.trim().strip_prefix("package:")?;
+    let package = entry.rsplit_once('=').map_or(entry, |(_, rhs)| rhs).trim();
     (!package.is_empty()).then_some(package)
 }
 
@@ -333,7 +337,7 @@ fn adb_package_candidates(
     args.extend(
         ["shell", "pm", "list", "packages"]
             .into_iter()
-            .map(str::to_string),
+            .map(str::to_owned),
     );
     let Some(output) = run_scrape(&args, ctx) else {
         return Vec::new();
@@ -345,6 +349,6 @@ fn adb_package_candidates(
             scored.push((score, Candidate::new(package, "package")));
         }
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.into_iter().map(|(_, c)| c).collect()
+    scored.sort_by_key(|(score, _)| Reverse(*score));
+    scored.into_iter().map(|(_, candidate)| candidate).collect()
 }

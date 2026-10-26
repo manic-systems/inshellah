@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
-use super::super::shared::{Candidate, DynCtx, run};
+use crate::complete::Candidate;
+use crate::dynamic::shared::{DynCtx, run};
 const DOCKER_CONTAINER_VERBS: &[&str] = &[
     "exec", "logs", "inspect", "start", "stop", "restart", "rm", "kill", "attach", "cp", "top",
     "wait", "pause", "unpause", "port", "commit", "diff", "export",
@@ -13,14 +14,14 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
         return None;
     }
     let cmd = ctx.bin(spans[0].as_str());
-    let sub = spans.get(1).map(String::as_str).unwrap_or("");
+    let sub = spans.get(1).map_or("", String::as_str);
     if DOCKER_CONTAINER_VERBS.contains(&sub) {
         let mut args = vec![cmd, "ps".into()];
         args.extend(ctx.limit_args("--last"));
         args.extend(
             ["--format", "{{.Names}}\t{{.Image}}"]
                 .into_iter()
-                .map(str::to_string),
+                .map(str::to_owned),
         );
         let out = run(&args, ctx)?;
         let mut candidates = Vec::new();

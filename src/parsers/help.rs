@@ -1,47 +1,46 @@
 // SPDX-License-Identifier: EUPL-1.2
 mod description;
 mod helpers;
-mod options;
-mod positionals;
+pub mod options;
+pub mod positionals;
 mod subcommands;
-
-pub use options::{param_parser, parse_usage_flags, switch_parser};
-pub use positionals::{
-    extract_cli11_positionals, extract_usage_positionals, parse_usage_args, skip_command_name,
-};
 
 use std::collections::HashMap;
 
-use crate::parsers::help::{
-    description::description, helpers::get_indent, subcommands::subcommand_entry,
+use crate::parsers::help::description::description;
+use crate::parsers::help::helpers::get_indent;
+use crate::parsers::help::options::{param_parser, switch_parser};
+use crate::parsers::help::positionals::{extract_cli11_positionals, extract_usage_positionals};
+use crate::parsers::help::subcommands::subcommand_entry;
+use crate::parsers::manpage::{
+    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
 };
-use crate::parsers::manpage::{ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch};
-use nom::{IResult, Parser, character::complete::space0, combinator::opt};
+use nom::{IResult, Parser as _, character::complete::space0, combinator::opt};
 
 use crate::make_parser;
 
-type EntryParts<'a> = (
-    &'a str,
+type EntryParts<'src> = (
+    &'src str,
     (OwnedSwitch, Option<OwnedParam>),
-    (&'a str, Vec<&'a str>),
+    (&'src str, Vec<&'src str>),
 );
 
-make_parser!(entry -> ManpageEntry,
+make_parser!(entry<'src> -> ManpageEntry,
     (
         space0,
         (switch_parser, opt(param_parser)),
         description,
     )
     => |(_, (switch, param), (first, cont))
-        : EntryParts<'a>|
+        : EntryParts<'src>|
     {
         let mut lines: Vec<&str> = Vec::with_capacity(1 + cont.len());
         if !first.trim().is_empty() { lines.push(first); }
-        lines.extend(cont.into_iter().filter(|l| !l.trim().is_empty()));
+        lines.extend(cont.into_iter().filter(|line| !line.trim().is_empty()));
         let desc = lines
             .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
         ManpageEntry { switch, param, desc }
@@ -52,21 +51,21 @@ make_parser!(entry -> ManpageEntry,
 fn dedup_subcommands(raw: Vec<ManpageSubcommand>) -> Vec<ManpageSubcommand> {
     let mut by_name: HashMap<String, ManpageSubcommand> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
-    for sc in raw {
-        let key = sc.name.to_ascii_lowercase();
+    for subcommand in raw {
+        let key = subcommand.name.to_ascii_lowercase();
         match by_name.get(&key) {
-            Some(prev) if prev.desc.len() >= sc.desc.len() => {}
+            Some(prev) if prev.desc.len() >= subcommand.desc.len() => {}
             _ => {
                 if !by_name.contains_key(&key) {
                     order.push(key.clone());
                 }
-                by_name.insert(key, sc);
+                by_name.insert(key, subcommand);
             }
         }
     }
     order
         .into_iter()
-        .map(|k| by_name.remove(&k).unwrap())
+        .filter_map(|key| by_name.remove(&key))
         .collect()
 }
 
@@ -79,11 +78,11 @@ enum HelpSection {
 }
 
 fn classify_section_line(line: &str) -> Option<HelpSection> {
-    let (idx, indent) = get_indent(line);
+    let (_, indent) = get_indent(line);
     if indent > 4 {
         return None;
     }
-    let trimmed = line[idx..].trim();
+    let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -120,14 +119,11 @@ fn classify_section_line(line: &str) -> Option<HelpSection> {
     None
 }
 
-fn consume_line(s: &str) -> &str {
-    match s.find('\n') {
-        Some(idx) => &s[idx + 1..],
-        None => "",
-    }
+fn consume_line(text: &str) -> &str {
+    text.split_once('\n').map_or("", |(_, rest)| rest)
 }
 
-fn parser_made_progress(original: &str, rem: &str) -> bool {
+const fn parser_made_progress(original: &str, rem: &str) -> bool {
     rem.len() < original.len()
 }
 
@@ -140,7 +136,7 @@ fn build_help_result(original: &str) -> ManpageResult {
     let mut rem = original;
 
     while !rem.is_empty() {
-        let line = rem.split_once('\n').map(|(line, _)| line).unwrap_or(rem);
+        let line = rem.split_once('\n').map_or(rem, |(line, _)| line);
         if let Some(next_section) = classify_section_line(line) {
             section = next_section;
             rem = consume_line(rem);
@@ -171,27 +167,27 @@ fn build_help_result(original: &str) -> ManpageResult {
     // recursive --help probes dispatch on the lowercase name.
     let subcommands = dedup_subcommands(raw_subcommands)
         .into_iter()
-        .map(|sc| ManpageSubcommand {
-            name: sc.name.to_ascii_lowercase(),
-            desc: sc.desc,
-            aliases: sc
+        .map(|subcommand| ManpageSubcommand {
+            name: subcommand.name.to_ascii_lowercase(),
+            desc: subcommand.desc,
+            aliases: subcommand
                 .aliases
                 .iter()
-                .map(|a| a.to_ascii_lowercase())
+                .map(|alias| alias.to_ascii_lowercase())
                 .collect(),
         })
         .collect();
     // cli11 positional section carries types and optionality, prefer it over
     // the usage-line scan.
     let positionals_raw = match extract_cli11_positionals(original) {
-        Ok((_, p)) if !p.is_empty() => p,
+        Ok((_, found)) if !found.is_empty() => found,
         _ => extract_usage_positionals(original)
-            .map(|(_, p)| p)
+            .map(|(_, found)| found)
             .unwrap_or_default(),
     };
     let positionals = positionals_raw
         .into_iter()
-        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .map(|(name, positional)| (name.to_ascii_lowercase(), positional))
         .collect();
     let mut result = ManpageResult {
         entries,
@@ -204,6 +200,9 @@ fn build_help_result(original: &str) -> ManpageResult {
     result
 }
 
-pub fn help_parser(s: &str) -> IResult<&str, ManpageResult> {
-    Ok(("", build_help_result(s)))
+/// # Errors
+///
+/// never errors, the `IResult` shape composes with the nom parsers.
+pub fn help_parser(input: &str) -> IResult<&str, ManpageResult> {
+    Ok(("", build_help_result(input)))
 }

@@ -122,13 +122,13 @@ Stop tracking given remote bookmarks
 fn hp_strategy_extracts_flags_and_skips_rs_example_values() {
     // bat uses .HP for flag tags and nests example values in .RS/.RE; the inner
     // .IP "caret"/"unicode" tags are not flags.
-    let r = parse_manpage_string(HP_MANPAGE);
-    let names: Vec<String> = r
+    let result = parse_manpage_string(HP_MANPAGE);
+    let names: Vec<String> = result
         .entries
         .iter()
-        .map(|e| match &e.switch {
-            OwnedSwitch::Long(l) | OwnedSwitch::Both(_, l) => l.clone(),
-            OwnedSwitch::Short(c) => c.to_string(),
+        .map(|entry| match &entry.switch {
+            OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => long.clone(),
+            OwnedSwitch::Short(short) => short.to_string(),
         })
         .collect();
     assert_eq!(
@@ -137,20 +137,20 @@ fn hp_strategy_extracts_flags_and_skips_rs_example_values() {
         "expected 3 flags, got {names:?}"
     );
     assert!(
-        !r.entries.iter().any(|e| matches!(
-            &e.switch,
-            OwnedSwitch::Long(l) if l == "caret" || l == "unicode"
+        !result.entries.iter().any(|entry| matches!(
+            &entry.switch,
+            OwnedSwitch::Long(long) if long == "caret" || long == "unicode"
         )),
         "inner .RS .IP example values must not be picked up as flags: {:?}",
-        r.entries
+        result.entries
     );
     assert!(matches!(
-        r.entries[0].switch,
-        OwnedSwitch::Both('A', ref l) if l == "show-all"
+        result.entries[0].switch,
+        OwnedSwitch::Both('A', ref long) if long == "show-all"
     ));
     assert!(matches!(
-        r.entries[2].switch,
-        OwnedSwitch::Both('l', ref l) if l == "language"
+        result.entries[2].switch,
+        OwnedSwitch::Both('l', ref long) if long == "language"
     ));
 }
 
@@ -159,68 +159,72 @@ fn text_rs_strategy_handles_nested_rs_in_description() {
     // a flag's `.RS` body nesting another `.RS/.RE` must not end early at the
     // inner `.RE`, else the next flag's tag is misread as top-level text or the
     // first desc is truncated.
-    let r = parse_manpage_string(TEXT_RS_NESTED_MANPAGE);
+    let result = parse_manpage_string(TEXT_RS_NESTED_MANPAGE);
     assert_eq!(
-        r.entries.len(),
+        result.entries.len(),
         2,
         "expected exactly 2 flags, got {}",
-        r.entries.len()
+        result.entries.len()
     );
     assert!(matches!(
-        r.entries[0].switch,
-        OwnedSwitch::Both('x', ref l) if l == "foo"
+        result.entries[0].switch,
+        OwnedSwitch::Both('x', ref long) if long == "foo"
     ));
     assert!(
-        r.entries[0].desc.contains("First flag desc"),
+        result.entries[0].desc.contains("First flag desc"),
         "outer .RS body should be captured, got: {:?}",
-        r.entries[0].desc
+        result.entries[0].desc
     );
     assert!(
-        r.entries[0].desc.contains("After the inner block"),
+        result.entries[0].desc.contains("After the inner block"),
         "text after the nested .RE must still belong to the outer block, got: {:?}",
-        r.entries[0].desc
+        result.entries[0].desc
     );
     assert!(
-        !r.entries[0].desc.contains("some value"),
+        !result.entries[0].desc.contains("some value"),
         "inner .RS sub-value text should be skipped, got: {:?}",
-        r.entries[0].desc
+        result.entries[0].desc
     );
     assert!(matches!(
-        r.entries[1].switch,
-        OwnedSwitch::Both('y', ref l) if l == "bar"
+        result.entries[1].switch,
+        OwnedSwitch::Both('y', ref long) if long == "bar"
     ));
-    assert!(r.entries[1].desc.contains("Second flag desc"));
+    assert!(result.entries[1].desc.contains("Second flag desc"));
 }
 
 #[test]
 fn text_rs_strategy_extracts_ripgrep_style_flags() {
     // rg's layout: bare Text tag immediately followed by `.RS/.RE`, separated
     // by `.sp`, no `.PP` to anchor on.
-    let r = parse_manpage_string(TEXT_RS_MANPAGE);
+    let result = parse_manpage_string(TEXT_RS_MANPAGE);
     assert_eq!(
-        r.entries.len(),
+        result.entries.len(),
         3,
         "expected 3 entries, got {}",
-        r.entries.len()
+        result.entries.len()
     );
     // PARAM between short and comma
     assert!(matches!(
-        r.entries[0].switch,
-        OwnedSwitch::Both('e', ref l) if l == "regexp"
+        result.entries[0].switch,
+        OwnedSwitch::Both('e', ref long) if long == "regexp"
     ));
     assert!(matches!(
-        r.entries[0].param,
-        Some(OwnedParam::Mandatory(ref p)) if p == "PATTERN"
+        result.entries[0].param,
+        Some(OwnedParam::Mandatory(ref param)) if param == "PATTERN"
     ));
-    assert!(r.entries[0].desc.starts_with("A pattern to search for"));
+    assert!(
+        result.entries[0]
+            .desc
+            .starts_with("A pattern to search for")
+    );
     assert!(matches!(
-        r.entries[1].switch,
-        OwnedSwitch::Both('f', ref l) if l == "file"
+        result.entries[1].switch,
+        OwnedSwitch::Both('f', ref long) if long == "file"
     ));
     // plain comma form, no PARAM
     assert!(matches!(
-        r.entries[2].switch,
-        OwnedSwitch::Both('x', ref l) if l == "line-regexp"
+        result.entries[2].switch,
+        OwnedSwitch::Both('x', ref long) if long == "line-regexp"
     ));
 }
 
@@ -229,11 +233,11 @@ fn tp_strategy_stops_description_at_blank_line() {
     // clap emits "summary\n\nexpanded body"; keep just the summary. leading
     // blanks (tag to first body line) skip; blanks only terminate once text is
     // collected.
-    let r = parse_manpage_string(TP_CLAP_DUAL_PARAGRAPH);
-    let at_op = r
+    let result = parse_manpage_string(TP_CLAP_DUAL_PARAGRAPH);
+    let at_op = result
         .entries
         .iter()
-        .find(|e| matches!(&e.switch, OwnedSwitch::Long(l) if l == "at-operation"))
+        .find(|entry| matches!(&entry.switch, OwnedSwitch::Long(long) if long == "at-operation"))
         .expect("--at-operation entry");
     assert_eq!(
         at_op.desc, "Operation to load the repo at",
@@ -241,43 +245,47 @@ fn tp_strategy_stops_description_at_blank_line() {
         at_op.desc
     );
     // the second .TP block still parses (next entry not swallowed).
-    assert!(r.entries.iter().any(|e| matches!(
-        &e.switch,
-        OwnedSwitch::Both('h', l) if l == "help"
+    assert!(result.entries.iter().any(|entry| matches!(
+        &entry.switch,
+        OwnedSwitch::Both('h', long) if long == "help"
     )));
 }
 
 #[test]
 fn tp_strategy_extracts_flags() {
-    let r = parse_manpage_string(TP_MANPAGE);
+    let result = parse_manpage_string(TP_MANPAGE);
     assert_eq!(
-        r.entries.len(),
+        result.entries.len(),
         3,
         "expected 3 entries, got {:?}",
-        r.entries
+        result.entries
     );
-    assert_eq!(r.description, "a synthetic test command");
+    assert_eq!(result.description, "a synthetic test command");
     assert!(matches!(
-        r.entries[0].switch,
-        OwnedSwitch::Both('v', ref l) if l == "verbose"
+        result.entries[0].switch,
+        OwnedSwitch::Both('v', ref long) if long == "verbose"
     ));
     assert!(matches!(
-        r.entries[2].switch,
-        OwnedSwitch::Both('h', ref l) if l == "help"
+        result.entries[2].switch,
+        OwnedSwitch::Both('h', ref long) if long == "help"
     ));
-    assert!(r.entries[0].desc.contains("verbosity"));
+    assert!(result.entries[0].desc.contains("verbosity"));
 }
 
 #[test]
 fn subcommand_xrefs_populate_subcommands() {
-    let r = parse_manpage_string(JJ_XREF_MANPAGE);
-    let names: Vec<&str> = r.subcommands.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, ["create", "set-url", "untrack"], "got {names:?}");
-    // shared "jj-bookmark-" prefix stripped, multi-word child intact.
-    let set_url = r
+    let result = parse_manpage_string(JJ_XREF_MANPAGE);
+    let names: Vec<&str> = result
         .subcommands
         .iter()
-        .find(|s| s.name == "set-url")
+        .map(|sub| sub.name.as_str())
+        .collect();
+    assert_eq!(names, ["create", "set-url", "untrack"], "got {names:?}");
+    // shared "jj-bookmark-" prefix stripped, multi-word child intact.
+    let set_url = result
+        .subcommands
+        .iter()
+        .find(|sub| sub.name == "set-url")
         .expect("set-url child");
     assert_eq!(set_url.desc, "Update a bookmark's url");
 }
@@ -303,19 +311,19 @@ Search for a pattern.
 Read patterns from a file.
 .RE
 "#;
-    let r = parse_manpage_string(groff);
-    assert_eq!(r.entries.len(), 3, "entries: {:?}", r.entries);
-    assert!(r.entries.iter().any(|e| matches!(
-        &e.switch,
-        OwnedSwitch::Both('a', l) if l == "all"
+    let result = parse_manpage_string(groff);
+    assert_eq!(result.entries.len(), 3, "entries: {:?}", result.entries);
+    assert!(result.entries.iter().any(|entry| matches!(
+        &entry.switch,
+        OwnedSwitch::Both('a', long) if long == "all"
     )));
-    assert!(r.entries.iter().any(|e| matches!(
-        &e.switch,
-        OwnedSwitch::Both('e', l) if l == "regexp"
+    assert!(result.entries.iter().any(|entry| matches!(
+        &entry.switch,
+        OwnedSwitch::Both('e', long) if long == "regexp"
     )));
-    assert!(r.entries.iter().any(|e| matches!(
-        &e.switch,
-        OwnedSwitch::Both('f', l) if l == "file"
+    assert!(result.entries.iter().any(|entry| matches!(
+        &entry.switch,
+        OwnedSwitch::Both('f', long) if long == "file"
     )));
 }
 
@@ -332,24 +340,27 @@ Enable output
 \fB\-\-all\fR
 Enable output
 "#;
-    let r = parse_manpage_string(groff);
-    assert_eq!(r.entries.len(), 2, "entries: {:?}", r.entries);
+    let result = parse_manpage_string(groff);
+    assert_eq!(result.entries.len(), 2, "entries: {:?}", result.entries);
     assert!(
-        !r.entries
+        !result
+            .entries
             .iter()
-            .any(|e| matches!(&e.switch, OwnedSwitch::Both('a', l) if l == "all")),
+            .any(|entry| matches!(&entry.switch, OwnedSwitch::Both('a', long) if long == "all")),
         "generic identical descriptions should not synthesize aliases: {:?}",
-        r.entries
+        result.entries
     );
     assert!(
-        r.entries
+        result
+            .entries
             .iter()
-            .any(|e| matches!(e.switch, OwnedSwitch::Short('a')))
+            .any(|entry| matches!(entry.switch, OwnedSwitch::Short('a')))
     );
     assert!(
-        r.entries
+        result
+            .entries
             .iter()
-            .any(|e| matches!(&e.switch, OwnedSwitch::Long(l) if l == "all"))
+            .any(|entry| matches!(&entry.switch, OwnedSwitch::Long(long) if long == "all"))
     );
 }
 
@@ -368,21 +379,21 @@ Usage: clone [OPTIONS] <repository> [directory]
 Limit history depth.
 "#;
     let (_parent, subs) = parse_manpage_with_subs(groff);
-    assert_eq!(subs.len(), 1, "subs: {:?}", subs);
+    assert_eq!(subs.len(), 1, "subs: {subs:?}");
     let (name, result) = &subs[0];
     assert_eq!(name, "clone");
     assert_eq!(
         result
             .positionals
             .iter()
-            .map(|(name, _)| name.as_str())
+            .map(|(positional, _)| positional.as_str())
             .collect::<Vec<_>>(),
         vec!["repository", "directory"],
         "positionals: {:?}",
         result.positionals
     );
-    assert!(result.entries.iter().any(|e| matches!(
-        &e.switch,
-        OwnedSwitch::Long(l) if l == "depth"
+    assert!(result.entries.iter().any(|entry| matches!(
+        &entry.switch,
+        OwnedSwitch::Long(long) if long == "depth"
     )));
 }

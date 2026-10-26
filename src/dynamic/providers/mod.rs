@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: EUPL-1.2
-use super::shared::{Candidate, DynCtx};
+use crate::complete::Candidate;
+use crate::dynamic::shared::DynCtx;
 
-pub(crate) mod adb;
-pub(crate) mod containers;
-pub(crate) mod git;
-pub(crate) mod jj;
-pub(crate) mod kubectl;
-pub(crate) mod nix;
-pub(crate) mod process;
-pub(crate) mod project;
-pub(crate) mod ssh;
-pub(crate) mod systemd;
+pub mod adb;
+pub mod containers;
+pub mod git;
+pub mod jj;
+pub mod kubectl;
+pub mod nix;
+pub mod process;
+pub mod project;
+pub mod ssh;
+pub mod systemd;
 
 type CompleteFn = fn(&[String], &DynCtx<'_>) -> Option<Vec<Candidate>>;
 
@@ -116,14 +117,16 @@ fn provider_for(cmd: &str, kind: Kind) -> Option<&'static FunctionProvider> {
 
 /// fallback providers, called when static completion was empty. value providers
 /// answer earlier via `value_completions`.
-pub(crate) fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
+pub fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     let cmd = spans.first()?.as_str();
-    provider_for(cmd, Kind::Fallback).and_then(|provider| provider.complete(spans, ctx))
+    let provider = provider_for(cmd, Kind::Fallback)?;
+    provider.complete(spans, ctx)
 }
 
 /// value providers that answer before static flag completion. `Some` (even
 /// empty) suppresses static; `None` falls through.
-pub(crate) fn value_completions(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
+pub fn value_completions(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     let cmd = spans.first()?.as_str();
-    provider_for(cmd, Kind::Value).and_then(|provider| provider.complete(spans, ctx))
+    let provider = provider_for(cmd, Kind::Value)?;
+    provider.complete(spans, ctx)
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
-use super::super::shared::{Candidate, DynCtx, run};
+use crate::complete::Candidate;
+use crate::dynamic::shared::{DynCtx, run};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match spans[0].as_str() {
@@ -46,24 +47,24 @@ fn systemctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate
     if !SYSTEMCTL_UNIT_VERBS.contains(&verb) || spans.len() < 3 {
         return None;
     }
-    let scope = if spans.iter().any(|s| s == "--user") {
+    let scope = if spans.iter().any(|span| span == "--user") {
         &["--user"][..]
     } else {
         &[]
     };
-    let last = spans.last().map(String::as_str).unwrap_or("");
+    let last = spans.last().map_or("", String::as_str);
     unit_candidates(scope, last, ctx)
 }
 
 fn first_positional(args: &[String]) -> Option<&str> {
     args.iter()
-        .find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
+        .find(|arg| !arg.starts_with('-'))
+        .map(String::as_str)
 }
 
 fn unit_candidates(scope: &[&str], prefix: &str, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let mut args: Vec<String> = vec![ctx.bin("systemctl")];
-    args.extend(scope.iter().map(|s| s.to_string()));
+    args.extend(scope.iter().map(ToString::to_string));
     args.extend(
         [
             "list-units",
@@ -74,7 +75,7 @@ fn unit_candidates(scope: &[&str], prefix: &str, ctx: &DynCtx) -> Option<Vec<Can
             "--no-legend",
         ]
         .into_iter()
-        .map(str::to_string),
+        .map(str::to_owned),
     );
     args.push(format!("{prefix}*"));
     let out = run(&args, ctx)?;
@@ -112,9 +113,11 @@ fn journalctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidat
     if !takes_unit {
         return None;
     }
-    let user_scope = spans.iter().any(|s| s == "--user-unit" || s == "--user");
+    let user_scope = spans
+        .iter()
+        .any(|span| span == "--user-unit" || span == "--user");
     let scope: &[&str] = if user_scope { &["--user"] } else { &[] };
-    let last = spans.last().map(String::as_str).unwrap_or("");
+    let last = spans.last().map_or("", String::as_str);
     unit_candidates(scope, last, ctx)
 }
 
@@ -124,7 +127,7 @@ fn coredumpctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candida
     if !unit_verbs.contains(&verb.as_str()) || spans.len() < 3 {
         return None;
     }
-    let last = spans.last().map(String::as_str).unwrap_or("");
+    let last = spans.last().map_or("", String::as_str);
     // units are valid only as the `-u`/`--unit` value; the bare MATCH positional
     // takes a PID, COMM, or exe path. only offer units for `-u` so they don't
     // leak into the positional where they can never match a recorded coredump.
@@ -138,11 +141,7 @@ fn coredumpctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candida
 
     let mut args: Vec<String> = vec![ctx.bin("coredumpctl"), "list".into()];
     args.extend(ctx.limit_args("-n"));
-    args.extend(
-        ["--no-pager", "--no-legend"]
-            .into_iter()
-            .map(str::to_string),
-    );
+    args.extend(["--no-pager", "--no-legend"].into_iter().map(str::to_owned));
     if let Some(text) = run(&args, ctx) {
         for line in text.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -175,7 +174,7 @@ fn loginctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>
         "terminate-session",
         "kill-session",
     ];
-    let sub = spans.get(1).map(String::as_str).unwrap_or("");
+    let sub = spans.get(1).map_or("", String::as_str);
     if user_verbs.contains(&sub) && spans.len() >= 3 {
         let out = run(
             &[
@@ -236,7 +235,7 @@ fn machinectl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidat
         "copy-to",
         "copy-from",
     ];
-    let sub = spans.get(1).map(String::as_str).unwrap_or("");
+    let sub = spans.get(1).map_or("", String::as_str);
     if !verbs.contains(&sub) || spans.len() < 3 {
         return None;
     }
@@ -270,7 +269,7 @@ fn networkctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidat
         "reconfigure",
         "delete",
     ];
-    let sub = spans.get(1).map(String::as_str).unwrap_or("");
+    let sub = spans.get(1).map_or("", String::as_str);
     if !verbs.contains(&sub) || spans.len() < 3 {
         return None;
     }

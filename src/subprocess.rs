@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! subprocess runner, unix-only. the child is its own pgid leader; on timeout
-//! killpg takes the whole tree so wrapped `--help` and forked grandchildren go
-//! too. pipes are non-blocking so poll-then-read never blocks on the next chunk.
+//! subprocess runner, unix-only.
+//!
+//! the child is its own pgid leader; on timeout killpg takes the whole tree so
+//! wrapped `--help` and forked grandchildren go too. pipes are non-blocking so
+//! poll-then-read never blocks on the next chunk.
 
-use std::io::Read;
-use std::os::fd::AsRawFd;
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::env;
+use std::ffi::OsString;
+use std::io::{self, ErrorKind, Read};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::process::CommandExt as _;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// drop DISPLAY-family vars so gui tools don't pop windows during `--help`.
 /// cached: indexing spawns thousands of times.
-pub fn safe_env_vars() -> &'static [(std::ffi::OsString, std::ffi::OsString)] {
-    static CACHE: std::sync::OnceLock<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
-        std::sync::OnceLock::new();
+pub fn safe_env_vars() -> &'static [(OsString, OsString)] {
+    static CACHE: OnceLock<Vec<(OsString, OsString)>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        std::env::vars_os()
-            .filter(|(k, _)| safe_env_key(&k.to_string_lossy()))
+        env::vars_os()
+            .filter(|(key, _)| safe_env_key(&key.to_string_lossy()))
             .collect()
     })
 }
@@ -44,11 +49,10 @@ pub fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
     run_cmd_inner(args, timeout_ms, false, false, |_| {})
 }
 
-pub fn run_cmd_with(
-    args: &[String],
-    timeout_ms: u64,
-    customize: impl FnOnce(&mut Command),
-) -> Option<String> {
+pub fn run_cmd_with<F>(args: &[String], timeout_ms: u64, customize: F) -> Option<String>
+where
+    F: FnOnce(&mut Command),
+{
     run_cmd_inner(args, timeout_ms, false, false, customize)
 }
 
@@ -58,21 +62,58 @@ pub fn run_quiet(args: &[String], timeout_ms: u64) -> Option<String> {
     run_cmd_inner(args, timeout_ms, true, true, |_| {})
 }
 
-pub fn run_quiet_with(
-    args: &[String],
-    timeout_ms: u64,
-    customize: impl FnOnce(&mut Command),
-) -> Option<String> {
+pub fn run_quiet_with<F>(args: &[String], timeout_ms: u64, customize: F) -> Option<String>
+where
+    F: FnOnce(&mut Command),
+{
     run_cmd_inner(args, timeout_ms, true, true, customize)
 }
 
-fn run_cmd_inner(
+enum Drained {
+    Pending,
+    Closed,
+    Capped,
+}
+
+fn drain(reader: &mut dyn Read, chunk: &mut [u8], buf: &mut Vec<u8>) -> Drained {
+    loop {
+        match reader.read(chunk) {
+            Ok(0) => return Drained::Closed,
+            Ok(read) => {
+                buf.extend_from_slice(&chunk[..read]);
+                if buf.len() >= MAX_CAPTURE_BYTES {
+                    return Drained::Capped;
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => return Drained::Pending,
+            Err(_) => return Drained::Closed,
+        }
+    }
+}
+
+fn set_nonblocking(fd: RawFd) {
+    // SAFETY: fd is an open pipe owned by the caller's ChildStdout/ChildStderr.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: same fd, F_SETFL only changes its status flags.
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+}
+
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "reaping the child is best-effort, the captured output is already decided"
+)]
+fn run_cmd_inner<F>(
     args: &[String],
     timeout_ms: u64,
     discard_stderr: bool,
     inherit_cwd: bool,
-    customize: impl FnOnce(&mut Command),
-) -> Option<String> {
+    customize: F,
+) -> Option<String>
+where
+    F: FnOnce(&mut Command),
+{
     if args.is_empty() {
         return None;
     }
@@ -86,8 +127,8 @@ fn run_cmd_inner(
         cmd.stderr(Stdio::piped());
     }
     cmd.env_clear();
-    for (k, v) in safe_env_vars() {
-        cmd.env(k, v);
+    for (key, value) in safe_env_vars() {
+        cmd.env(key, value);
     }
     if !inherit_cwd {
         cmd.current_dir("/tmp");
@@ -96,24 +137,20 @@ fn run_cmd_inner(
     customize(&mut cmd);
 
     let mut child = cmd.spawn().ok()?;
-    let pgid = child.id() as i32;
+    let pgid = child.id().cast_signed();
     let mut stdout = child.stdout.take()?;
     let mut stderr = child.stderr.take();
     let stdout_fd = stdout.as_raw_fd();
-    let stderr_fd = stderr.as_ref().map(|s| s.as_raw_fd());
+    let stderr_fd = stderr.as_ref().map(AsRawFd::as_raw_fd);
 
-    unsafe {
-        let flags = libc::fcntl(stdout_fd, libc::F_GETFL);
-        libc::fcntl(stdout_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        if let Some(fd) = stderr_fd {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
+    set_nonblocking(stdout_fd);
+    if let Some(fd) = stderr_fd {
+        set_nonblocking(fd);
     }
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
-    let mut chunk = [0u8; 4096];
+    let mut chunk = [0_u8; 4096];
     let mut stdout_open = true;
     let mut stderr_open = stderr_fd.is_some();
     let mut timed_out = false;
@@ -125,9 +162,9 @@ fn run_cmd_inner(
             timed_out = true;
             break;
         }
-        let remaining_ms = (deadline - now).as_millis().min(i32::MAX as u128) as i32;
+        let remaining_ms = i32::try_from((deadline - now).as_millis()).unwrap_or(i32::MAX);
 
-        let mut fds = [
+        let mut fds: [libc::pollfd; 2] = [
             libc::pollfd {
                 fd: if stdout_open { stdout_fd } else { -1 },
                 events: libc::POLLIN,
@@ -143,47 +180,36 @@ fn run_cmd_inner(
                 revents: 0,
             },
         ];
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, remaining_ms) };
-        if n < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+        // SAFETY: fds is a live array of exactly 2 pollfd entries.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, remaining_ms) };
+        if ready < 0 {
+            if io::Error::last_os_error().kind() == ErrorKind::Interrupted {
                 continue;
             }
             break;
         }
-        if n == 0 {
+        if ready == 0 {
             continue;
         }
 
-        for (i, pfd) in fds.iter().enumerate() {
+        for (index, pfd) in fds.iter().enumerate() {
             if pfd.revents == 0 {
                 continue;
             }
-            let (reader, open): (&mut dyn Read, &mut bool) = if i == 0 {
-                (&mut stdout as &mut dyn Read, &mut stdout_open)
+            let (reader, open): (&mut dyn Read, &mut bool) = if index == 0 {
+                (&mut stdout, &mut stdout_open)
             } else {
                 match stderr.as_mut() {
-                    Some(s) => (s as &mut dyn Read, &mut stderr_open),
+                    Some(err_pipe) => (err_pipe, &mut stderr_open),
                     None => continue,
                 }
             };
-            loop {
-                match reader.read(&mut chunk) {
-                    Ok(0) => {
-                        *open = false;
-                        break;
-                    }
-                    Ok(read) => {
-                        buf.extend_from_slice(&chunk[..read]);
-                        if buf.len() >= MAX_CAPTURE_BYTES {
-                            capped = true;
-                            break 'capture;
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => {
-                        *open = false;
-                        break;
-                    }
+            match drain(reader, &mut chunk, &mut buf) {
+                Drained::Pending => {}
+                Drained::Closed => *open = false,
+                Drained::Capped => {
+                    capped = true;
+                    break 'capture;
                 }
             }
             if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
@@ -199,15 +225,16 @@ fn run_cmd_inner(
             timed_out = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(1));
+        thread::sleep(Duration::from_millis(1));
     }
 
     if timed_out || capped {
+        // SAFETY: killpg takes plain integers, pgid is the child's own group.
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
         }
     }
-    let _ = child.wait();
+    let _: io::Result<ExitStatus> = child.wait();
 
     if timed_out || capped || buf.is_empty() {
         None

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
-use std::path::Path;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
@@ -7,40 +9,37 @@ use crate::dynamic::Slot;
 use crate::subprocess;
 
 // the typed candidate and scorer are shared with the static completer.
-pub(crate) use crate::complete::{Candidate, fuzzy_score};
+use crate::complete::{Candidate, fuzzy_score};
 
 #[derive(Clone, Copy)]
-pub(crate) struct DynCtx<'a> {
-    pub(crate) deadline: Option<Instant>,
-    pub(crate) limit: usize,
-    pub(crate) cmd_name: &'a str,
-    pub(crate) explicit_cmd_path: Option<&'a Path>,
-    pub(crate) slot: Slot<'a>,
+pub struct DynCtx<'span> {
+    pub deadline: Option<Instant>,
+    pub limit: usize,
+    pub cmd_name: &'span str,
+    pub explicit_cmd_path: Option<&'span Path>,
+    pub slot: Slot<'span>,
 }
 
 impl DynCtx<'_> {
     pub(crate) fn ms_left(&self) -> u64 {
-        match self.deadline {
-            None => u64::MAX,
-            Some(d) => d
+        self.deadline.map_or(u64::MAX, |deadline| {
+            let left = deadline
                 .saturating_duration_since(Instant::now())
-                .as_millis()
-                .min(u64::MAX as u128) as u64,
-        }
+                .as_millis();
+            u64::try_from(left).unwrap_or(u64::MAX)
+        })
     }
 
     pub(crate) fn budget_exhausted(&self) -> bool {
-        match self.deadline {
-            None => false,
-            Some(d) => Instant::now() >= d,
-        }
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     pub(crate) fn limit_args(&self, flag: &str) -> Vec<String> {
         if self.limit == 0 {
             Vec::new()
         } else {
-            vec![flag.to_string(), self.limit.to_string()]
+            vec![flag.to_owned(), self.limit.to_string()]
         }
     }
 
@@ -50,7 +49,7 @@ impl DynCtx<'_> {
         {
             return path.to_string_lossy().into_owned();
         }
-        name.to_string()
+        name.to_owned()
     }
 
     pub(crate) fn command_spans(&self, spans: &[String]) -> Vec<String> {
@@ -64,19 +63,19 @@ impl DynCtx<'_> {
     }
 }
 
-pub(crate) fn run(args: &[String], ctx: &DynCtx) -> Option<String> {
+pub fn run(args: &[String], ctx: &DynCtx) -> Option<String> {
     subprocess::run_quiet(args, ctx.ms_left())
 }
 
 /// scrape runner (cwd /tmp) for providers reading tool output, not repo state.
 /// adb's `devices`/`pm list` must not inherit the user's cwd.
-pub(crate) fn run_scrape(args: &[String], ctx: &DynCtx) -> Option<String> {
+pub fn run_scrape(args: &[String], ctx: &DynCtx) -> Option<String> {
     subprocess::run_cmd(args, ctx.ms_left())
 }
 
 /// resolve a bare name through PATH (adb, when no explicit path was given).
-pub(crate) fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
-    let path_var = std::env::var("PATH").ok()?;
+pub fn find_in_path(name: &str) -> Option<PathBuf> {
+    let path_var = env::var("PATH").ok()?;
     for dir in path_var.split(':') {
         let candidate = Path::new(dir).join(name);
         if is_executable(&candidate) {
@@ -87,23 +86,20 @@ pub(crate) fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
 }
 
 fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
-        .unwrap_or(false)
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
 }
 
-pub(crate) fn run_with(
-    args: &[String],
-    ctx: &DynCtx,
-    customize: impl FnOnce(&mut Command),
-) -> Option<String> {
+pub fn run_with<F>(args: &[String], ctx: &DynCtx, customize: F) -> Option<String>
+where
+    F: FnOnce(&mut Command),
+{
     subprocess::run_quiet_with(args, ctx.ms_left(), customize)
 }
 
 /// drop exact-match subcommand/external candidates so a typed-out word isn't
 /// echoed back, masking downstream completers.
-pub(crate) fn filter_candidates(items: Vec<Candidate>, prefix: &str) -> Option<Vec<Candidate>> {
+pub fn filter_candidates(items: Vec<Candidate>, prefix: &str) -> Option<Vec<Candidate>> {
     if items.is_empty() {
         return None;
     }
@@ -127,22 +123,26 @@ pub(crate) fn filter_candidates(items: Vec<Candidate>, prefix: &str) -> Option<V
     if scored.is_empty() {
         return None;
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    Some(scored.into_iter().map(|(_, _, c)| c).collect())
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    Some(
+        scored
+            .into_iter()
+            .map(|(_, _, candidate)| candidate)
+            .collect(),
+    )
 }
 
 /// shared tab-split helper for command output with tabular templates.
-pub(crate) fn parse_tabular<F>(out: &str, min_parts: usize, mk: F) -> Vec<Candidate>
+pub fn parse_tabular<F>(out: &str, make: F) -> Vec<Candidate>
 where
-    F: Fn(&[&str]) -> Candidate,
+    F: Fn(&[&str]) -> Option<Candidate>,
 {
     let mut candidates = Vec::new();
     for line in out.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < min_parts {
-            continue;
+        if let Some(candidate) = make(&parts) {
+            candidates.push(candidate);
         }
-        candidates.push(mk(&parts));
     }
     candidates
 }

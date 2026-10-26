@@ -4,18 +4,21 @@
 //! subcommand names at every level walks past that guard — so without a hard
 //! budget the work is breadth^depth and a single binary can write millions of
 //! cache files. this exercises that exact shape and asserts the per-root node
-//! budget (INSHELLAH_MAX_INDEX_NODES) bounds it.
+//! budget (`INSHELLAH_MAX_INDEX_NODES`) bounds it.
+#![cfg(test)]
 
+use std::env;
 use std::fs;
-use std::process::Command;
+use std::path::PathBuf;
+use std::process::{self, Command};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
 }
 
 #[test]
@@ -43,23 +46,23 @@ while [ "$i" -le 8 ]; do echo "  lvl${n}sub$i   level $n child $i"; i=$((i+1)); 
 "#,
     )
     .expect("write hydra");
-    let mut perms = fs::metadata(&hydra).unwrap().permissions();
+    let mut hydra_perms = fs::metadata(&hydra).unwrap().permissions();
     {
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o755);
-    }
-    fs::set_permissions(&hydra, perms).expect("chmod");
+        use std::os::unix::fs::PermissionsExt as _;
+        hydra_perms.set_mode(0o755);
+    };
+    fs::set_permissions(&hydra, hydra_perms).expect("chmod");
 
     let nu = bindir.join("nu");
     fs::write(&nu, "#!/bin/sh\nprintf '%s\\n' '[\"nu\"]'\n").expect("write fake nu");
-    let mut perms = fs::metadata(&nu).unwrap().permissions();
+    let mut nu_perms = fs::metadata(&nu).unwrap().permissions();
     {
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o755);
-    }
-    fs::set_permissions(&nu, perms).expect("chmod fake nu");
+        use std::os::unix::fs::PermissionsExt as _;
+        nu_perms.set_mode(0o755);
+    };
+    fs::set_permissions(&nu, nu_perms).expect("chmod fake nu");
 
-    let budget = 40usize;
+    let budget = 40_usize;
     let started = Instant::now();
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("index")
@@ -85,12 +88,12 @@ while [ "$i" -le 8 ]; do echo "  lvl${n}sub$i   level $n child $i"; i=$((i+1)); 
     // would write thousands (8^10) before the deadline.
     let files = fs::read_dir(&cache)
         .expect("read cache")
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
                 .extension()
-                .map(|x| x == "json" || x == "nu")
-                .unwrap_or(false)
+                .is_some_and(|x| x == "json" || x == "nu")
         })
         .count();
     assert!(
@@ -116,5 +119,5 @@ while [ "$i" -le 8 ]; do echo "  lvl${n}sub$i   level $n child $i"; i=$((i+1)); 
         "index took too long ({elapsed:?}); budget may not be engaging"
     );
 
-    let _ = fs::remove_dir_all(&root);
+    fs::remove_dir_all(&root).expect("remove temp dir");
 }

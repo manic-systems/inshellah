@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
-use super::super::shared::{Candidate, DynCtx, run};
+use crate::complete::Candidate;
+use crate::dynamic::shared::{DynCtx, run};
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !ctx.slot.positional() {
         return None;

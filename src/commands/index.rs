@@ -2,8 +2,10 @@
 //! `inshellah index`.
 
 use std::collections::HashSet;
+use std::io;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::thread::available_parallelism;
 
 use pound::Parse;
@@ -59,7 +61,11 @@ impl Scrape {
     }
 }
 
-pub fn run(args: Args) -> std::io::Result<()> {
+#[expect(
+    clippy::exit,
+    reason = "a missing PREFIX is a usage error, reported without the `index failed` prefix"
+)]
+pub fn run(args: Args) -> io::Result<()> {
     let prefixes: Vec<PathBuf> = args
         .prefixes
         .into_iter()
@@ -67,11 +73,14 @@ pub fn run(args: Args) -> std::io::Result<()> {
         .collect();
     if prefixes.is_empty() {
         eprintln!("error: index requires at least one PREFIX");
-        std::process::exit(1);
+        process::exit(1);
     }
 
-    let bindirs: Vec<PathBuf> = prefixes.iter().map(|p| p.join("bin")).collect();
-    let mandirs: Vec<PathBuf> = prefixes.iter().map(|p| man_dir_of_prefix(p)).collect();
+    let bindirs: Vec<PathBuf> = prefixes.iter().map(|prefix| prefix.join("bin")).collect();
+    let mandirs: Vec<PathBuf> = prefixes
+        .iter()
+        .map(|prefix| man_dir_of_prefix(prefix))
+        .collect();
     cmd_index(
         &bindirs,
         &mandirs,

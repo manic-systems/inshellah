@@ -13,11 +13,13 @@
 //! Skips cleanly (passes as a no-op) when `nu` is not on PATH, so it does not
 //! break `cargo test` on machines without nushell; the flake's nushell check
 //! runs it where nu is guaranteed.
+#![cfg(test)]
 
+use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{self, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inshellah::parsers::manpage::{ManpageResult, ManpageSubcommand};
@@ -27,8 +29,7 @@ fn nu_available() -> bool {
     Command::new("nu")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|output| output.status.success())
 }
 
 fn unique_temp_dir(name: &str) -> PathBuf {
@@ -36,7 +37,7 @@ fn unique_temp_dir(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
 }
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
@@ -108,7 +109,7 @@ fn nu_tokenizer_to_real_binary_seam() {
     let completer = manifest.join("nix/inshellah-completer.nu");
     let assertions = manifest.join("tests/seam-completer.nu");
 
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let old_path = env::var_os("PATH").unwrap_or_default();
     let output = Command::new("nu")
         .arg("--no-config-file")
         .arg("-c")
@@ -140,5 +141,5 @@ fn nu_tokenizer_to_real_binary_seam() {
         "seam test failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
     );
 
-    let _ = fs::remove_dir_all(&root);
+    fs::remove_dir_all(&root).expect("remove temp dir");
 }

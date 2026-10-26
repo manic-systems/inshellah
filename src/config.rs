@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! complete-path knobs, read from INSHELLAH_* env (also set by the nixos module).
 
+use std::env;
+
 pub const DEFAULT_TIMEOUT_MS: u64 = 1200;
 
 /// 0 disables the dynamic provider.
@@ -24,7 +26,7 @@ pub struct Config {
     pub max_completions: usize,
     /// --help resolve + adb timeout (ms).
     pub timeout_ms: u64,
-    /// budget across dynamic provider subprocesses, distinct from timeout_ms.
+    /// budget across dynamic provider subprocesses, distinct from `timeout_ms`.
     pub dynamic_timeout_ms: u64,
     pub dynamic_limit: usize,
     /// rescrape user-cached sets older than this many seconds, 0 disables.
@@ -33,7 +35,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             flag_triggers: DEFAULT_FLAG_TRIGGERS.chars().collect(),
             flag_on_empty: false,
             max_completions: 0,
@@ -47,62 +49,65 @@ impl Default for Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        Self::from_lookup(|key| std::env::var(key).ok())
+        Self::from_lookup(|key| env::var(key).ok())
     }
 
     /// env source injected so tests don't touch the process env.
-    pub fn from_lookup(mut get: impl FnMut(&str) -> Option<String>) -> Self {
-        let mut cfg = Config::default();
+    pub fn from_lookup<Lookup>(mut get: Lookup) -> Self
+    where
+        Lookup: FnMut(&str) -> Option<String>,
+    {
+        let mut cfg = Self::default();
         if let Some(raw) = get("INSHELLAH_FLAG_TRIGGERS") {
             // whitespace can't start a token so drop it. empty value disables
             // prefix triggers, leaving only flag_on_empty.
-            cfg.flag_triggers = raw.chars().filter(|c| !c.is_whitespace()).collect();
+            cfg.flag_triggers = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
         }
         if let Some(raw) = get("INSHELLAH_FLAG_ON_EMPTY") {
             cfg.flag_on_empty = parse_bool(&raw);
         }
         if let Some(raw) = get("INSHELLAH_MAX_COMPLETIONS")
-            && let Ok(n) = raw.trim().parse::<usize>()
+            && let Ok(value) = raw.trim().parse::<usize>()
         {
-            cfg.max_completions = n;
+            cfg.max_completions = value;
         }
         if let Some(raw) = get("INSHELLAH_TIMEOUT_MS")
-            && let Ok(n) = raw.trim().parse::<u64>()
+            && let Ok(value) = raw.trim().parse::<u64>()
         {
-            cfg.timeout_ms = n;
+            cfg.timeout_ms = value;
         }
         if let Some(raw) = get("INSHELLAH_CACHE_TTL_SECS")
-            && let Ok(n) = raw.trim().parse::<u64>()
+            && let Ok(value) = raw.trim().parse::<u64>()
         {
-            cfg.cache_ttl_secs = n;
+            cfg.cache_ttl_secs = value;
         }
         // i64 so "-1" rejects instead of wrapping, negatives and garbage fall back.
         if let Some(raw) = get("INSHELLAH_DYNAMIC_TIMEOUT_MS")
-            && let Ok(n) = raw.trim().parse::<i64>()
-            && n >= 0
+            && let Ok(signed) = raw.trim().parse::<i64>()
+            && let Ok(value) = u64::try_from(signed)
         {
-            cfg.dynamic_timeout_ms = n as u64;
+            cfg.dynamic_timeout_ms = value;
         }
         if let Some(raw) = get("INSHELLAH_DYNAMIC_LIMIT")
-            && let Ok(n) = raw.trim().parse::<i64>()
-            && n >= 0
+            && let Ok(signed) = raw.trim().parse::<i64>()
+            && let Ok(value) = usize::try_from(signed)
         {
-            cfg.dynamic_limit = n as usize;
+            cfg.dynamic_limit = value;
         }
         cfg
     }
 
     pub fn triggers_flags(&self, token: &str) -> bool {
-        match token.chars().next() {
-            None => self.flag_on_empty,
-            Some(c) => self.flag_triggers.contains(&c),
-        }
+        token.chars().next().map_or(self.flag_on_empty, |lead| {
+            self.flag_triggers.contains(&lead)
+        })
     }
 
     /// dash keeps the dashed form so `--ver` prefers `--verbose`; any other
     /// trigger strips its lead char and matches the bare name (`+ver` -> verbose).
-    pub fn flag_needle<'a>(&self, token: &'a str) -> FlagNeedle<'a> {
-        match token.chars().next() {
+    pub fn flag_needle<'token>(&self, token: &'token str) -> FlagNeedle<'token> {
+        let mut chars = token.chars();
+        match chars.next() {
             None => FlagNeedle {
                 needle: token,
                 bare: true,
@@ -111,8 +116,8 @@ impl Config {
                 needle: token,
                 bare: false,
             },
-            Some(c) => FlagNeedle {
-                needle: &token[c.len_utf8()..],
+            Some(_) => FlagNeedle {
+                needle: chars.as_str(),
                 bare: true,
             },
         }
@@ -121,14 +126,14 @@ impl Config {
 
 /// `bare` matches `needle` against the stripped flag name, else the dashed form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlagNeedle<'a> {
-    pub needle: &'a str,
+pub struct FlagNeedle<'token> {
+    pub needle: &'token str,
     pub bare: bool,
 }
 
-fn parse_bool(s: &str) -> bool {
+fn parse_bool(raw: &str) -> bool {
     matches!(
-        s.trim().to_ascii_lowercase().as_str(),
+        raw.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
 }
@@ -141,9 +146,9 @@ mod tests {
     fn cfg_from(pairs: &[(&str, &str)]) -> Config {
         let map: HashMap<String, String> = pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
-        Config::from_lookup(|k| map.get(k).cloned())
+        Config::from_lookup(|key| map.get(key).cloned())
     }
 
     #[test]

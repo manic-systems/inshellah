@@ -5,7 +5,9 @@
 //! and optionally stopping at the first blank after some text. the knobs below
 //! express every difference.
 
-use crate::parsers::manpage::groff::{GroffLine, strip_groff_escapes, strip_space_macro_args};
+use crate::parsers::manpage::groff::{
+    GroffLine, strip_groff_escapes, strip_inline_macro_args, strip_space_macro_args,
+};
 
 /// which inline-format macros render to text inside a description body.
 #[derive(Clone, Copy)]
@@ -20,9 +22,9 @@ pub enum TagMacros {
 impl TagMacros {
     fn renders(self, name: &str) -> bool {
         match self {
-            TagMacros::None => false,
-            TagMacros::Common => matches!(name, "B" | "BI" | "BR" | "I" | "IR" | "RI"),
-            TagMacros::Wide => {
+            Self::None => false,
+            Self::Common => matches!(name, "B" | "BI" | "BR" | "I" | "IR" | "RI"),
+            Self::Wide => {
                 matches!(name, "B" | "BI" | "BR" | "I" | "IR" | "IB" | "RB" | "RI")
             }
         }
@@ -47,9 +49,9 @@ pub struct DescOpts {
 fn render_tag(name: &str, args: &str) -> String {
     match name {
         "B" | "I" => strip_space_macro_args(args),
-        _ => strip_groff_escapes(&crate::parsers::manpage::groff::strip_inline_macro_args(args))
+        _ => strip_groff_escapes(&strip_inline_macro_args(args))
             .trim()
-            .to_string(),
+            .to_owned(),
     }
 }
 
@@ -63,8 +65,8 @@ pub fn collect(lines: &[GroffLine], start: usize, opts: DescOpts) -> (String, us
             GroffLine::Macro { name, .. } if opts.skip_rs && name == "RS" => {
                 i = skip_rs_block(lines, i + 1);
             }
-            GroffLine::Text(t) => {
-                acc.push(t.clone());
+            GroffLine::Text(text) => {
+                acc.push(text.clone());
                 i += 1;
             }
             GroffLine::Macro { name, args } if opts.tags.renders(name) => {
@@ -75,7 +77,7 @@ pub fn collect(lines: &[GroffLine], start: usize, opts: DescOpts) -> (String, us
                 i += 1;
             }
             GroffLine::Blank if opts.stop_on_blank && !acc.is_empty() => break,
-            _ => i += 1,
+            GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => i += 1,
         }
     }
     (acc.join(" "), i)

@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! Shared CLI command helpers.
 
+use std::env;
 use std::path::{Path, PathBuf};
 
 use pound::Parse;
 
-use inshellah::indexer::is_executable;
+use inshellah::indexer::probe::is_executable;
 use inshellah::store::default_store_path;
 
 pub fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var("PATH").ok()?;
+    let path_var = env::var("PATH").ok()?;
     for dir in path_var.split(':') {
         let candidate = Path::new(dir).join(name);
         if is_executable(&candidate) {

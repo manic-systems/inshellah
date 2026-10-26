@@ -2,71 +2,84 @@
 //! filesystem store for parsed completion data. filenames are reversible
 //! ("git add" -> v1%git%20add.json). lookups span the user cache + system dirs.
 
-use std::collections::HashMap;
-use std::fs;
-use std::io;
+use std::collections::{BTreeSet, HashMap};
+use std::ffi::OsStr;
+use std::fmt::{self, Display, Formatter, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
+use std::{env, fs, io, iter, process};
 
 use serde_json::Value;
 
 use crate::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
 };
-pub use crate::parsers::nushell::parse_nu_completions;
+use crate::parsers::nushell::parse_nu_completions;
 use crate::types::Positional;
 
 pub fn default_store_path() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+    if let Ok(xdg) = env::var("XDG_CACHE_HOME")
         && !xdg.is_empty()
     {
         return PathBuf::from(xdg).join("inshellah");
     }
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = env::var("HOME") {
         return PathBuf::from(home).join(".cache/inshellah");
     }
     PathBuf::from(".cache/inshellah")
 }
 
+/// # Errors
+/// fails when `dir` or one of its parents cannot be created.
 pub fn ensure_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
 const ENCODED_FILENAME_PREFIX: &str = "v1%";
 
-/// percent-encode every byte outside a portable filename subset.
-pub fn filename_of_command(cmd: &str) -> String {
-    let mut out = String::from(ENCODED_FILENAME_PREFIX);
-    for b in cmd.as_bytes() {
-        match *b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' => out.push(*b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
+struct PercentEncoded<'text>(&'text str);
+
+impl Display for PercentEncoded<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        for byte in self.0.bytes() {
+            match byte {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' => {
+                    f.write_char(char::from(byte))?;
+                }
+                _ => write!(f, "%{byte:02X}")?,
+            }
         }
+        Ok(())
     }
-    out
 }
 
-/// age since the newest user-cache file for `command` was written, i.e. when
-/// this set was last resolved. checks `user_dir` only; system/index dirs are
-/// never auto-refreshed. None when no user-cache file exists.
+/// percent-encode every byte outside a portable filename subset.
+pub fn filename_of_command(cmd: &str) -> String {
+    format!("{ENCODED_FILENAME_PREFIX}{}", PercentEncoded(cmd))
+}
+
+/// age since the newest user-cache file for `command` was written.
+///
+/// i.e. when this set was last resolved. checks `user_dir` only; system/index
+/// dirs are never auto-refreshed. None when no user-cache file exists.
 pub fn user_cache_age(user_dir: &Path, command: &str) -> Option<Duration> {
     let now = SystemTime::now();
     let base = filename_of_command(command);
     let newest = ["nu", "json"]
         .map(|ext| user_dir.join(format!("{base}.{ext}")))
         .into_iter()
-        .filter_map(|path| fs::metadata(&path).and_then(|m| m.modified()).ok())
+        .filter_map(|path| fs::metadata(&path).and_then(|meta| meta.modified()).ok())
         .max()?;
     // future-dated mtime (clock skew) saturates to age 0.
     Some(now.duration_since(newest).unwrap_or_default())
 }
 
-fn decode_hex(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
+const fn decode_hex(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        b'A'..=b'F' => Some(digit - b'A' + 10),
         _ => None,
     }
 }
@@ -94,67 +107,70 @@ pub fn command_of_filename(base: &str) -> Option<String> {
     decode_encoded_filename(base.strip_prefix(ENCODED_FILENAME_PREFIX)?)
 }
 
-fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\x08' => out.push_str("\\b"),
-            '\x0c' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+struct JsonEscaped<'text>(&'text str);
+
+impl Display for JsonEscaped<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        for ch in self.0.chars() {
+            match ch {
+                '"' => f.write_str("\\\"")?,
+                '\\' => f.write_str("\\\\")?,
+                '\n' => f.write_str("\\n")?,
+                '\r' => f.write_str("\\r")?,
+                '\t' => f.write_str("\\t")?,
+                '\x08' => f.write_str("\\b")?,
+                '\x0c' => f.write_str("\\f")?,
+                control if control < '\x20' => {
+                    write!(f, "\\u{:04x}", u32::from(control))?;
+                }
+                other => f.write_char(other)?,
             }
-            c => out.push(c),
         }
+        Ok(())
     }
-    out
 }
 
-fn json_string(s: &str) -> String {
-    format!("\"{}\"", escape_json(s))
+fn json_string(text: &str) -> String {
+    format!("\"{}\"", JsonEscaped(text))
 }
 
-fn json_switch(s: &OwnedSwitch) -> String {
-    match s {
-        OwnedSwitch::Short(c) => {
+fn json_switch(switch: &OwnedSwitch) -> String {
+    match switch {
+        OwnedSwitch::Short(short) => {
             format!(
                 r#"{{"type":"short","char":{}}}"#,
-                json_string(&c.to_string())
+                json_string(&short.to_string())
             )
         }
-        OwnedSwitch::Long(l) => {
-            format!(r#"{{"type":"long","name":{}}}"#, json_string(l))
+        OwnedSwitch::Long(long) => {
+            format!(r#"{{"type":"long","name":{}}}"#, json_string(long))
         }
-        OwnedSwitch::Both(c, l) => format!(
+        OwnedSwitch::Both(short, long) => format!(
             r#"{{"type":"both","char":{},"name":{}}}"#,
-            json_string(&c.to_string()),
-            json_string(l)
+            json_string(&short.to_string()),
+            json_string(long)
         ),
     }
 }
 
-fn json_param(p: &Option<OwnedParam>) -> String {
-    match p {
-        None => "null".to_string(),
-        Some(OwnedParam::Mandatory(n)) => {
-            format!(r#"{{"kind":"mandatory","name":{}}}"#, json_string(n))
+fn json_param(param: Option<&OwnedParam>) -> String {
+    match param {
+        None => "null".to_owned(),
+        Some(OwnedParam::Mandatory(name)) => {
+            format!(r#"{{"kind":"mandatory","name":{}}}"#, json_string(name))
         }
-        Some(OwnedParam::Optional(n)) => {
-            format!(r#"{{"kind":"optional","name":{}}}"#, json_string(n))
+        Some(OwnedParam::Optional(name)) => {
+            format!(r#"{{"kind":"optional","name":{}}}"#, json_string(name))
         }
     }
 }
 
-fn json_entry(e: &ManpageEntry) -> String {
+fn json_entry(entry: &ManpageEntry) -> String {
     format!(
         r#"{{"switch":{},"param":{},"desc":{}}}"#,
-        json_switch(&e.switch),
-        json_param(&e.param),
-        json_string(&e.desc)
+        json_switch(&entry.switch),
+        json_param(entry.param.as_ref()),
+        json_string(&entry.desc)
     )
 }
 
@@ -170,7 +186,7 @@ fn json_subcommand(sc: &ManpageSubcommand) -> String {
     let aliases = sc
         .aliases
         .iter()
-        .map(|a| json_string(a))
+        .map(|alias| json_string(alias))
         .collect::<Vec<_>>()
         .join(",");
     format!(
@@ -181,17 +197,20 @@ fn json_subcommand(sc: &ManpageSubcommand) -> String {
     )
 }
 
-fn json_positional(name: &str, p: &Positional) -> String {
+fn json_positional(name: &str, positional: &Positional) -> String {
     format!(
         r#"{{"name":{},"optional":{},"variadic":{}}}"#,
         json_string(name),
-        p.optional,
-        p.variadic
+        positional.optional,
+        positional.variadic
     )
 }
 
-fn json_list<T, F: Fn(&T) -> String>(items: &[T], f: F) -> String {
-    let parts: Vec<String> = items.iter().map(f).collect();
+fn json_list<T, F>(items: &[T], render: F) -> String
+where
+    F: Fn(&T) -> String,
+{
+    let parts: Vec<String> = items.iter().map(render).collect();
     format!("[{}]", parts.join(","))
 }
 
@@ -202,7 +221,7 @@ pub fn json_of_result(source: &str, result: &ManpageResult) -> String {
     let positionals_parts: Vec<String> = result
         .positionals
         .iter()
-        .map(|(name, p)| json_positional(name, p))
+        .map(|(name, positional)| json_positional(name, positional))
         .collect();
     let positionals = format!("[{}]", positionals_parts.join(","));
     format!(
@@ -217,31 +236,40 @@ pub fn json_of_result(source: &str, result: &ManpageResult) -> String {
 }
 
 /// atomic: same-dir temp file then rename.
+///
+/// # Errors
+/// fails when the parent dir, the temp file, or the rename fails.
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "temp file cleanup is best effort, the rename error is what the caller sees"
+)]
 pub fn write_file(path: &Path, contents: &str) -> io::Result<()> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let parent = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => {
-            fs::create_dir_all(p)?;
-            p
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            fs::create_dir_all(dir)?;
+            dir
         }
         _ => Path::new("."),
     };
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = path
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
+        .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = parent.join(format!(".{stem}.{}.{seq}.tmp", std::process::id()));
+    let tmp = parent.join(format!(".{stem}.{}.{seq}.tmp", process::id()));
     fs::write(&tmp, contents)?;
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
+        Err(err) => {
+            let _: io::Result<()> = fs::remove_file(&tmp);
+            Err(err)
         }
     }
 }
 
+/// # Errors
+/// fails when the json write or the stale .nu removal fails.
 pub fn write_result(
     dir: &Path,
     command: &str,
@@ -259,6 +287,9 @@ pub fn write_result(
 }
 
 /// store a native-nushell completion blob the binary supplied itself.
+///
+/// # Errors
+/// fails when the .nu write or the stale json removal fails.
 pub fn write_native(dir: &Path, command: &str, data: &str) -> io::Result<()> {
     let base = filename_of_command(command);
     write_file(&dir.join(format!("{base}.nu")), data)?;
@@ -269,7 +300,7 @@ pub fn write_native(dir: &Path, command: &str, data: &str) -> io::Result<()> {
 
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
         _ => Ok(()),
     }
 }
@@ -280,13 +311,13 @@ fn read_file(path: &Path) -> Option<String> {
 
 fn read_json_result(path: &Path) -> Option<(String, ManpageResult)> {
     let data = read_file(path)?;
-    let v = serde_json::from_str::<Value>(&data).ok()?;
-    let source = v
+    let value = serde_json::from_str::<Value>(&data).ok()?;
+    let source = value
         .get("source")
-        .and_then(|x| x.as_str())
+        .and_then(Value::as_str)
         .unwrap_or("json")
-        .to_string();
-    Some((source, result_from_json(&v)))
+        .to_owned();
+    Some((source, result_from_json(&value)))
 }
 
 pub fn read_result(dir: &Path, command: &str) -> Option<(String, ManpageResult)> {
@@ -297,40 +328,45 @@ pub fn read_result(dir: &Path, command: &str) -> Option<(String, ManpageResult)>
 fn source_from_json_data(data: &str) -> String {
     serde_json::from_str::<Value>(data)
         .ok()
-        .and_then(|v| v.get("source").and_then(|x| x.as_str()).map(String::from))
-        .unwrap_or_else(|| "json".to_string())
+        .and_then(|value| {
+            value
+                .get("source")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "json".to_owned())
 }
 
-fn has_completion_content(result: &ManpageResult) -> bool {
+const fn has_completion_content(result: &ManpageResult) -> bool {
     !result.entries.is_empty()
         || !result.subcommands.is_empty()
         || !result.positional_choices.is_empty()
         || !result.positionals.is_empty()
 }
 
-fn switch_from_json(v: &Value) -> Option<OwnedSwitch> {
-    let t = v.get("type")?.as_str()?;
-    match t {
+fn switch_from_json(value: &Value) -> Option<OwnedSwitch> {
+    let kind = value.get("type")?.as_str()?;
+    match kind {
         "short" => {
-            let c = v.get("char")?.as_str()?.chars().next()?;
-            Some(OwnedSwitch::Short(c))
+            let short = value.get("char")?.as_str()?.chars().next()?;
+            Some(OwnedSwitch::Short(short))
         }
-        "long" => Some(OwnedSwitch::Long(v.get("name")?.as_str()?.to_string())),
+        "long" => Some(OwnedSwitch::Long(value.get("name")?.as_str()?.to_owned())),
         "both" => {
-            let c = v.get("char")?.as_str()?.chars().next()?;
-            let n = v.get("name")?.as_str()?.to_string();
-            Some(OwnedSwitch::Both(c, n))
+            let short = value.get("char")?.as_str()?.chars().next()?;
+            let long = value.get("name")?.as_str()?.to_owned();
+            Some(OwnedSwitch::Both(short, long))
         }
         _ => None,
     }
 }
 
-fn param_from_json(v: &Value) -> Option<OwnedParam> {
-    if v.is_null() {
+fn param_from_json(value: &Value) -> Option<OwnedParam> {
+    if value.is_null() {
         return None;
     }
-    let kind = v.get("kind")?.as_str()?;
-    let name = v.get("name")?.as_str()?.to_string();
+    let kind = value.get("kind")?.as_str()?;
+    let name = value.get("name")?.as_str()?.to_owned();
     Some(match kind {
         "mandatory" => OwnedParam::Mandatory(name),
         "optional" => OwnedParam::Optional(name),
@@ -338,14 +374,14 @@ fn param_from_json(v: &Value) -> Option<OwnedParam> {
     })
 }
 
-fn entry_from_json(v: &Value) -> Option<ManpageEntry> {
-    let switch = switch_from_json(v.get("switch")?)?;
-    let param = v.get("param").and_then(param_from_json);
-    let desc = v
+fn entry_from_json(value: &Value) -> Option<ManpageEntry> {
+    let switch = switch_from_json(value.get("switch")?)?;
+    let param = value.get("param").and_then(param_from_json);
+    let desc = value
         .get("desc")
-        .and_then(|d| d.as_str())
+        .and_then(Value::as_str)
         .unwrap_or("")
-        .to_string();
+        .to_owned();
     Some(ManpageEntry {
         switch,
         param,
@@ -353,20 +389,20 @@ fn entry_from_json(v: &Value) -> Option<ManpageEntry> {
     })
 }
 
-fn subcommand_from_json(v: &Value) -> Option<ManpageSubcommand> {
-    let name = v.get("name")?.as_str()?.to_string();
-    let desc = v
+fn subcommand_from_json(value: &Value) -> Option<ManpageSubcommand> {
+    let name = value.get("name")?.as_str()?.to_owned();
+    let desc = value
         .get("desc")
-        .and_then(|d| d.as_str())
+        .and_then(Value::as_str)
         .unwrap_or("")
-        .to_string();
+        .to_owned();
     // absent in pre-alias caches; defaults to none.
-    let aliases = v
+    let aliases = value
         .get("aliases")
-        .and_then(|a| a.as_array())
+        .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
+                .filter_map(|alias| alias.as_str().map(str::to_owned))
                 .collect()
         })
         .unwrap_or_default();
@@ -377,37 +413,43 @@ fn subcommand_from_json(v: &Value) -> Option<ManpageSubcommand> {
     })
 }
 
-fn positional_from_json(v: &Value) -> Option<(String, Positional)> {
-    let name = v.get("name")?.as_str()?.to_string();
-    let optional = v.get("optional").and_then(|x| x.as_bool()).unwrap_or(false);
-    let variadic = v.get("variadic").and_then(|x| x.as_bool()).unwrap_or(false);
+fn positional_from_json(value: &Value) -> Option<(String, Positional)> {
+    let name = value.get("name")?.as_str()?.to_owned();
+    let optional = value
+        .get("optional")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let variadic = value
+        .get("variadic")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     Some((name, Positional { optional, variadic }))
 }
 
-pub fn result_from_json(v: &Value) -> ManpageResult {
-    let description = v
+pub fn result_from_json(value: &Value) -> ManpageResult {
+    let description = value
         .get("description")
-        .and_then(|d| d.as_str())
+        .and_then(Value::as_str)
         .unwrap_or("")
-        .to_string();
-    let entries = v
+        .to_owned();
+    let entries = value
         .get("entries")
-        .and_then(|x| x.as_array())
+        .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(entry_from_json).collect())
         .unwrap_or_default();
-    let subcommands = v
+    let subcommands = value
         .get("subcommands")
-        .and_then(|x| x.as_array())
+        .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(subcommand_from_json).collect())
         .unwrap_or_default();
-    let positional_choices = v
+    let positional_choices = value
         .get("positional_choices")
-        .and_then(|x| x.as_array())
+        .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(subcommand_from_json).collect())
         .unwrap_or_default();
-    let positionals = v
+    let positionals = value
         .get("positionals")
-        .and_then(|x| x.as_array())
+        .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(positional_from_json).collect())
         .unwrap_or_default();
     ManpageResult {
@@ -427,12 +469,10 @@ pub fn lookup(dirs: &[PathBuf], command: &str) -> Option<ManpageResult> {
         .split_once(' ')
         .map(|(parent, _)| filename_of_command(parent));
     for directory in dirs {
-        let native = std::iter::once(&base_name)
-            .chain(&parent_base)
-            .find_map(|base| {
-                let data = read_file(&directory.join(format!("{base}.nu")))?;
-                Some(parse_nu_completions(command, &data)).filter(has_completion_content)
-            });
+        let native = iter::once(&base_name).chain(&parent_base).find_map(|base| {
+            let data = read_file(&directory.join(format!("{base}.nu")))?;
+            Some(parse_nu_completions(command, &data)).filter(has_completion_content)
+        });
         if native.is_some() {
             return native;
         }
@@ -465,7 +505,7 @@ fn chop_extension(filename: &str) -> Option<&str> {
 }
 
 pub fn all_commands(dirs: &[PathBuf]) -> Vec<String> {
-    let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out: BTreeSet<String> = BTreeSet::new();
     for directory in dirs {
         let Ok(entries) = fs::read_dir(directory) else {
             continue;
@@ -484,18 +524,21 @@ pub fn all_commands(dirs: &[PathBuf]) -> Vec<String> {
 
 /// only `.json`/`.nu` are removed so a misaimed dir won't wipe unrelated files.
 /// missing dir counts as already empty.
+///
+/// # Errors
+/// fails when `dir` cannot be read or a cache file cannot be removed.
 pub fn purge_dir(dir: &Path) -> io::Result<usize> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
     };
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         let is_cache_file = path
             .file_name()
-            .and_then(|n| n.to_str())
+            .and_then(OsStr::to_str)
             .and_then(chop_extension)
             .is_some();
         if is_cache_file && path.is_file() {
@@ -514,11 +557,11 @@ pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand>
             continue;
         };
         for entry in entries.flatten() {
-            let filename = entry.file_name();
-            let Some(filename) = filename.to_str() else {
+            let os_filename = entry.file_name();
+            let Some(filename) = os_filename.to_str() else {
                 continue;
             };
-            let is_json = filename.ends_with(".json");
+            let is_json = Path::new(filename).extension() == Some(OsStr::new("json"));
             let Some(base) = chop_extension(filename) else {
                 continue;
             };
@@ -536,24 +579,25 @@ pub fn subcommands_of(dirs: &[PathBuf], command: &str) -> Vec<ManpageSubcommand>
             }
             let desc = if is_json {
                 read_file(&entry.path())
-                    .and_then(|d| serde_json::from_str::<Value>(&d).ok())
-                    .and_then(|v| {
-                        v.get("description")
-                            .and_then(|x| x.as_str())
-                            .map(|s| s.to_string())
+                    .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+                    .and_then(|value| {
+                        value
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
                     })
                     .unwrap_or_default()
             } else {
                 String::new()
             };
             seen.insert(
-                rest.to_string(),
-                ManpageSubcommand::new(rest.to_string(), desc),
+                rest.to_owned(),
+                ManpageSubcommand::new(rest.to_owned(), desc),
             );
         }
     }
     let mut out: Vec<ManpageSubcommand> = seen.into_values().collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.sort_by(|left, right| left.name.cmp(&right.name));
     out
 }
 
@@ -564,13 +608,12 @@ pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
         if let Some(data) = read_file(&directory.join(format!("{base}.nu")))
             && has_completion_content(&parse_nu_completions(command, &data))
         {
-            return Some("native".to_string());
+            return Some("native".to_owned());
         }
         let json_path = directory.join(format!("{base}.json"));
         if json_path.exists() {
             let source = read_file(&json_path)
-                .map(|d| source_from_json_data(&d))
-                .unwrap_or_else(|| "json".to_string());
+                .map_or_else(|| "json".to_owned(), |data| source_from_json_data(&data));
             return Some(source);
         }
     }
@@ -580,6 +623,7 @@ pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::slice;
     use std::time::UNIX_EPOCH;
 
     fn unique_dir(tag: &str) -> PathBuf {
@@ -587,10 +631,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "inshellah-store-{tag}-{}-{nanos}",
-            std::process::id()
-        ))
+        env::temp_dir().join(format!("inshellah-store-{tag}-{}-{nanos}", process::id()))
     }
 
     #[test]
@@ -599,7 +640,7 @@ mod tests {
         let path = dir.join("nested/git_add.json");
         write_file(&path, "{\"ok\":true}").unwrap();
         assert_eq!(read_file(&path).as_deref(), Some("{\"ok\":true}"));
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -613,11 +654,11 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".tmp"))
+            .map(|entry| entry.path())
+            .filter(|leftover| leftover.extension() == Some(OsStr::new("tmp")))
             .collect();
         assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -639,9 +680,9 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let result = ManpageResult {
             entries: vec![ManpageEntry {
-                switch: OwnedSwitch::Long("json".to_string()),
+                switch: OwnedSwitch::Long("json".to_owned()),
                 param: None,
-                desc: "json flag".to_string(),
+                desc: "json flag".to_owned(),
             }],
             subcommands: Vec::new(),
             positional_choices: Vec::new(),
@@ -658,14 +699,14 @@ mod tests {
         )
         .unwrap();
 
-        let found = lookup(std::slice::from_ref(&dir), "demo").unwrap();
+        let found = lookup(slice::from_ref(&dir), "demo").unwrap();
         assert!(
             found
                 .entries
                 .iter()
-                .any(|e| matches!(&e.switch, OwnedSwitch::Long(name) if name == "json"))
+                .any(|entry| matches!(&entry.switch, OwnedSwitch::Long(name) if name == "json"))
         );
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -683,7 +724,7 @@ mod tests {
         let age = user_cache_age(&dir, "command").expect("cache file should exist");
         assert!(age.as_secs() < 60, "age too large: {age:?}");
         assert!(user_cache_age(&dir, "nonexistent-command").is_none());
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -695,16 +736,16 @@ mod tests {
             subcommands: Vec::new(),
             positional_choices: Vec::new(),
             positionals: Vec::new(),
-            description: "child desc".to_string(),
+            description: "child desc".to_owned(),
         };
         write_result(&dir, "demo foo_bar", "manpage", &result).unwrap();
         write_result(&dir, "demo foo_bar nested", "manpage", &result).unwrap();
-        let subs = subcommands_of(std::slice::from_ref(&dir), "demo");
+        let subs = subcommands_of(slice::from_ref(&dir), "demo");
         assert_eq!(
-            subs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            subs.iter().map(|sub| sub.name.as_str()).collect::<Vec<_>>(),
             vec!["foo_bar"]
         );
         assert_eq!(subs[0].desc, "child desc");
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

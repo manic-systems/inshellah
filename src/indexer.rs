@@ -1,32 +1,35 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! indexing and on-demand scrape pipeline.
 
-mod probe;
+pub mod probe;
 
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::hash::{Hash, Hasher};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsStr;
+use std::hash::{BuildHasher, Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+use std::{env, fs, io};
 
+use crate::parsers::manpage::sections::extract_synopsis_command;
 use crate::parsers::manpage::{
-    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedSwitch, extract_synopsis_command,
-    parse_manpage_string, parse_manpage_with_subs, read_manpage_file,
+    ManpageEntry, ManpageResult, ManpageSubcommand, OwnedSwitch, parse_manpage_string,
+    parse_manpage_with_subs, read_manpage_file,
 };
+use crate::parsers::nushell::parse_nu_completions;
 use crate::pool::{ScrapePool, Submitter, par_map};
 use crate::resolver::{self, NodeClass, Outcome, Probe, resolve_node};
 use crate::store::{
-    command_of_filename, ensure_dir, parse_nu_completions, read_result, write_file, write_native,
-    write_result,
+    command_of_filename, ensure_dir, read_result, write_file, write_native, write_result,
 };
 use crate::subprocess::run_cmd;
 
-use self::probe::{Classify, classify_binary, remaining_ms, skip_name, try_native_completion};
-
-pub use self::probe::{is_executable, parse_help_text, try_help, try_help_args};
+use self::probe::{
+    Classify, classify_binary, is_executable, parse_help_text, remaining_ms, skip_name, try_help,
+    try_help_args, try_native_completion,
+};
 
 const COMMAND_SECTIONS: &[u8] = &[1, 8];
 
@@ -41,11 +44,11 @@ const DEFAULT_MAX_NODES_PER_ROOT: usize = 10_000;
 pub fn cmd_name_of_manpage(path: &Path) -> String {
     let mut base = path
         .file_name()
-        .and_then(|s| s.to_str())
+        .and_then(OsStr::to_str)
         .unwrap_or("")
-        .to_string();
-    if base.ends_with(".gz") {
-        base.truncate(base.len() - 3);
+        .to_owned();
+    if let Some(stem_len) = base.strip_suffix(".gz").map(str::len) {
+        base.truncate(stem_len);
     }
     // strip section suffix, "ls.1" -> "ls"
     if let Some(dot) = base.rfind('.') {
@@ -75,17 +78,14 @@ pub fn find_manpage_path(mandirs: &[PathBuf], hyphenated: &str) -> Option<PathBu
 fn resolve_manpage_cmd_name(file: &Path, contents: &str) -> String {
     let fallback = cmd_name_of_manpage(file);
     let max_words = fallback.matches('-').count() + 1;
-    match extract_synopsis_command(contents) {
-        Some(name) => {
-            let words: Vec<&str> = name.split(' ').filter(|w| !w.is_empty()).collect();
-            if words.len() > max_words {
-                words[..max_words].join(" ")
-            } else {
-                name
-            }
+    extract_synopsis_command(contents).map_or(fallback, |name| {
+        let words: Vec<&str> = name.split(' ').filter(|w| !w.is_empty()).collect();
+        if words.len() > max_words {
+            words[..max_words].join(" ")
+        } else {
+            name
         }
-        None => fallback,
-    }
+    })
 }
 
 type NamedManpageResult = (String, ManpageResult);
@@ -133,10 +133,10 @@ pub fn list_manpages(mandirs: &[PathBuf]) -> Vec<PathBuf> {
 pub fn load_ignorelist(path: &Path) -> HashSet<String> {
     let mut out = HashSet::new();
     if let Ok(contents) = fs::read_to_string(path) {
-        for line in contents.lines() {
-            let line = line.trim();
+        for raw in contents.lines() {
+            let line = raw.trim();
             if !line.is_empty() && !line.starts_with('#') {
-                out.insert(line.to_string());
+                out.insert(line.to_owned());
             }
         }
     }
@@ -160,7 +160,7 @@ fn list_binaries(
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            let Some(name) = path.file_name().and_then(OsStr::to_str) else {
                 continue;
             };
             if skip_name(name) || nushell_commands.contains(name) {
@@ -169,73 +169,73 @@ fn list_binaries(
             if !is_executable(&path) {
                 continue;
             }
-            if seen.insert(name.to_string()) {
-                all.push((name.to_string(), path));
+            if seen.insert(name.to_owned()) {
+                all.push((name.to_owned(), path));
             }
         }
     }
-    all.sort_by(|a, b| a.0.cmp(&b.0));
+    all.sort_by(|left, right| left.0.cmp(&right.0));
     all
 }
 
-fn discover_nushell_native_commands() -> std::io::Result<HashSet<String>> {
+fn discover_nushell_native_commands() -> io::Result<HashSet<String>> {
     let script =
-        r#"scope commands | where type in [built-in keyword] | get name | sort | to json --raw"#;
+        "scope commands | where type in [built-in keyword] | get name | sort | to json --raw";
     let args = vec![
-        "nu".to_string(),
-        "--no-config-file".to_string(),
-        "--no-std-lib".to_string(),
-        "--commands".to_string(),
-        script.to_string(),
+        "nu".to_owned(),
+        "--no-config-file".to_owned(),
+        "--no-std-lib".to_owned(),
+        "--commands".to_owned(),
+        script.to_owned(),
     ];
     let out = run_cmd(&args, NUSHELL_DISCOVERY_TIMEOUT_MS).ok_or_else(|| {
-        std::io::Error::other(
-            "failed to run `nu` for Nushell native command discovery during indexing",
-        )
+        io::Error::other("failed to run `nu` for Nushell native command discovery during indexing")
     })?;
-    let value: serde_json::Value = serde_json::from_str(out.trim()).map_err(|e| {
-        std::io::Error::other(format!(
-            "failed to parse Nushell native command discovery output as JSON: {e}"
+    let value: serde_json::Value = serde_json::from_str(out.trim()).map_err(|err| {
+        io::Error::other(format!(
+            "failed to parse Nushell native command discovery output as JSON: {err}"
         ))
     })?;
     let arr = value.as_array().ok_or_else(|| {
-        std::io::Error::other("Nushell native command discovery did not return a JSON array")
+        io::Error::other("Nushell native command discovery did not return a JSON array")
     })?;
     let mut commands = HashSet::new();
     for item in arr {
         let Some(name) = item.as_str() else {
-            return Err(std::io::Error::other(
+            return Err(io::Error::other(
                 "Nushell native command discovery returned a non-string command name",
             ));
         };
         if !name.is_empty() {
-            commands.insert(name.to_string());
+            commands.insert(name.to_owned());
         }
     }
     Ok(commands)
 }
 
-fn write_nushell_native_commands(dir: &Path, commands: &HashSet<String>) -> std::io::Result<()> {
-    let mut commands: Vec<&str> = commands.iter().map(String::as_str).collect();
-    commands.sort_unstable();
-    let data = serde_json::to_string(&commands)
-        .map_err(|e| std::io::Error::other(format!("serialize Nushell native commands: {e}")))?;
+fn write_nushell_native_commands(dir: &Path, commands: &HashSet<String>) -> io::Result<()> {
+    let mut sorted: Vec<&str> = commands.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let data = serde_json::to_string(&sorted)
+        .map_err(|err| io::Error::other(format!("serialize Nushell native commands: {err}")))?;
     write_file(&dir.join(NUSHELL_NATIVE_COMMANDS_FILE), &data)
 }
 
-pub fn manpage_name_has_installed_command(name: &str, binary_names: &HashSet<String>) -> bool {
+pub fn manpage_name_has_installed_command<S>(name: &str, binary_names: &HashSet<String, S>) -> bool
+where
+    S: BuildHasher,
+{
     if binary_names.contains(name) {
         return true;
     }
     name.split_once(' ')
-        .map(|(parent, _)| binary_names.contains(parent))
-        .unwrap_or(false)
+        .is_some_and(|(parent, _)| binary_names.contains(parent))
 }
 
 fn split_command_for_binary(name: &str) -> Option<(&str, Vec<String>)> {
     let mut parts = name.split_whitespace();
     let base = parts.next()?;
-    Some((base, parts.map(str::to_string).collect()))
+    Some((base, parts.map(str::to_owned).collect()))
 }
 
 struct ScrapeCtx {
@@ -245,12 +245,12 @@ struct ScrapeCtx {
     indexed: Mutex<HashSet<String>>,
     timeout_ms: u64,
     node_budget: usize,
-    node_counts: Mutex<std::collections::HashMap<String, usize>>,
+    node_counts: Mutex<HashMap<String, usize>>,
     // roots already warned about, so the budget warning fires once each
     truncated: Mutex<HashSet<String>>,
     root_help: Mutex<HashMap<String, u64>>,
     subtree_health: Mutex<HashMap<String, SubtreeHealth>>,
-    write_error: Mutex<Option<std::io::Error>>,
+    write_error: Mutex<Option<io::Error>>,
 }
 
 // a loaded box times out healthy tools too, so only roots where nothing answered.
@@ -287,7 +287,7 @@ fn strip_subcmd_prefix(result: &mut ManpageResult, base: &str) {
     let prefix = format!("{base}-");
     for sc in &mut result.subcommands {
         if let Some(rest) = sc.name.strip_prefix(&prefix) {
-            sc.name = rest.to_string();
+            sc.name = rest.to_owned();
         }
     }
 }
@@ -347,9 +347,10 @@ fn enqueue_child_jobs(
             depth: job.depth + 1,
         });
     }
+    drop(counts);
 }
 
-fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) {
+fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>) {
     let full_cmd = job.full_cmd();
     if ctx
         .indexed
@@ -376,7 +377,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         user_dir: &ctx.cache_dir,
         timeout_ms: ctx.timeout_ms,
         // pool bounds total work + per-subprocess timeouts, so no per-job budget
-        deadline: Instant::now() + Duration::from_secs(86_400),
+        deadline: Instant::now() + Duration::from_hours(24),
         skip_manpage: ctx.help_only.contains(&job.base_cmd) || ctx.help_only.contains(&full_cmd),
         root_help: Cell::new(if is_root {
             None
@@ -404,16 +405,17 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
             .insert(job.base_cmd.clone(), hash);
     }
     if !is_root {
-        let mut health = ctx
+        let mut subtree_health = ctx
             .subtree_health
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let health = health.entry(job.base_cmd.clone()).or_default();
+        let health = subtree_health.entry(job.base_cmd.clone()).or_default();
         if probe.timed_out.get() {
             health.timeouts += 1;
         } else if matches!(outcome, Outcome::Content { .. }) {
             health.answered = true;
         }
+        drop(subtree_health);
     }
 
     match outcome {
@@ -429,21 +431,27 @@ fn process_pool_job(ctx: &ScrapeCtx, job: PoolJob, submit: &Submitter<PoolJob>) 
         } => {
             let written = write_result(&ctx.cache_dir, &full_cmd, source, &result);
             if ctx.record_write(full_cmd, written) && !probe.echoed.get() {
-                enqueue_child_jobs(ctx, &job, &children, submit);
+                enqueue_child_jobs(ctx, job, &children, submit);
             }
         }
     }
 }
 
-pub fn cmd_index(
+/// # Errors
+///
+/// fails when the cache dir, `nu` discovery, or a cache write fails.
+pub fn cmd_index<S>(
     bindirs: &[PathBuf],
     mandirs: &[PathBuf],
-    ignorelist: &HashSet<String>,
-    help_only: &HashSet<String>,
+    ignorelist: &HashSet<String, S>,
+    help_only: &HashSet<String, S>,
     dir: &Path,
     timeout_ms: u64,
     num_workers: usize,
-) -> std::io::Result<()> {
+) -> io::Result<()>
+where
+    S: BuildHasher,
+{
     ensure_dir(dir)?;
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
@@ -469,15 +477,22 @@ pub fn cmd_index(
 
 /// each command's files come from the package owning the profile's binary for
 /// its root, else from the first source that has them.
-pub fn cmd_merge(
+///
+/// # Errors
+///
+/// fails when the cache dir, `nu` discovery, a copy, or a cache write fails.
+pub fn cmd_merge<S>(
     profile_dir: &Path,
     sources: &[(PathBuf, PathBuf)],
-    ignorelist: &HashSet<String>,
-    help_only: &HashSet<String>,
+    ignorelist: &HashSet<String, S>,
+    help_only: &HashSet<String, S>,
     dir: &Path,
     timeout_ms: u64,
     num_workers: usize,
-) -> std::io::Result<()> {
+) -> io::Result<()>
+where
+    S: BuildHasher,
+{
     ensure_dir(dir)?;
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
@@ -508,8 +523,8 @@ pub fn cmd_merge(
         for entry in entries.flatten() {
             let path = entry.path();
             let (Some(stem), Some(ext)) = (
-                path.file_stem().and_then(|s| s.to_str()),
-                path.extension().and_then(|s| s.to_str()),
+                path.file_stem().and_then(OsStr::to_str),
+                path.extension().and_then(OsStr::to_str),
             ) else {
                 continue;
             };
@@ -519,15 +534,17 @@ pub fn cmd_merge(
             let Some(cmd) = command_of_filename(stem) else {
                 continue;
             };
-            let root = cmd.split(' ').next().unwrap_or_default().to_string();
-            let owner = match owner_of(&root) {
-                Some(owner) => owner.to_path_buf(),
-                None => claimed
-                    .entry(root.clone())
-                    .or_insert_with(|| index.clone())
-                    .clone(),
-            };
-            if owner == *index {
+            let root = cmd.split(' ').next().unwrap_or_default().to_owned();
+            let owning_index = owner_of(&root).map_or_else(
+                || {
+                    claimed
+                        .entry(root.clone())
+                        .or_insert_with(|| index.clone())
+                        .clone()
+                },
+                Path::to_path_buf,
+            );
+            if owning_index == *index {
                 owned.push((path, cmd, root));
             }
         }
@@ -578,20 +595,28 @@ pub fn cmd_merge(
 }
 
 impl ScrapeCtx {
-    fn new(dir: &Path, mandirs: &[PathBuf], help_only: &HashSet<String>, timeout_ms: u64) -> Self {
+    fn new<S>(
+        dir: &Path,
+        mandirs: &[PathBuf],
+        help_only: &HashSet<String, S>,
+        timeout_ms: u64,
+    ) -> Self
+    where
+        S: BuildHasher,
+    {
         Self {
             cache_dir: dir.to_path_buf(),
             mandirs: mandirs.to_vec(),
-            help_only: help_only.clone(),
+            help_only: help_only.iter().cloned().collect(),
             indexed: Mutex::new(HashSet::new()),
             timeout_ms,
             // 0/unparseable -> default; never unbounded
-            node_budget: std::env::var("INSHELLAH_MAX_INDEX_NODES")
+            node_budget: env::var("INSHELLAH_MAX_INDEX_NODES")
                 .ok()
-                .and_then(|v| v.trim().parse::<usize>().ok())
+                .and_then(|raw| raw.trim().parse::<usize>().ok())
                 .filter(|&n| n > 0)
                 .unwrap_or(DEFAULT_MAX_NODES_PER_ROOT),
-            node_counts: Mutex::new(std::collections::HashMap::new()),
+            node_counts: Mutex::new(HashMap::new()),
             truncated: Mutex::new(HashSet::new()),
             root_help: Mutex::new(HashMap::new()),
             subtree_health: Mutex::new(HashMap::new()),
@@ -599,7 +624,7 @@ impl ScrapeCtx {
         }
     }
 
-    fn record_write(&self, full_cmd: String, written: std::io::Result<()>) -> bool {
+    fn record_write(&self, full_cmd: String, written: io::Result<()>) -> bool {
         match written {
             Ok(()) => {
                 self.indexed
@@ -608,29 +633,33 @@ impl ScrapeCtx {
                     .insert(full_cmd);
                 true
             }
-            Err(e) => {
+            Err(err) => {
                 let mut first = self
                     .write_error
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 first.get_or_insert_with(|| {
-                    std::io::Error::new(e.kind(), format!("caching {full_cmd}: {e}"))
+                    io::Error::new(err.kind(), format!("caching {full_cmd}: {err}"))
                 });
                 false
             }
         }
     }
 
-    fn scrape<'a>(
+    #[expect(
+        clippy::unreachable,
+        reason = "ScrapePool::wait joins every worker, so no other strong ref survives"
+    )]
+    fn scrape<'roots>(
         self,
-        roots: impl Iterator<Item = (&'a String, &'a PathBuf)>,
+        roots: impl Iterator<Item = (&'roots String, &'roots PathBuf)>,
         num_workers: usize,
-    ) -> std::io::Result<HashSet<String>> {
+    ) -> io::Result<HashSet<String>> {
         let ctx = Arc::new(self);
         let pool = ScrapePool::new(num_workers, {
-            let ctx = ctx.clone();
+            let worker_ctx = Arc::clone(&ctx);
             move |job: PoolJob, submit: &Submitter<PoolJob>| {
-                process_pool_job(&ctx, job, submit);
+                process_pool_job(&worker_ctx, &job, submit);
             }
         });
         for (name, path) in roots {
@@ -643,17 +672,17 @@ impl ScrapeCtx {
         }
         pool.wait();
         // no workers alive, so the Arc has a single strong ref
-        let Ok(ctx) = Arc::try_unwrap(ctx) else {
+        let Ok(scraped) = Arc::try_unwrap(ctx) else {
             unreachable!("ScrapePool::wait joins every worker");
         };
-        if let Some(e) = ctx
+        if let Some(err) = scraped
             .write_error
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner)
         {
-            return Err(e);
+            return Err(err);
         }
-        Ok(ctx
+        Ok(scraped
             .indexed
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner))
@@ -666,7 +695,10 @@ struct ProfileBinaries {
 }
 
 impl ProfileBinaries {
-    fn new(binaries: &[(String, PathBuf)], ignorelist: &HashSet<String>) -> Self {
+    fn new<S>(binaries: &[(String, PathBuf)], ignorelist: &HashSet<String, S>) -> Self
+    where
+        S: BuildHasher,
+    {
         let paths: HashMap<String, PathBuf> = binaries
             .iter()
             .filter(|(name, _)| !ignorelist.contains(name))
@@ -679,18 +711,21 @@ impl ProfileBinaries {
     }
 }
 
-struct ManpagePass<'a> {
-    dir: &'a Path,
-    mandirs: &'a [PathBuf],
-    profile: &'a ProfileBinaries,
-    help_only: &'a HashSet<String>,
-    nushell_commands: &'a HashSet<String>,
+struct ManpagePass<'pass, S> {
+    dir: &'pass Path,
+    mandirs: &'pass [PathBuf],
+    profile: &'pass ProfileBinaries,
+    help_only: &'pass HashSet<String, S>,
+    nushell_commands: &'pass HashSet<String>,
     timeout_ms: u64,
     num_workers: usize,
 }
 
-impl ManpagePass<'_> {
-    fn run(&self, indexed: &mut HashSet<String>) -> std::io::Result<()> {
+impl<S> ManpagePass<'_, S>
+where
+    S: BuildHasher,
+{
+    fn run(&self, indexed: &mut HashSet<String>) -> io::Result<()> {
         let Self {
             dir,
             mandirs,
@@ -706,12 +741,12 @@ impl ManpagePass<'_> {
         // shorter filenames sort first so parents precede subpages (nix-env.1
         // before nix-env-install.1)
         let mut manpages = list_manpages(mandirs);
-        manpages.sort_by(|a, b| {
-            let alen = a.file_name().map(|s| s.len()).unwrap_or(0);
-            let blen = b.file_name().map(|s| s.len()).unwrap_or(0);
-            alen.cmp(&blen).then_with(|| a.cmp(b))
+        manpages.sort_by(|left, right| {
+            let left_len = left.file_name().map_or(0, OsStr::len);
+            let right_len = right.file_name().map_or(0, OsStr::len);
+            left_len.cmp(&right_len).then_with(|| left.cmp(right))
         });
-        let processed = par_map(manpages.iter().collect(), num_workers, |path: &PathBuf| {
+        let processed_pages = par_map(manpages.iter().collect(), num_workers, |path: &PathBuf| {
             process_manpage(path)
         });
 
@@ -722,7 +757,7 @@ impl ManpagePass<'_> {
             Some((binary_paths.get(base_cmd)?.clone(), sub_args))
         };
 
-        for (manpage_path, processed) in manpages.iter().zip(processed) {
+        for (manpage_path, processed) in manpages.iter().zip(processed_pages) {
             let Some((name, result, sub_sections)) = processed else {
                 continue;
             };
@@ -749,7 +784,7 @@ impl ManpagePass<'_> {
                         "warning: {} extracted cmd \"{}\" (already indexed), skipping",
                         manpage_path
                             .file_name()
-                            .and_then(|s| s.to_str())
+                            .and_then(OsStr::to_str)
                             .unwrap_or(""),
                         name
                     );
@@ -788,9 +823,9 @@ impl ManpagePass<'_> {
         // COMMANDS-section subcommands lacking a SUBCOMMAND section or own
         // manpage get a desc-only stub so the completer treats them as leaves.
         // taken after the `--help` supplement, which often supplies the list.
-        let plan: Vec<PlannedWrite> = plan.writes.into_iter().flatten().collect();
+        let writes: Vec<PlannedWrite> = plan.writes.into_iter().flatten().collect();
         let mut stubs: Vec<(String, String)> = Vec::new();
-        for written in par_map(plan, num_workers, |write| write.run(dir, timeout_ms)) {
+        for written in par_map(writes, num_workers, |write| write.run(dir, timeout_ms)) {
             stubs.extend(written?);
         }
         let mut stub_at: HashMap<String, usize> = HashMap::new();
@@ -829,6 +864,10 @@ pub fn resolve_and_cache(
 
 // resolves each `cmd-*.N` page's real space-separated name from its content, so
 // `subcommands_of` can surface children the parent page didn't enumerate.
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "runtime cache writes are best-effort, a failed one is rescraped next time"
+)]
 fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str) -> bool {
     let prefix = format!("{hyphenated}-");
     let mut any = false;
@@ -839,8 +878,8 @@ fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str
                 continue;
             };
             for entry in entries.flatten() {
-                let fname = entry.file_name();
-                let Some(fname) = fname.to_str() else {
+                let file_name = entry.file_name();
+                let Some(fname) = file_name.to_str() else {
                     continue;
                 };
                 let stem = fname.split('.').next().unwrap_or(fname);
@@ -848,9 +887,10 @@ fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str
                     continue;
                 }
                 if let Some((name, result, subs)) = process_manpage(&entry.path()) {
-                    let _ = write_result(user_dir, &name, "manpage", &result);
+                    let _: io::Result<()> = write_result(user_dir, &name, "manpage", &result);
                     for (sub_name, sub_result) in subs {
-                        let _ = write_result(user_dir, &sub_name, "manpage", &sub_result);
+                        let _: io::Result<()> =
+                            write_result(user_dir, &sub_name, "manpage", &sub_result);
                     }
                     any = true;
                 }
@@ -880,7 +920,7 @@ fn help_result_for_command(text: &str, sub_args: &[String]) -> Option<ManpageRes
         && result
             .subcommands
             .iter()
-            .any(|sc| sc.name.eq_ignore_ascii_case(leaf))
+            .any(|sub| sub.name.eq_ignore_ascii_case(leaf))
     {
         return None;
     }
@@ -888,15 +928,15 @@ fn help_result_for_command(text: &str, sub_args: &[String]) -> Option<ManpageRes
 }
 
 fn entry_has_long(result: &ManpageResult, long: &str) -> bool {
-    result.entries.iter().any(|e| match &e.switch {
+    result.entries.iter().any(|entry| match &entry.switch {
         OwnedSwitch::Long(name) | OwnedSwitch::Both(_, name) => name == long,
         OwnedSwitch::Short(_) => false,
     })
 }
 
 fn entry_has_short(result: &ManpageResult, short: char) -> bool {
-    result.entries.iter().any(|e| match &e.switch {
-        OwnedSwitch::Short(c) | OwnedSwitch::Both(c, _) => *c == short,
+    result.entries.iter().any(|entry| match &entry.switch {
+        OwnedSwitch::Short(found) | OwnedSwitch::Both(found, _) => *found == short,
         OwnedSwitch::Long(_) => false,
     })
 }
@@ -911,16 +951,24 @@ fn entry_overlaps(result: &ManpageResult, entry: &ManpageEntry) -> bool {
     }
 }
 
-fn switches_overlap(a: &OwnedSwitch, b: &OwnedSwitch) -> bool {
-    match (a, b) {
-        (OwnedSwitch::Short(a), OwnedSwitch::Short(b))
-        | (OwnedSwitch::Short(a), OwnedSwitch::Both(b, _))
-        | (OwnedSwitch::Both(a, _), OwnedSwitch::Short(b)) => a == b,
-        (OwnedSwitch::Long(a), OwnedSwitch::Long(b))
-        | (OwnedSwitch::Long(a), OwnedSwitch::Both(_, b))
-        | (OwnedSwitch::Both(_, a), OwnedSwitch::Long(b)) => a.eq_ignore_ascii_case(b),
-        (OwnedSwitch::Both(a_short, a_long), OwnedSwitch::Both(b_short, b_long)) => {
-            a_short == b_short || a_long.eq_ignore_ascii_case(b_long)
+fn switches_overlap(left: &OwnedSwitch, right: &OwnedSwitch) -> bool {
+    match (left, right) {
+        (
+            OwnedSwitch::Short(left_short) | OwnedSwitch::Both(left_short, _),
+            OwnedSwitch::Short(right_short),
+        )
+        | (OwnedSwitch::Short(left_short), OwnedSwitch::Both(right_short, _)) => {
+            left_short == right_short
+        }
+        (
+            OwnedSwitch::Long(left_long) | OwnedSwitch::Both(_, left_long),
+            OwnedSwitch::Long(right_long),
+        )
+        | (OwnedSwitch::Long(left_long), OwnedSwitch::Both(_, right_long)) => {
+            left_long.eq_ignore_ascii_case(right_long)
+        }
+        (OwnedSwitch::Both(left_short, left_long), OwnedSwitch::Both(right_short, right_long)) => {
+            left_short == right_short || left_long.eq_ignore_ascii_case(right_long)
         }
         (OwnedSwitch::Short(_), OwnedSwitch::Long(_))
         | (OwnedSwitch::Long(_), OwnedSwitch::Short(_)) => false,
@@ -928,10 +976,9 @@ fn switches_overlap(a: &OwnedSwitch, b: &OwnedSwitch) -> bool {
 }
 
 fn merge_entry_description(existing: &mut ManpageEntry, incoming: &ManpageEntry) -> bool {
-    let mut changed = false;
-    if existing.desc.is_empty() && !incoming.desc.is_empty() {
-        existing.desc = incoming.desc.clone();
-        changed = true;
+    let changed = existing.desc.is_empty() && !incoming.desc.is_empty();
+    if changed {
+        existing.desc.clone_from(&incoming.desc);
     }
     changed
 }
@@ -949,8 +996,8 @@ fn merge_matching_entry_descriptions(result: &mut ManpageResult, incoming: &Manp
 fn fill_flag_alias_from_help(result: &mut ManpageResult, short: char, long: &str) -> bool {
     if !entry_has_long(result, long) {
         for entry in &mut result.entries {
-            if matches!(entry.switch, OwnedSwitch::Short(c) if c == short) {
-                entry.switch = OwnedSwitch::Both(short, long.to_string());
+            if matches!(entry.switch, OwnedSwitch::Short(found) if found == short) {
+                entry.switch = OwnedSwitch::Both(short, long.to_owned());
                 return true;
             }
         }
@@ -958,7 +1005,7 @@ fn fill_flag_alias_from_help(result: &mut ManpageResult, short: char, long: &str
     if !entry_has_short(result, short) {
         for entry in &mut result.entries {
             if matches!(&entry.switch, OwnedSwitch::Long(name) if name == long) {
-                entry.switch = OwnedSwitch::Both(short, long.to_string());
+                entry.switch = OwnedSwitch::Both(short, long.to_owned());
                 return true;
             }
         }
@@ -967,11 +1014,9 @@ fn fill_flag_alias_from_help(result: &mut ManpageResult, short: char, long: &str
 }
 
 fn supplement_result_from_help(result: &mut ManpageResult, help: &ManpageResult) -> bool {
-    let mut changed = false;
-
-    if result.description.is_empty() && !help.description.is_empty() {
-        result.description = help.description.clone();
-        changed = true;
+    let mut changed = result.description.is_empty() && !help.description.is_empty();
+    if changed {
+        result.description.clone_from(&help.description);
     }
 
     for help_entry in &help.entries {
@@ -995,33 +1040,30 @@ fn supplement_result_from_help(result: &mut ManpageResult, help: &ManpageResult)
                 changed |= merge_matching_entry_descriptions(result, help_entry);
                 continue;
             }
-            _ => {}
+            OwnedSwitch::Long(_) | OwnedSwitch::Short(_) => {}
         }
         result.entries.push(help_entry.clone());
         changed = true;
     }
 
     for help_sub in &help.subcommands {
-        match result
+        if let Some(existing) = result
             .subcommands
             .iter_mut()
-            .find(|sc| sc.name.eq_ignore_ascii_case(&help_sub.name))
+            .find(|sub| sub.name.eq_ignore_ascii_case(&help_sub.name))
         {
-            Some(existing) => {
-                if existing.desc.is_empty() && !help_sub.desc.is_empty() {
-                    existing.desc = help_sub.desc.clone();
-                    changed = true;
-                }
-                // manpage subs carry no aliases; adopt help's (`help | h`).
-                if existing.aliases.is_empty() && !help_sub.aliases.is_empty() {
-                    existing.aliases = help_sub.aliases.clone();
-                    changed = true;
-                }
-            }
-            None => {
-                result.subcommands.push(help_sub.clone());
+            if existing.desc.is_empty() && !help_sub.desc.is_empty() {
+                existing.desc.clone_from(&help_sub.desc);
                 changed = true;
             }
+            // manpage subs carry no aliases; adopt help's (`help | h`).
+            if existing.aliases.is_empty() && !help_sub.aliases.is_empty() {
+                existing.aliases.clone_from(&help_sub.aliases);
+                changed = true;
+            }
+        } else {
+            result.subcommands.push(help_sub.clone());
+            changed = true;
         }
     }
 
@@ -1055,14 +1097,17 @@ fn supplement_result_from_duplicate_manpage(
 }
 
 fn merge_sources(existing: &str, incoming: &str) -> String {
-    let mut parts: Vec<&str> = existing.split('+').filter(|p| !p.is_empty()).collect();
-    for part in incoming.split('+').filter(|p| !p.is_empty()) {
+    let mut parts: Vec<&str> = existing
+        .split('+')
+        .filter(|part| !part.is_empty())
+        .collect();
+    for part in incoming.split('+').filter(|piece| !piece.is_empty()) {
         if !parts.contains(&part) {
             parts.push(part);
         }
     }
     if parts.is_empty() {
-        incoming.to_string()
+        incoming.to_owned()
     } else {
         parts.join("+")
     }
@@ -1073,7 +1118,7 @@ fn merge_indexed_result(
     name: &str,
     incoming_source: &str,
     incoming: &ManpageResult,
-) -> std::io::Result<bool> {
+) -> io::Result<bool> {
     let Some((existing_source, mut existing)) = read_result(dir, name) else {
         return Ok(false);
     };
@@ -1112,18 +1157,19 @@ impl WritePlan {
 }
 
 impl PlannedWrite {
-    fn run(mut self, dir: &Path, timeout_ms: u64) -> std::io::Result<Vec<(String, String)>> {
-        let mut source = String::from("manpage");
-        if let Some((path, sub_args)) = &self.help
+    fn run(mut self, dir: &Path, timeout_ms: u64) -> io::Result<Vec<(String, String)>> {
+        let mut source = if let Some((path, sub_args)) = &self.help
             && supplement_result_from_help_command(&mut self.result, path, sub_args, timeout_ms)
         {
-            source = String::from("manpage+help");
-        }
+            String::from("manpage+help")
+        } else {
+            String::from("manpage")
+        };
         let stubs = if self.stubs {
             self.result
                 .subcommands
                 .iter()
-                .map(|sc| (format!("{} {}", self.name, sc.name), sc.desc.clone()))
+                .map(|sub| (format!("{} {}", self.name, sub.name), sub.desc.clone()))
                 .collect()
         } else {
             Vec::new()
@@ -1160,9 +1206,9 @@ fn supplement_result_from_help_command(
 
 // group command with a leftover `<command>`/`<subcommands>` placeholder and no
 // subcommands populated.
-pub fn looks_like_unenumerated_group(r: &ManpageResult) -> bool {
-    r.subcommands.is_empty()
-        && r.positionals.iter().any(|(n, _)| {
+pub fn looks_like_unenumerated_group(result: &ManpageResult) -> bool {
+    result.subcommands.is_empty()
+        && result.positionals.iter().any(|(n, _)| {
             matches!(
                 n.to_ascii_lowercase().as_str(),
                 "command" | "commands" | "subcommand" | "subcommands"
@@ -1173,10 +1219,10 @@ pub fn looks_like_unenumerated_group(r: &ManpageResult) -> bool {
 // filesystem/subprocess-backed `Probe` for one binary. the one place the
 // manpage+help supplement and group-recovery I/O lives, shared by runtime and
 // pool drivers.
-struct RealProbe<'a> {
-    path: &'a Path,
-    mandirs: &'a [PathBuf],
-    user_dir: &'a Path,
+struct RealProbe<'probe> {
+    path: &'probe Path,
+    mandirs: &'probe [PathBuf],
+    user_dir: &'probe Path,
     timeout_ms: u64,
     deadline: Instant,
     // indexer's `--help-only` list forces straight to `--help`; runtime
@@ -1272,6 +1318,10 @@ fn resolve_one(probe: &RealProbe, base_cmd: &str, sub_args: &[String]) -> Outcom
     )
 }
 
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "runtime cache writes are best-effort, the resolved result is still returned"
+)]
 pub fn resolve_command_path_and_cache(
     user_dir: &Path,
     mandirs: &[PathBuf],
@@ -1296,7 +1346,7 @@ pub fn resolve_command_path_and_cache(
     let full = resolver::full_cmd(base_cmd, sub_args);
     match resolve_one(&probe, base_cmd, sub_args) {
         Outcome::Native { nu } => {
-            let _ = write_native(user_dir, base_cmd, &nu);
+            let _: io::Result<()> = write_native(user_dir, base_cmd, &nu);
             Some(parse_nu_completions(&full, &nu))
         }
         Outcome::Empty => None,
@@ -1305,7 +1355,7 @@ pub fn resolve_command_path_and_cache(
             source,
             children,
         } => {
-            let _ = write_result(user_dir, &full, source, &result);
+            let _: io::Result<()> = write_result(user_dir, &full, source, &result);
             // only --help eagerly populates the subtree; manpage children are
             // found on demand via sibling pages.
             if source == "help" {
@@ -1317,6 +1367,10 @@ pub fn resolve_command_path_and_cache(
 }
 
 // bounded by the result cap and shared deadline.
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "runtime cache writes are best-effort, a failed one is rescraped next time"
+)]
 fn resolve_subtree(
     probe: &RealProbe,
     base_cmd: &str,
@@ -1324,20 +1378,22 @@ fn resolve_subtree(
     roots: Vec<String>,
     deadline: Instant,
 ) {
-    let mut queue: std::collections::VecDeque<Vec<String>> = roots
+    let mut queue: VecDeque<Vec<String>> = roots
         .into_iter()
-        .map(|c| {
-            let mut v = base_sub_args.to_vec();
-            v.push(c);
-            v
+        .map(|child| {
+            let mut args = base_sub_args.to_vec();
+            args.push(child);
+            args
         })
         .collect();
-    let mut count = 0usize;
+    let mut count = 0_usize;
     while let Some(sub) = queue.pop_front() {
         if count >= MAX_RESOLVE_RESULTS || Instant::now() >= deadline {
             break;
         }
-        if (sub.len() - base_sub_args.len()) as u32 > MAX_RECURSE_DEPTH {
+        if u32::try_from(sub.len() - base_sub_args.len())
+            .map_or(true, |depth| depth > MAX_RECURSE_DEPTH)
+        {
             continue;
         }
         if let Outcome::Content {
@@ -1347,11 +1403,11 @@ fn resolve_subtree(
         } = resolve_one(probe, base_cmd, &sub)
         {
             let full = resolver::full_cmd(base_cmd, &sub);
-            let _ = write_result(probe.user_dir, &full, source, &result);
+            let _: io::Result<()> = write_result(probe.user_dir, &full, source, &result);
             count += 1;
-            for c in children {
+            for child in children {
                 let mut next = sub.clone();
-                next.push(c);
+                next.push(child);
                 queue.push_back(next);
             }
         }
@@ -1364,7 +1420,7 @@ mod tests {
 
     #[test]
     fn manpage_names_must_match_installed_binary_or_subcommand_parent() {
-        let binary_names = HashSet::from(["git".to_string(), "getent".to_string()]);
+        let binary_names = HashSet::from(["git".to_owned(), "getent".to_owned()]);
 
         assert!(manpage_name_has_installed_command("git", &binary_names));
         assert!(manpage_name_has_installed_command("git add", &binary_names));

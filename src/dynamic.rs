@@ -15,31 +15,31 @@ use shared::{DynCtx, filter_candidates};
 
 /// what the word under the cursor fills.
 #[derive(Clone, Copy)]
-pub enum Slot<'a> {
+pub enum Slot<'span> {
     Positional,
     /// the static cache says this flag takes a value.
-    FlagValue(&'a str),
+    FlagValue(&'span str),
     /// the previous word is a flag of unknown arity.
-    MaybeFlagValue(&'a str),
+    MaybeFlagValue(&'span str),
 }
 
-impl<'a> Slot<'a> {
+impl<'span> Slot<'span> {
     /// guessed from the previous word alone, for callers without a cache.
-    pub fn from_spans(spans: &'a [String]) -> Self {
+    pub fn from_spans(spans: &'span [String]) -> Self {
         match spans.len().checked_sub(2).map(|at| spans[at].as_str()) {
             Some(prev) if prev.starts_with('-') && prev != "--" => Self::MaybeFlagValue(prev),
             _ => Self::Positional,
         }
     }
 
-    pub(crate) fn value_flag(self) -> Option<&'a str> {
+    pub(crate) const fn value_flag(self) -> Option<&'span str> {
         match self {
             Self::FlagValue(flag) | Self::MaybeFlagValue(flag) => Some(flag),
             Self::Positional => None,
         }
     }
 
-    pub(crate) fn positional(self) -> bool {
+    pub(crate) const fn positional(self) -> bool {
         !matches!(self, Self::FlagValue(_))
     }
 }
@@ -59,7 +59,7 @@ pub fn dynamic_value_completions(
     timeout_ms: u64,
 ) -> Option<Vec<String>> {
     let mut spans = Vec::with_capacity(rest.len() + 1);
-    spans.push(cmd_name.to_string());
+    spans.push(cmd_name.to_owned());
     spans.extend_from_slice(rest);
     let deadline = if timeout_ms == 0 {
         None
@@ -74,7 +74,7 @@ pub fn dynamic_value_completions(
         slot: Slot::from_spans(&spans),
     };
     let raw = providers::value_completions(&spans, &ctx)?;
-    Some(raw.into_iter().map(|c| c.into_json()).collect())
+    Some(raw.into_iter().map(Candidate::into_json).collect())
 }
 
 /// like `dynamic_complete` but runs `explicit_cmd_path` instead of resolving
@@ -85,7 +85,7 @@ pub fn dynamic_complete_with_path(
     cfg: &Config,
 ) -> Option<Vec<String>> {
     dynamic_complete_candidates_with_path(spans, explicit_cmd_path, Slot::from_spans(spans), cfg)
-        .map(|candidates| candidates.into_iter().map(|c| c.into_json()).collect())
+        .map(|candidates| candidates.into_iter().map(Candidate::into_json).collect())
 }
 
 pub fn dynamic_complete_candidates_with_path(
@@ -110,7 +110,7 @@ pub fn dynamic_complete_candidates_with_path(
         slot,
     };
     let raw = providers::dispatch(spans, &ctx)?;
-    let last = spans.last().map(String::as_str).unwrap_or("");
+    let last = spans.last().map_or("", String::as_str);
     let filtered = filter_candidates(raw, last)?;
     if filtered.is_empty() {
         None
@@ -123,7 +123,7 @@ pub fn dynamic_complete_candidates_with_path(
 mod tests {
     use super::providers::kubectl::kubectl_scope;
     use super::providers::nix::looks_like_flake_pkg;
-    use super::shared::{Candidate, filter_candidates};
+    use super::shared::filter_candidates;
     use super::*;
 
     fn cfg() -> Config {
@@ -177,11 +177,11 @@ mod tests {
             "pods".into(),
             "-n".into(),
             "prod".into(),
-            "".into(),
+            String::new(),
         ];
         let scope = kubectl_scope(&spans);
         assert!(!scope.all);
-        assert_eq!(scope.args, vec!["-n".to_string(), "prod".to_string()]);
+        assert_eq!(scope.args, vec!["-n".to_owned(), "prod".to_owned()]);
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
             "get".into(),
             "pods".into(),
             "-A".into(),
-            "".into(),
+            String::new(),
         ];
         let scope = kubectl_scope(&spans);
         assert!(scope.all);

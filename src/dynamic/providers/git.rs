@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
-use super::super::shared::{Candidate, DynCtx, parse_tabular, run};
+use crate::complete::Candidate;
 use crate::dynamic::Slot;
+use crate::dynamic::shared::{DynCtx, parse_tabular, run};
 const GIT_TOP_VERBS: &[&str] = &[
     "add",
     "bisect",
@@ -77,6 +78,17 @@ const GIT_SUBMODULE_VERBS: &[&str] = &[
     "sync",
     "absorbgitdirs",
 ];
+const GIT_SUBMODULE_PATH_VERBS: &[&str] = &[
+    "status",
+    "init",
+    "deinit",
+    "update",
+    "set-branch",
+    "set-url",
+    "summary",
+    "foreach",
+    "sync",
+];
 const GIT_BISECT_VERBS: &[&str] = &[
     "start",
     "bad",
@@ -135,18 +147,18 @@ enum GitCompletion {
 fn static_candidates(values: &'static [&'static str], description: &'static str) -> Vec<Candidate> {
     values
         .iter()
-        .map(|v| Candidate::new(*v, description))
+        .map(|value| Candidate::new(*value, description))
         .collect()
 }
 
 fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
     let span_len = spans.len();
-    let sub = spans.get(1).map(String::as_str).unwrap_or("");
+    let sub = spans.get(1).map_or("", String::as_str);
     let prev = slot.value_flag().unwrap_or("");
     let positionals_after_sub: Vec<&str> = spans
         .iter()
         .skip(2)
-        .filter(|s| !s.is_empty() && !s.starts_with('-'))
+        .filter(|span| !span.is_empty() && !span.starts_with('-'))
         .map(String::as_str)
         .collect();
 
@@ -163,100 +175,33 @@ fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
         });
     }
 
-    if sub == "worktree" {
-        let verb = spans.get(2).map(String::as_str).unwrap_or("");
+    let nested = match sub {
+        "worktree" => Some((GIT_WORKTREE_VERBS, "worktree subcommand")),
+        "remote" => Some((GIT_REMOTE_VERBS, "remote subcommand")),
+        "stash" => Some((GIT_STASH_VERBS, "stash subcommand")),
+        "submodule" => Some((GIT_SUBMODULE_VERBS, "submodule subcommand")),
+        "bisect" => Some((GIT_BISECT_VERBS, "bisect subcommand")),
+        _ => None,
+    };
+    if let Some((values, description)) = nested {
         if span_len <= 3 {
             return Some(GitCompletion::Static {
-                values: GIT_WORKTREE_VERBS,
-                description: "worktree subcommand",
+                values,
+                description,
             });
         }
-        if ["remove", "move", "lock", "unlock", "repair"].contains(&verb) {
-            return Some(GitCompletion::Worktrees);
-        }
-        if verb == "add" && span_len >= 5 {
-            return Some(GitCompletion::Refs);
-        }
-        return None;
-    }
-    if sub == "remote" && span_len >= 3 {
-        let verb = spans.get(2).map(String::as_str).unwrap_or("");
-        if span_len <= 3 {
-            return Some(GitCompletion::Static {
-                values: GIT_REMOTE_VERBS,
-                description: "remote subcommand",
-            });
-        }
-        if GIT_REMOTE_VERBS.contains(&verb) && verb != "add" {
-            return Some(GitCompletion::Remotes);
-        }
-        return None;
+        return nested_verb_completion(sub, spans, &positionals_after_sub);
     }
     if matches!(sub, "fetch" | "push" | "pull") && span_len >= 3 {
         if positionals_after_sub.is_empty() {
             return Some(GitCompletion::Remotes);
-        } else {
-            return Some(GitCompletion::Refs);
         }
-    }
-    if sub == "stash" && span_len >= 3 {
-        let verb = spans.get(2).map(String::as_str).unwrap_or("");
-        if span_len <= 3 {
-            return Some(GitCompletion::Static {
-                values: GIT_STASH_VERBS,
-                description: "stash subcommand",
-            });
-        }
-        if ["show", "drop", "pop", "apply", "store"].contains(&verb) {
-            return Some(GitCompletion::Stashes);
-        }
-        if verb == "branch" && positionals_after_sub.len() >= 2 {
-            return Some(GitCompletion::Stashes);
-        }
-        return None;
-    }
-    if sub == "submodule" && span_len >= 3 {
-        let verb = spans.get(2).map(String::as_str).unwrap_or("");
-        if span_len <= 3 {
-            return Some(GitCompletion::Static {
-                values: GIT_SUBMODULE_VERBS,
-                description: "submodule subcommand",
-            });
-        }
-        if [
-            "status",
-            "init",
-            "deinit",
-            "update",
-            "set-branch",
-            "set-url",
-            "summary",
-            "foreach",
-            "sync",
-        ]
-        .contains(&verb)
-        {
-            return Some(GitCompletion::Submodules);
-        }
-        return None;
-    }
-    if sub == "bisect" && span_len >= 3 {
-        let verb = spans.get(2).map(String::as_str).unwrap_or("");
-        if span_len <= 3 {
-            return Some(GitCompletion::Static {
-                values: GIT_BISECT_VERBS,
-                description: "bisect subcommand",
-            });
-        }
-        if ["bad", "good", "new", "old", "skip", "reset", "start"].contains(&verb) {
-            return Some(GitCompletion::Refs);
-        }
-        return None;
+        return Some(GitCompletion::Refs);
     }
     if sub == "tag" && span_len >= 3 {
         let delete_or_verify = ["-d", "--delete", "-v", "--verify"]
             .iter()
-            .any(|f| spans.iter().any(|s| s == f));
+            .any(|flag| spans.iter().any(|span| span == flag));
         if delete_or_verify {
             return Some(GitCompletion::Tags);
         }
@@ -265,21 +210,16 @@ fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
         }
         return Some(GitCompletion::Tags);
     }
-    if sub == "add" && span_len >= 3 {
-        return Some(GitCompletion::StatusPaths);
-    }
-    if sub == "restore" && span_len >= 3 {
+    if matches!(sub, "add" | "restore") && span_len >= 3 {
         return Some(GitCompletion::StatusPaths);
     }
     if sub == "rm" && span_len >= 3 {
         return Some(GitCompletion::TrackedPaths);
     }
     if sub == "mv" && span_len >= 3 {
-        return if positionals_after_sub.is_empty() {
-            Some(GitCompletion::TrackedPaths)
-        } else {
-            None
-        };
+        return positionals_after_sub
+            .is_empty()
+            .then_some(GitCompletion::TrackedPaths);
     }
     if sub == "checkout" && span_len >= 3 {
         if ["-b", "-B", "--orphan"].contains(&prev) {
@@ -302,6 +242,34 @@ fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
     None
 }
 
+fn nested_verb_completion(
+    sub: &str,
+    spans: &[String],
+    positionals_after_sub: &[&str],
+) -> Option<GitCompletion> {
+    let verb = spans.get(2).map_or("", String::as_str);
+    match sub {
+        "worktree" if ["remove", "move", "lock", "unlock", "repair"].contains(&verb) => {
+            Some(GitCompletion::Worktrees)
+        }
+        "worktree" if verb == "add" && spans.len() >= 5 => Some(GitCompletion::Refs),
+        "remote" if GIT_REMOTE_VERBS.contains(&verb) && verb != "add" => {
+            Some(GitCompletion::Remotes)
+        }
+        "stash"
+            if ["show", "drop", "pop", "apply", "store"].contains(&verb)
+                || (verb == "branch" && positionals_after_sub.len() >= 2) =>
+        {
+            Some(GitCompletion::Stashes)
+        }
+        "submodule" if GIT_SUBMODULE_PATH_VERBS.contains(&verb) => Some(GitCompletion::Submodules),
+        "bisect" if ["bad", "good", "new", "old", "skip", "reset", "start"].contains(&verb) => {
+            Some(GitCompletion::Refs)
+        }
+        _ => None,
+    }
+}
+
 fn git_refs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let mut args: Vec<String> = vec![ctx.bin("git"), "for-each-ref".into()];
     args.extend(ctx.limit_args("--count"));
@@ -309,10 +277,13 @@ fn git_refs(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     args.extend(
         ["refs/heads", "refs/remotes", "refs/tags"]
             .into_iter()
-            .map(str::to_string),
+            .map(str::to_owned),
     );
     let out = run(&args, ctx)?;
-    Some(parse_tabular(&out, 3, |p| Candidate::new(p[0], p[2])))
+    Some(parse_tabular(&out, |parts| match parts {
+        [name, _, subject, ..] => Some(Candidate::new(*name, *subject)),
+        _ => None,
+    }))
 }
 
 fn git_branches(ctx: &DynCtx) -> Option<Vec<Candidate>> {
@@ -321,7 +292,10 @@ fn git_branches(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/heads".into());
     let out = run(&args, ctx)?;
-    Some(parse_tabular(&out, 2, |p| Candidate::new(p[0], p[1])))
+    Some(parse_tabular(&out, |parts| match parts {
+        [name, subject, ..] => Some(Candidate::new(*name, *subject)),
+        _ => None,
+    }))
 }
 
 fn git_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
@@ -330,7 +304,10 @@ fn git_tags(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/tags".into());
     let out = run(&args, ctx)?;
-    Some(parse_tabular(&out, 2, |p| Candidate::new(p[0], p[1])))
+    Some(parse_tabular(&out, |parts| match parts {
+        [name, subject, ..] => Some(Candidate::new(*name, *subject)),
+        _ => None,
+    }))
 }
 
 fn git_remotes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
@@ -353,12 +330,13 @@ fn git_stashes(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let mut candidates = Vec::new();
     // stash@{N}: WIP on branch: subject
     for line in out.lines() {
-        let Some(idx) = line.find(": ") else { continue };
-        let stash = &line[..idx];
+        let Some((stash, rest)) = line.split_once(": ") else {
+            continue;
+        };
         if !stash.starts_with("stash@{") {
             continue;
         }
-        let desc = line[idx + 2..].trim();
+        let desc = rest.trim();
         candidates.push(Candidate::new(stash, desc));
     }
     (!candidates.is_empty()).then_some(candidates)
@@ -376,14 +354,13 @@ fn git_status_paths(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     )?;
     let mut candidates = Vec::new();
     for line in out.lines() {
-        if line.len() < 3 {
+        let Some(raw) = line.get(3..) else {
             continue;
-        }
-        let raw = &line[3..];
+        };
         let path = if let Some((_, after)) = raw.split_once(" -> ") {
-            after.to_string()
+            after.to_owned()
         } else {
-            raw.to_string()
+            raw.to_owned()
         };
         candidates.push(Candidate::new(path, "changed path"));
     }

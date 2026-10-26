@@ -2,7 +2,9 @@
 //! completion candidates: the shared scorer, the typed `Candidate`, and JSON
 //! rendering.
 
-use std::fmt::Write as _;
+use std::cmp::Reverse;
+use std::fmt::{self, Display, Formatter, Write as _};
+use std::iter;
 
 use crate::config::Config;
 use crate::parsers::manpage::{
@@ -16,8 +18,12 @@ pub struct Candidate {
 }
 
 impl Candidate {
-    pub fn new(value: impl Into<String>, description: impl Into<String>) -> Self {
-        Candidate {
+    pub fn new<Value, Desc>(value: Value, description: Desc) -> Self
+    where
+        Value: Into<String>,
+        Desc: Into<String>,
+    {
+        Self {
             value: value.into(),
             description: description.into(),
         }
@@ -29,29 +35,36 @@ impl Candidate {
 }
 
 pub fn completion_json(value: &str, desc: &str) -> String {
-    let mut out = String::with_capacity(value.len() + desc.len() + 30);
-    out.push_str(r#"{"value":""#);
-    push_json_escaped(&mut out, value);
-    out.push_str(r#"","description":""#);
-    push_json_escaped(&mut out, desc);
-    out.push_str(r#""}"#);
-    out
+    format!(
+        r#"{{"value":"{}","description":"{}"}}"#,
+        JsonEscaped(value),
+        JsonEscaped(desc)
+    )
 }
 
-fn push_json_escaped(out: &mut String, s: &str) {
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
+struct JsonEscaped<'text>(&'text str);
+
+impl Display for JsonEscaped<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        for ch in self.0.chars() {
+            match ch {
+                '"' => f.write_str("\\\"")?,
+                '\\' => f.write_str("\\\\")?,
+                '\n' => f.write_str("\\n")?,
+                '\r' => f.write_str("\\r")?,
+                '\t' => f.write_str("\\t")?,
+                control if control < '\x20' => {
+                    write!(f, "\\u{:04x}", u32::from(control))?;
+                }
+                other => f.write_char(other)?,
             }
-            c => out.push(c),
         }
+        Ok(())
     }
+}
+
+fn saturating_i32(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 /// exact 1000, ci-prefix 900+len bonus, else a subsequence score rewarding word
@@ -69,26 +82,26 @@ pub fn fuzzy_score(needle: &str, haystack: &str) -> i32 {
         return 1000;
     }
 
-    let needle = needle.as_bytes();
-    let haystack = haystack.as_bytes();
-    if starts_with_ignore_ascii_case(haystack, needle) {
-        return 900 + (needle_len as i32 * 100 / haystack_len as i32);
+    let needle_bytes = needle.as_bytes();
+    let hay_bytes = haystack.as_bytes();
+    if starts_with_ignore_ascii_case(hay_bytes, needle_bytes) {
+        return 900 + saturating_i32(needle_len * 100 / haystack_len);
     }
 
-    let mut needle_idx = 0usize;
-    let mut score = 0i32;
+    let mut needle_idx = 0_usize;
+    let mut score = 0_i32;
     let mut prev_match: Option<usize> = None;
 
-    for (hay_idx, &c) in haystack.iter().enumerate() {
+    for (hay_idx, &byte) in hay_bytes.iter().enumerate() {
         if needle_idx >= needle_len {
             break;
         }
-        if c.eq_ignore_ascii_case(&needle[needle_idx]) {
+        if byte.eq_ignore_ascii_case(&needle_bytes[needle_idx]) {
             let boundary = hay_idx == 0
-                || haystack[hay_idx - 1] == b'-'
-                || haystack[hay_idx - 1] == b'_'
-                || (haystack[hay_idx - 1].is_ascii_lowercase()
-                    && haystack[hay_idx].is_ascii_uppercase());
+                || hay_bytes[hay_idx - 1] == b'-'
+                || hay_bytes[hay_idx - 1] == b'_'
+                || (hay_bytes[hay_idx - 1].is_ascii_lowercase()
+                    && hay_bytes[hay_idx].is_ascii_uppercase());
             let consecutive = prev_match == Some(hay_idx.saturating_sub(1));
             score += if boundary { 50 } else { 10 };
             if consecutive {
@@ -96,7 +109,6 @@ pub fn fuzzy_score(needle: &str, haystack: &str) -> i32 {
             }
             needle_idx += 1;
             prev_match = Some(hay_idx);
-            continue;
         }
     }
 
@@ -108,7 +120,7 @@ pub fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack
             .iter()
             .zip(needle)
-            .all(|(&hay, &needle)| hay.eq_ignore_ascii_case(&needle))
+            .all(|(&hay, &want)| hay.eq_ignore_ascii_case(&want))
 }
 
 fn long_flag_score(needle: &str, dashed: &str, bare_name: &str) -> i32 {
@@ -122,7 +134,7 @@ fn long_flag_score(needle: &str, dashed: &str, bare_name: &str) -> i32 {
         return 900;
     }
     if starts_with_ignore_ascii_case(dashed.as_bytes(), needle.as_bytes()) {
-        return 950 + (needle.len() as i32 * 100 / dashed.len() as i32);
+        return 950 + saturating_i32(needle.len() * 100 / dashed.len());
     }
 
     let bare_needle = needle.trim_start_matches('-');
@@ -137,17 +149,17 @@ fn long_flag_score(needle: &str, dashed: &str, bare_name: &str) -> i32 {
         .iter()
         .any(|word| starts_with_ignore_ascii_case(word.as_bytes(), bare_needle.as_bytes()))
     {
-        return 850 + bare_needle.len() as i32;
+        return 850_i32.saturating_add(saturating_i32(bare_needle.len()));
     }
     if acronym_matches(bare_needle, &words) {
-        return 700 + bare_needle.len() as i32;
+        return 700_i32.saturating_add(saturating_i32(bare_needle.len()));
     }
     0
 }
 
 fn acronym_matches(needle: &str, words: &[&str]) -> bool {
-    let mut needle = needle.chars();
-    let Some(mut want) = needle.next() else {
+    let mut needle_chars = needle.chars();
+    let Some(mut want) = needle_chars.next() else {
         return false;
     };
 
@@ -156,7 +168,7 @@ fn acronym_matches(needle: &str, words: &[&str]) -> bool {
             continue;
         };
         if want.eq_ignore_ascii_case(&first) {
-            match needle.next() {
+            match needle_chars.next() {
                 Some(next) => want = next,
                 None => return true,
             }
@@ -166,30 +178,31 @@ fn acronym_matches(needle: &str, words: &[&str]) -> bool {
 }
 
 /// param placeholder convention: `<FILE>` mandatory, `[FILE]` optional.
-pub fn entry_completion_desc(e: &ManpageEntry) -> String {
-    match &e.param {
-        Some(OwnedParam::Mandatory(p)) => {
-            if e.desc.is_empty() {
-                format!("<{p}>")
+pub fn entry_completion_desc(entry: &ManpageEntry) -> String {
+    match &entry.param {
+        Some(OwnedParam::Mandatory(param)) => {
+            if entry.desc.is_empty() {
+                format!("<{param}>")
             } else {
-                format!("{} <{p}>", e.desc)
+                format!("{} <{param}>", entry.desc)
             }
         }
-        Some(OwnedParam::Optional(p)) => {
-            if e.desc.is_empty() {
-                format!("[{p}]")
+        Some(OwnedParam::Optional(param)) => {
+            if entry.desc.is_empty() {
+                format!("[{param}]")
             } else {
-                format!("{} [{p}]", e.desc)
+                format!("{} [{param}]", entry.desc)
             }
         }
-        None => e.desc.clone(),
+        None => entry.desc.clone(),
     }
 }
 
-/// subcommands emit only when `matched_depth >= resolve_depth` (match is a full
-/// prefix of what was typed). typing past the deepest cached command stays silent
-/// so nushell's dynamic completer can take over. a token equal to a candidate is
-/// dropped so it isn't echoed back.
+/// subcommands emit only when `matched_depth >= resolve_depth`.
+///
+/// i.e. the match is a full prefix of what was typed. typing past the deepest
+/// cached command stays silent so nushell's dynamic completer can take over. a
+/// token equal to a candidate is dropped so it isn't echoed back.
 pub fn generate_candidates(
     result: &ManpageResult,
     matched_depth: usize,
@@ -199,10 +212,10 @@ pub fn generate_candidates(
     typing_flag: bool,
     cfg: &Config,
 ) -> Vec<Candidate> {
-    let subs: &[ManpageSubcommand] = if !result.subcommands.is_empty() {
-        &result.subcommands
-    } else {
+    let subs: &[ManpageSubcommand] = if result.subcommands.is_empty() {
         fallback_subcommands
+    } else {
+        &result.subcommands
     };
 
     let mut scored: Vec<(i32, Candidate)> = Vec::with_capacity(
@@ -220,7 +233,7 @@ pub fn generate_candidates(
             // exact match on the name or any alias hands off to a dynamic
             // completer, mirroring the switch path.
             if !last_token.is_empty()
-                && (last_token == sc.name || sc.aliases.iter().any(|a| a == last_token))
+                && (last_token == sc.name || sc.aliases.iter().any(|alias| alias == last_token))
             {
                 continue;
             }
@@ -228,9 +241,7 @@ pub fn generate_candidates(
             // become `(aka ...)`, like a switch's short/long pair.
             let mut best: Option<(i32, &str)> = None;
             let mut others: Vec<&str> = Vec::new();
-            for form in
-                std::iter::once(sc.name.as_str()).chain(sc.aliases.iter().map(String::as_str))
-            {
+            for form in iter::once(sc.name.as_str()).chain(sc.aliases.iter().map(String::as_str)) {
                 let fs = fuzzy_score(last_token, form);
                 match best {
                     Some((bs, bf)) if fs > bs => {
@@ -249,7 +260,7 @@ pub fn generate_candidates(
                 } else {
                     format!("(aka {}) {}", others.join(", "), sc.desc)
                 };
-                scored.push((score, Candidate::new(value.to_string(), desc)));
+                scored.push((score, Candidate::new(value.to_owned(), desc)));
             }
         }
     }
@@ -267,24 +278,24 @@ pub fn generate_candidates(
                 fuzzy_score(fneedle.needle, dashed)
             }
         };
-        for e in &result.entries {
-            let (flag, aka, score) = match &e.switch {
-                OwnedSwitch::Long(l) => {
-                    let flag = format!("--{l}");
-                    let score = score_against(&flag, l);
+        for entry in &result.entries {
+            let (flag, aka, score) = match &entry.switch {
+                OwnedSwitch::Long(long) => {
+                    let flag = format!("--{long}");
+                    let score = score_against(&flag, long);
                     (flag, None, score)
                 }
-                OwnedSwitch::Short(c) => {
-                    let flag = format!("-{c}");
-                    let short_bare = c.to_string();
+                OwnedSwitch::Short(short) => {
+                    let flag = format!("-{short}");
+                    let short_bare = short.to_string();
                     let score = score_against(&flag, &short_bare);
                     (flag, None, score)
                 }
-                OwnedSwitch::Both(c, l) => {
-                    let long_flag = format!("--{l}");
-                    let short_flag = format!("-{c}");
-                    let short_bare = c.to_string();
-                    let ls = score_against(&long_flag, l);
+                OwnedSwitch::Both(short, long) => {
+                    let long_flag = format!("--{long}");
+                    let short_flag = format!("-{short}");
+                    let short_bare = short.to_string();
+                    let ls = score_against(&long_flag, long);
                     let ss = score_against(&short_flag, &short_bare);
                     if ss >= ls {
                         (short_flag, Some(long_flag), ss)
@@ -294,9 +305,9 @@ pub fn generate_candidates(
                 }
             };
             if score > 0 {
-                let base_desc = entry_completion_desc(e);
+                let base_desc = entry_completion_desc(entry);
                 let desc = match aka {
-                    Some(aka) => format!("(aka {aka}) {base_desc}"),
+                    Some(other_form) => format!("(aka {other_form}) {base_desc}"),
                     None => base_desc,
                 };
                 scored.push((score, Candidate::new(flag, desc)));
@@ -304,11 +315,11 @@ pub fn generate_candidates(
         }
     }
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|(score, _)| Reverse(*score));
     if cfg.max_completions > 0 {
         scored.truncate(cfg.max_completions);
     }
-    scored.into_iter().map(|(_, c)| c).collect()
+    scored.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
 #[cfg(test)]
@@ -340,7 +351,7 @@ mod tests {
             entries: Vec::new(),
             subcommands: names
                 .iter()
-                .map(|n| ManpageSubcommand::new(n.to_string(), String::new()))
+                .map(|name| ManpageSubcommand::new(name.to_string(), String::new()))
                 .collect(),
             positional_choices: Vec::new(),
             positionals: Vec::new(),
@@ -350,22 +361,25 @@ mod tests {
 
     #[test]
     fn depth_guard_suppresses_subs_on_shallow_match() {
-        let r = result_with_subs(&["start", "stop", "status"]);
+        let result = result_with_subs(&["start", "stop", "status"]);
         let cfg = Config::default();
-        let shallow = generate_candidates(&r, 1, 2, "stat", &[], false, &cfg);
+        let shallow = generate_candidates(&result, 1, 2, "stat", &[], false, &cfg);
         assert!(shallow.is_empty(), "shallow match must not emit subs");
 
-        let full = generate_candidates(&r, 1, 1, "st", &[], false, &cfg);
-        let values: Vec<&str> = full.iter().map(|c| c.value.as_str()).collect();
+        let full = generate_candidates(&result, 1, 1, "st", &[], false, &cfg);
+        let values: Vec<&str> = full
+            .iter()
+            .map(|candidate| candidate.value.as_str())
+            .collect();
         assert!(values.contains(&"start"));
         assert!(values.contains(&"status"));
     }
 
     #[test]
     fn exact_token_is_dropped_to_unmask_downstream() {
-        let r = result_with_subs(&["status"]);
+        let result = result_with_subs(&["status"]);
         let cfg = Config::default();
-        let out = generate_candidates(&r, 1, 1, "status", &[], false, &cfg);
+        let out = generate_candidates(&result, 1, 1, "status", &[], false, &cfg);
         assert!(out.is_empty());
     }
 
@@ -381,58 +395,64 @@ mod tests {
 
     #[test]
     fn exact_short_flag_is_kept_for_preview() {
-        let r = result_with_flags(vec![ManpageEntry {
-            switch: OwnedSwitch::Both('x', "catalog".to_string()),
+        let result = result_with_flags(vec![ManpageEntry {
+            switch: OwnedSwitch::Both('x', "catalog".to_owned()),
             param: None,
-            desc: "explain log messages".to_string(),
+            desc: "explain log messages".to_owned(),
         }]);
         let cfg = Config::default();
-        let out = generate_candidates(&r, 1, 1, "-x", &[], true, &cfg);
-        let values: Vec<&str> = out.iter().map(|c| c.value.as_str()).collect();
+        let out = generate_candidates(&result, 1, 1, "-x", &[], true, &cfg);
+        let values: Vec<&str> = out
+            .iter()
+            .map(|candidate| candidate.value.as_str())
+            .collect();
         assert_eq!(values, vec!["-x"]);
     }
 
     #[test]
     fn exact_long_flag_is_kept_alongside_longer_matches() {
-        let r = result_with_flags(vec![
+        let result = result_with_flags(vec![
             ManpageEntry {
-                switch: OwnedSwitch::Long("image".to_string()),
+                switch: OwnedSwitch::Long("image".to_owned()),
                 param: None,
-                desc: "use an image".to_string(),
+                desc: "use an image".to_owned(),
             },
             ManpageEntry {
-                switch: OwnedSwitch::Long("image-policy".to_string()),
+                switch: OwnedSwitch::Long("image-policy".to_owned()),
                 param: None,
-                desc: "set image policy".to_string(),
+                desc: "set image policy".to_owned(),
             },
         ]);
         let cfg = Config::default();
-        let out = generate_candidates(&r, 1, 1, "--image", &[], true, &cfg);
-        let values: Vec<&str> = out.iter().map(|c| c.value.as_str()).collect();
+        let out = generate_candidates(&result, 1, 1, "--image", &[], true, &cfg);
+        let values: Vec<&str> = out
+            .iter()
+            .map(|candidate| candidate.value.as_str())
+            .collect();
         assert!(values.contains(&"--image"), "values = {values:?}");
         assert!(values.contains(&"--image-policy"), "values = {values:?}");
     }
 
     #[test]
     fn long_flags_match_word_prefixes_and_acronyms_not_random_subsequences() {
-        let r = result_with_flags(vec![
+        let result = result_with_flags(vec![
             ManpageEntry {
-                switch: OwnedSwitch::Long("no-write-lock-file".to_string()),
+                switch: OwnedSwitch::Long("no-write-lock-file".to_owned()),
                 param: None,
-                desc: "do not update the lock file".to_string(),
+                desc: "do not update the lock file".to_owned(),
             },
             ManpageEntry {
-                switch: OwnedSwitch::Long("command".to_string()),
+                switch: OwnedSwitch::Long("command".to_owned()),
                 param: None,
-                desc: "run a command".to_string(),
+                desc: "run a command".to_owned(),
             },
         ]);
         let cfg = Config::default();
 
         let values_for = |needle: &str| {
-            generate_candidates(&r, 1, 1, needle, &[], true, &cfg)
+            generate_candidates(&result, 1, 1, needle, &[], true, &cfg)
                 .into_iter()
-                .map(|c| c.value)
+                .map(|candidate| candidate.value)
                 .collect::<Vec<_>>()
         };
 

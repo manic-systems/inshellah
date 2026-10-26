@@ -4,12 +4,13 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, absolute};
 
 use inshellah::complete::{Candidate, generate_candidates};
 use inshellah::config::Config;
 use inshellah::dynamic::{Slot, dynamic_complete_candidates_with_path, dynamic_value_completions};
-use inshellah::indexer::{is_executable, resolve_command_path_and_cache};
+use inshellah::indexer::probe::is_executable;
+use inshellah::indexer::resolve_command_path_and_cache;
 use inshellah::parsers::manpage::{ManpageResult, OwnedSwitch};
 use inshellah::store::{self, default_store_path, lookup, subcommands_of};
 
@@ -18,57 +19,21 @@ use super::common::find_in_path;
 const ELEVATION_COMMANDS: &[&str] = &["sudo", "doas", "pkexec", "su", "run0"];
 
 pub fn run(
-    spans: &[String],
+    raw_spans: &[String],
     user_dir: &Path,
     system_dirs: &[PathBuf],
     mandirs: &[PathBuf],
     timeout_ms: u64,
     cfg: &Config,
-) {
+) -> io::Result<()> {
     let mut dirs: Vec<PathBuf> = Vec::with_capacity(system_dirs.len() + 1);
     dirs.push(user_dir.to_path_buf());
     dirs.extend(system_dirs.iter().cloned());
 
-    // skip past elevation wrappers (sudo, doas) to the real command.
-    let mut explicit_cmd_path: Option<PathBuf> = None;
-    let mut spans: Vec<String> = match spans.first() {
-        Some(first) if ELEVATION_COMMANDS.contains(&first.as_str()) => {
-            let rest = &spans[1..];
-            let mut real_spans = None;
-            for (idx, s) in rest.iter().enumerate() {
-                if let Some(path) = executable_span_path(s)
-                    && let Some(name) = command_name_for_path(&path)
-                {
-                    let mut target = rest[idx..].to_vec();
-                    target[0] = name;
-                    explicit_cmd_path = Some(path);
-                    real_spans = Some(target);
-                    break;
-                }
-                if !s.is_empty()
-                    && !s.starts_with('-')
-                    && (lookup(&dirs, s).is_some() || find_in_path(s).is_some())
-                {
-                    real_spans = Some(rest[idx..].to_vec());
-                    break;
-                }
-            }
-            real_spans.unwrap_or_else(|| spans.to_vec())
-        }
-        _ => spans.to_vec(),
-    };
-    if explicit_cmd_path.is_none()
-        && let Some(first) = spans.first()
-        && let Some(path) = executable_span_path(first)
-        && let Some(name) = command_name_for_path(&path)
-    {
-        spans[0] = name;
-        explicit_cmd_path = Some(path);
-    }
-
+    let (spans, explicit_cmd_path) = strip_elevation(raw_spans, &dirs);
     if spans.is_empty() || (explicit_cmd_path.is_none() && find_in_path(&spans[0]).is_none()) {
         println!("null");
-        return;
+        return Ok(());
     }
 
     let cmd_name = spans[0].clone();
@@ -77,8 +42,7 @@ pub fn run(
     if let Some(candidates) =
         dynamic_value_completions(&cmd_name, &rest, explicit_cmd_path.as_deref(), timeout_ms)
     {
-        print_completion_candidates(&candidates);
-        return;
+        return print_completion_candidates(&candidates);
     }
 
     let last_token = rest.last().cloned().unwrap_or_default();
@@ -93,28 +57,16 @@ pub fn run(
     let find_result = |path: &[String]| -> Option<(String, ManpageResult, usize)> {
         (1..=path.len()).rev().find_map(|len| {
             let name = path[..len].join(" ");
-            lookup(&dirs, &name).map(|r| (name, r, len))
+            lookup(&dirs, &name).map(|result| (name, result, len))
         })
     };
 
     let mut found = find_result(&cmd_path.path);
 
     let bin_path = explicit_cmd_path
-        .as_ref()
-        .cloned()
+        .clone()
         .or_else(|| find_in_path(&cmd_name));
-    // also search the binary's own prefix for manpages.
-    let mut all_mandirs = mandirs.to_vec();
-    if let Some(prefix) = bin_path
-        .as_deref()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-    {
-        let share_man = prefix.join("share/man");
-        if share_man.is_dir() {
-            all_mandirs.push(share_man);
-        }
-    }
+    let all_mandirs = mandirs_with_bin_prefix(mandirs, bin_path.as_deref());
 
     while let Some(bin) = &bin_path
         && (cache_is_stale(user_dir, found.as_ref(), cfg.cache_ttl_secs)
@@ -135,7 +87,9 @@ pub fn run(
         let resolved_len = cmd_path.path.len();
         let probed = cmd_path.probe;
         found = Some((cmd_path.path.join(" "), result, resolved_len));
-        let fresh = found.as_ref().map(|(name, r, _)| (name.as_str(), r));
+        let fresh = found
+            .as_ref()
+            .map(|(name, cached, _)| (name.as_str(), cached));
         cmd_path = command_path(&dirs, fresh, &cmd_name, complete_rest);
         // a probe's --help can echo the parent's, which caches it as a group
         // and would license another probe one word deeper.
@@ -153,24 +107,21 @@ pub fn run(
     let resolve_depth = cmd_path.depth;
     let typing_flag = slot == ArgSlot::Free && cfg.triggers_flags(&last_token);
     let fallback_subcommands = match &found {
-        Some((matched_name, r, _)) if r.subcommands.is_empty() => {
+        Some((matched_name, result, _)) if result.subcommands.is_empty() => {
             subcommands_of(&dirs, matched_name)
         }
         _ => Vec::new(),
     };
     // positional value choices (getent databases) fill the same slot as
     // subcommands, so they suppress the file/dynamic handoff too.
-    let has_subs = match &found {
-        Some((_, r, _)) => {
-            !r.subcommands.is_empty()
-                || !r.positional_choices.is_empty()
-                || !fallback_subcommands.is_empty()
-        }
-        None => false,
-    };
+    let has_subs = found.as_ref().is_some_and(|(_, result, _)| {
+        !result.subcommands.is_empty()
+            || !result.positional_choices.is_empty()
+            || !fallback_subcommands.is_empty()
+    });
     let candidates: Vec<Candidate> = match &found {
-        Some((_, r, depth)) if slot == ArgSlot::Free => generate_candidates(
-            r,
+        Some((_, result, depth)) if slot == ArgSlot::Free => generate_candidates(
+            result,
             *depth,
             resolve_depth,
             &last_token,
@@ -201,33 +152,80 @@ pub fn run(
             )
         })
         .flatten();
-    match dyn_candidates {
-        Some(dyn_candidates) if candidates.is_empty() || want_files => {
-            print_completion_candidate_values(dyn_candidates);
+    let output = match dyn_candidates {
+        Some(dynamic) if candidates.is_empty() || want_files => dynamic,
+        Some(dynamic) => merge_completion_candidates(dynamic, candidates, cfg.max_completions),
+        None if want_files => Vec::new(),
+        None => candidates,
+    };
+    print_completion_candidate_values(output)
+}
+
+/// also search the binary's own prefix for manpages.
+fn mandirs_with_bin_prefix(mandirs: &[PathBuf], bin_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut all_mandirs = mandirs.to_vec();
+    if let Some(prefix) = bin_path.and_then(Path::parent).and_then(Path::parent) {
+        let share_man = prefix.join("share/man");
+        if share_man.is_dir() {
+            all_mandirs.push(share_man);
         }
-        Some(dyn_candidates) => print_completion_candidate_values(merge_completion_candidates(
-            dyn_candidates,
-            candidates,
-            cfg.max_completions,
-        )),
-        None if want_files => println!("null"),
-        None => print_completion_candidate_values(candidates),
     }
+    all_mandirs
+}
+
+/// skip past elevation wrappers (sudo, doas) to the real command.
+fn strip_elevation(spans: &[String], dirs: &[PathBuf]) -> (Vec<String>, Option<PathBuf>) {
+    let mut explicit_cmd_path: Option<PathBuf> = None;
+    let mut real_spans: Vec<String> = match spans.split_first() {
+        Some((first, rest)) if ELEVATION_COMMANDS.contains(&first.as_str()) => {
+            let mut target_spans = None;
+            for (idx, span) in rest.iter().enumerate() {
+                if let Some(path) = executable_span_path(span)
+                    && let Some(name) = command_name_for_path(&path)
+                {
+                    let mut target = rest[idx..].to_vec();
+                    target[0] = name;
+                    explicit_cmd_path = Some(path);
+                    target_spans = Some(target);
+                    break;
+                }
+                if !span.is_empty()
+                    && !span.starts_with('-')
+                    && (lookup(dirs, span).is_some() || find_in_path(span).is_some())
+                {
+                    target_spans = Some(rest[idx..].to_vec());
+                    break;
+                }
+            }
+            target_spans.unwrap_or_else(|| spans.to_vec())
+        }
+        _ => spans.to_vec(),
+    };
+    if explicit_cmd_path.is_none()
+        && let Some(first) = real_spans.first()
+        && let Some(path) = executable_span_path(first)
+        && let Some(name) = command_name_for_path(&path)
+    {
+        real_spans[0] = name;
+        explicit_cmd_path = Some(path);
+    }
+    (real_spans, explicit_cmd_path)
 }
 
 pub fn mandirs_for_system_dirs(system_dirs: &[PathBuf]) -> Vec<PathBuf> {
     system_dirs
         .iter()
-        .filter_map(|d| mandir_for_completion_dir(d))
-        .filter(|p| p.is_dir())
+        .filter_map(|dir| mandir_for_completion_dir(dir))
+        .filter(|mandir| mandir.is_dir())
         .collect()
 }
 
 pub fn default_user_dir_and_system_dirs(dirs: Vec<PathBuf>) -> (PathBuf, Vec<PathBuf>) {
-    match dirs.split_first() {
-        Some((first, rest)) => (first.clone(), rest.to_vec()),
-        None => (default_store_path(), Vec::new()),
-    }
+    let mut iter = dirs.into_iter();
+    iter.next().map_or_else(
+        || (default_store_path(), Vec::new()),
+        |first| (first, iter.collect()),
+    )
 }
 
 fn executable_span_path(span: &str) -> Option<PathBuf> {
@@ -235,7 +233,7 @@ fn executable_span_path(span: &str) -> Option<PathBuf> {
         return None;
     }
     // the scrape runner's cwd is /tmp, so a relative path would resolve there.
-    let path = std::path::absolute(span).ok()?;
+    let path = absolute(span).ok()?;
     is_executable(&path).then_some(path)
 }
 
@@ -264,27 +262,26 @@ fn merge_completion_candidates(
     out
 }
 
-fn print_completion_candidate_values(candidates: Vec<Candidate>) {
-    let candidates: Vec<String> = candidates.into_iter().map(Candidate::into_json).collect();
-    print_completion_candidates(&candidates);
+fn print_completion_candidate_values(candidates: Vec<Candidate>) -> io::Result<()> {
+    let json: Vec<String> = candidates.into_iter().map(Candidate::into_json).collect();
+    print_completion_candidates(&json)
 }
 
 // `null` is nushell's no-match form.
-fn print_completion_candidates(candidates: &[String]) {
+fn print_completion_candidates(candidates: &[String]) -> io::Result<()> {
     if candidates.is_empty() {
         println!("null");
-    } else {
-        let mut out = io::stdout().lock();
-        out.write_all(b"[").expect("write completion output");
-        for (idx, candidate) in candidates.iter().enumerate() {
-            if idx > 0 {
-                out.write_all(b",").expect("write completion output");
-            }
-            out.write_all(candidate.as_bytes())
-                .expect("write completion output");
-        }
-        out.write_all(b"]\n").expect("write completion output");
+        return Ok(());
     }
+    let mut out = io::stdout().lock();
+    out.write_all(b"[")?;
+    for (idx, candidate) in candidates.iter().enumerate() {
+        if idx > 0 {
+            out.write_all(b",")?;
+        }
+        out.write_all(candidate.as_bytes())?;
+    }
+    out.write_all(b"]\n")
 }
 
 fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
@@ -301,7 +298,7 @@ fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
                 let mut chars = token.chars();
                 matches!(
                     (chars.next(), chars.next(), chars.next()),
-                    (Some('-'), Some(c), None) if c == *short
+                    (Some('-'), Some(flag_char), None) if flag_char == *short
                 )
             }
             OwnedSwitch::Both(short, long) => {
@@ -309,7 +306,7 @@ fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
                     let mut chars = token.chars();
                     matches!(
                         (chars.next(), chars.next(), chars.next()),
-                        (Some('-'), Some(c), None) if c == *short
+                        (Some('-'), Some(flag_char), None) if flag_char == *short
                     )
                 }
             }
@@ -319,31 +316,31 @@ fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
 
 /// the slot the token under the cursor fills.
 #[derive(Clone, Copy, PartialEq)]
-enum ArgSlot<'a> {
+enum ArgSlot<'rest> {
     Free,
-    FlagValue(&'a str),
+    FlagValue(&'rest str),
     AfterDoubleDash,
 }
 
-struct CommandPath<'a> {
+struct CommandPath<'rest> {
     path: Vec<String>,
     depth: usize,
-    slot: ArgSlot<'a>,
+    slot: ArgSlot<'rest>,
     probe: bool,
 }
 
 /// `fresh` preserves flag metadata when caching fails.
-fn command_path<'a>(
+fn command_path<'rest>(
     dirs: &[PathBuf],
     fresh: Option<(&str, &ManpageResult)>,
     cmd_name: &str,
-    rest: &'a [String],
-) -> CommandPath<'a> {
+    rest: &'rest [String],
+) -> CommandPath<'rest> {
     let node = |name: &str| match fresh {
         Some((fresh_name, result)) if fresh_name == name => Some(Cow::Borrowed(result)),
         _ => lookup(dirs, name).map(Cow::Owned),
     };
-    let mut path = vec![cmd_name.to_string()];
+    let mut path = vec![cmd_name.to_owned()];
     let mut depth = 1;
     let mut current = node(cmd_name);
     let mut current_is_exact = current.is_some();
@@ -384,9 +381,9 @@ fn command_path<'a>(
         // path resolves to the real node and descends into its flags/subs.
         let group = current
             .as_ref()
-            .filter(|r| current_is_exact && !r.subcommands.is_empty());
+            .filter(|result| current_is_exact && !result.subcommands.is_empty());
         let in_group = group.is_some();
-        let listed = group.and_then(|r| listed_subcommand(r, token));
+        let listed = group.and_then(|result| listed_subcommand(result, token));
         let is_listed = listed.is_some();
         let name = listed.unwrap_or_else(|| token.clone());
         let child = node(&format!("{} {name}", path.join(" ")));
@@ -417,7 +414,13 @@ fn listed_subcommand(result: &ManpageResult, token: &str) -> Option<String> {
     result
         .subcommands
         .iter()
-        .find(|sc| sc.name == token || sc.aliases.iter().any(|a| a.eq_ignore_ascii_case(token)))
+        .find(|sc| {
+            sc.name == token
+                || sc
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(token))
+        })
         .map(|sc| sc.name.clone())
 }
 

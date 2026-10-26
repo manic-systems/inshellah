@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! jj completes itself under `COMPLETE=fish`, one `value\tdescription` per line.
 
-use super::super::shared::{Candidate, DynCtx, filter_candidates, run_with};
+use crate::complete::Candidate;
+use crate::dynamic::shared::{DynCtx, filter_candidates, run_with};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if let Some(candidates) = native(spans, ctx) {
@@ -12,7 +13,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
     let (word, head) = spans.split_last()?;
     let plain = word
         .chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '/'));
+        .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '/'));
     if word.is_empty() || word.starts_with('-') || !plain {
         return None;
     }
@@ -23,7 +24,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
 }
 
 fn native(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let mut args = vec![ctx.bin("jj"), "--".to_string()];
+    let mut args = vec![ctx.bin("jj"), "--".to_owned()];
     args.extend_from_slice(spans);
 
     let out = run_with(&args, ctx, |cmd| {
@@ -33,8 +34,8 @@ fn native(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let candidates: Vec<Candidate> = out
         .lines()
         .filter_map(|line| {
-            let (value, description) = line.split_once('\t').unwrap_or((line, ""));
-            let value = value.trim_end();
+            let (raw_value, description) = line.split_once('\t').unwrap_or((line, ""));
+            let value = raw_value.trim_end();
             (!value.is_empty()).then(|| Candidate::new(value, description.trim()))
         })
         .collect();

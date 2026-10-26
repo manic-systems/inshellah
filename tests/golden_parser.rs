@@ -12,6 +12,7 @@
 //! without coupling to debug formatting.
 //!
 //! Re-bless: `INSHELLAH_BLESS=1 cargo test --test golden_parser`.
+#![cfg(test)]
 
 use std::fmt::Write as _;
 use std::fs;
@@ -22,39 +23,39 @@ use inshellah::parsers::manpage::{ManpageResult, OwnedSwitch, parse_manpage_stri
 
 mod common;
 
-fn render_switch(s: &OwnedSwitch) -> String {
-    match s {
-        OwnedSwitch::Short(c) => format!("-{c}"),
-        OwnedSwitch::Long(l) => format!("--{l}"),
-        OwnedSwitch::Both(c, l) => format!("-{c}|--{l}"),
+fn render_switch(switch: &OwnedSwitch) -> String {
+    match switch {
+        OwnedSwitch::Short(short) => format!("-{short}"),
+        OwnedSwitch::Long(long) => format!("--{long}"),
+        OwnedSwitch::Both(short, long) => format!("-{short}|--{long}"),
     }
 }
 
 // both parsers now produce the same owned ManpageResult, so one renderer.
-fn render(r: &ManpageResult) -> String {
+fn render(result: &ManpageResult) -> String {
     let mut out = String::new();
     out.push_str("subcommands:\n");
-    for sc in &r.subcommands {
-        let _ = writeln!(out, "  {}", sc.name);
+    for sc in &result.subcommands {
+        writeln!(out, "  {}", sc.name).expect("write to String");
     }
     out.push_str("positional_choices:\n");
-    for sc in &r.positional_choices {
-        let _ = writeln!(out, "  {}", sc.name);
+    for sc in &result.positional_choices {
+        writeln!(out, "  {}", sc.name).expect("write to String");
     }
     out.push_str("flags:\n");
-    for e in &r.entries {
-        let _ = writeln!(out, "  {}", render_switch(&e.switch));
+    for entry in &result.entries {
+        writeln!(out, "  {}", render_switch(&entry.switch)).expect("write to String");
     }
     out.push_str("positionals:\n");
-    for (name, _) in &r.positionals {
-        let _ = writeln!(out, "  {name}");
+    for (name, _) in &result.positionals {
+        writeln!(out, "  {name}").expect("write to String");
     }
     out
 }
 
 fn render_help(txt: &str) -> String {
-    let (_, r) = help_parser(txt).expect("help parse");
-    render(&r)
+    let (_, result) = help_parser(txt).expect("help parse");
+    render(&result)
 }
 
 fn render_manpage(txt: &str) -> String {
@@ -81,13 +82,13 @@ fn golden_parser_corpus() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parser");
     for file in CASES {
         let txt = fs::read_to_string(dir.join(file))
-            .unwrap_or_else(|e| panic!("read fixture {file}: {e}"));
-        let rendered = if file.ends_with(".txt") {
+            .unwrap_or_else(|err| panic!("read fixture {file}: {err}"));
+        let rendered = if Path::new(file).extension().is_some_and(|ext| ext == "txt") {
             render_help(&txt)
         } else {
             render_manpage(&txt)
         };
-        let name = file.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file);
+        let name = file.rsplit_once('.').map_or(*file, |(stem, _)| stem);
         common::check_golden("parser", name, "snap", &rendered);
     }
 }

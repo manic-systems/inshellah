@@ -6,7 +6,7 @@ use std::path::Path;
 use inshellah::indexer::{list_manpages, process_manpage};
 use inshellah::parsers::nushell::generate_extern;
 
-pub fn run(dir: &Path) -> std::io::Result<()> {
+pub fn run(dir: &Path) {
     for path in list_manpages(&[dir.to_path_buf()]) {
         if let Some((name, result, sub_sections)) = process_manpage(&path) {
             print!("{}", generate_extern(&name, &result));
@@ -15,5 +15,4 @@ pub fn run(dir: &Path) -> std::io::Result<()> {
             }
         }
     }
-    Ok(())
 }

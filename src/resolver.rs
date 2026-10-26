@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! one source-priority resolver for a command node: native completions, else
-//! manpage (+help supplement), else --help. side effects go through [`Probe`]
-//! so the priority logic stays pure and testable; the index pool and the
-//! runtime walk supply their own executor and cache-write.
+//! manpage (+help supplement), else --help.
+//!
+//! side effects go through [`Probe`] so the priority logic stays pure and
+//! testable; the index pool and the runtime walk supply their own executor and
+//! cache-write.
 
 use crate::parsers::manpage::{ManpageResult, ManpageSubcommand};
 
@@ -35,7 +37,11 @@ pub trait Probe {
 
     /// recover children for a group command whose manpage enumerated none
     /// (sibling `cmd-sub.N` pages and/or `--help`). `None` leaves the list.
-    fn group_children(&self, hyphenated: &str, sub_args: &[String]) -> Option<Vec<ManpageSubcommand>>;
+    fn group_children(
+        &self,
+        hyphenated: &str,
+        sub_args: &[String],
+    ) -> Option<Vec<ManpageSubcommand>>;
 }
 
 /// outcome of resolving one node; the driver persists it and decides recursion.
@@ -57,7 +63,7 @@ pub enum Outcome {
 /// `base` + `sub_args` joined with spaces (`git stash apply`).
 pub fn full_cmd(base: &str, sub_args: &[String]) -> String {
     if sub_args.is_empty() {
-        base.to_string()
+        base.to_owned()
     } else {
         format!("{base} {}", sub_args.join(" "))
     }
@@ -66,7 +72,7 @@ pub fn full_cmd(base: &str, sub_args: &[String]) -> String {
 /// `base` + `sub_args` joined with hyphens, the manpage name (`git-stash-apply`).
 pub fn hyphenated_cmd(base: &str, sub_args: &[String]) -> String {
     if sub_args.is_empty() {
-        base.to_string()
+        base.to_owned()
     } else {
         format!("{base}-{}", sub_args.join("-"))
     }
@@ -92,12 +98,13 @@ fn self_listed(result: &ManpageResult, sub_args: &[String]) -> bool {
     })
 }
 
-fn parse_is_empty(r: &ManpageResult) -> bool {
-    r.entries.is_empty() && r.subcommands.is_empty() && r.positionals.is_empty()
+const fn parse_is_empty(result: &ManpageResult) -> bool {
+    result.entries.is_empty() && result.subcommands.is_empty() && result.positionals.is_empty()
 }
 
 /// resolve one node in source priority: native (top level only), else manpage
 /// as primary (+help supplement, +recovered group children), else `--help`.
+///
 /// parsers are injected so this stays free of parser wiring.
 pub fn resolve_node(
     probe: &dyn Probe,
@@ -123,16 +130,20 @@ pub fn resolve_node(
         let mut result = parse_manpage(&contents);
         if !result.entries.is_empty() || !result.subcommands.is_empty() {
             strip_subcmd_prefix(&mut result, &hyphenated);
-            let mut source = "manpage";
-            if probe.supplement_from_help(&mut result, sub_args) {
-                source = "manpage+help";
-            }
-            if looks_like_unenumerated_group(&result)
+            let supplemented = probe.supplement_from_help(&mut result, sub_args);
+            let regrouped = if looks_like_unenumerated_group(&result)
                 && let Some(children) = probe.group_children(&hyphenated, sub_args)
             {
                 result.subcommands = children;
-                source = "manpage+help";
-            }
+                true
+            } else {
+                false
+            };
+            let source = if supplemented || regrouped {
+                "manpage+help"
+            } else {
+                "manpage"
+            };
             let children = child_tokens(&result.subcommands);
             return Outcome::Content {
                 result,
@@ -160,11 +171,11 @@ pub fn resolve_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parsers::manpage::OwnedSwitch;
+    use crate::parsers::manpage::{ManpageEntry, OwnedSwitch};
     use std::cell::Cell;
 
     fn sub(name: &str) -> ManpageSubcommand {
-        ManpageSubcommand::new(name.to_string(), String::new())
+        ManpageSubcommand::new(name.to_owned(), String::new())
     }
 
     fn with_subs(names: &[&str]) -> ManpageResult {
@@ -179,7 +190,7 @@ mod tests {
 
     fn with_flag() -> ManpageResult {
         ManpageResult {
-            entries: vec![crate::parsers::manpage::ManpageEntry {
+            entries: vec![ManpageEntry {
                 switch: OwnedSwitch::Long("verbose".into()),
                 param: None,
                 desc: String::new(),
@@ -202,7 +213,7 @@ mod tests {
 
     impl Default for FakeProbe {
         fn default() -> Self {
-            FakeProbe {
+            Self {
                 class: NodeClass::TryHelp,
                 native: None,
                 native_calls: Cell::new(0),
@@ -258,7 +269,7 @@ mod tests {
     }
 
     fn resolve(probe: &dyn Probe, base: &str, sub_args: &[&str]) -> Outcome {
-        let sub: Vec<String> = sub_args.iter().map(|s| s.to_string()).collect();
+        let sub: Vec<String> = sub_args.iter().map(ToString::to_string).collect();
         resolve_node(
             probe,
             base,
@@ -279,7 +290,9 @@ mod tests {
         };
         match resolve(&probe, "foo", &[]) {
             Outcome::Native { nu } => assert_eq!(nu, "export extern foo []"),
-            other => panic!("expected Native, got {other:?}"),
+            other @ (Outcome::Content { .. } | Outcome::Empty) => {
+                panic!("expected Native, got {other:?}")
+            }
         }
         assert_eq!(probe.native_calls.get(), 1);
     }
@@ -296,7 +309,9 @@ mod tests {
         };
         match resolve(&probe, "foo", &["bar"]) {
             Outcome::Content { source, .. } => assert_eq!(source, "help"),
-            other => panic!("expected help Content, got {other:?}"),
+            other @ (Outcome::Native { .. } | Outcome::Empty) => {
+                panic!("expected help Content, got {other:?}")
+            }
         }
         assert_eq!(
             probe.native_calls.get(),
@@ -317,9 +332,11 @@ mod tests {
                 source, children, ..
             } => {
                 assert_eq!(source, "manpage");
-                assert_eq!(children, vec!["build".to_string(), "check".to_string()]);
+                assert_eq!(children, vec!["build".to_owned(), "check".to_owned()]);
             }
-            other => panic!("expected manpage Content, got {other:?}"),
+            other @ (Outcome::Native { .. } | Outcome::Empty) => {
+                panic!("expected manpage Content, got {other:?}")
+            }
         }
     }
 
@@ -332,7 +349,9 @@ mod tests {
         };
         match resolve(&probe, "foo", &[]) {
             Outcome::Content { source, .. } => assert_eq!(source, "help"),
-            other => panic!("expected help Content, got {other:?}"),
+            other @ (Outcome::Native { .. } | Outcome::Empty) => {
+                panic!("expected help Content, got {other:?}")
+            }
         }
     }
 
@@ -361,9 +380,11 @@ mod tests {
         };
         match resolve(&probe, "foo", &[]) {
             Outcome::Content { children, .. } => {
-                assert!(!children.contains(&"help".to_string()));
+                assert!(!children.contains(&"help".to_owned()));
             }
-            other => panic!("expected Content, got {other:?}"),
+            other @ (Outcome::Native { .. } | Outcome::Empty) => {
+                panic!("expected Content, got {other:?}")
+            }
         }
     }
 }

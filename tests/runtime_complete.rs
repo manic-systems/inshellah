@@ -1,8 +1,11 @@
+#![cfg(test)]
+
+use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{self, Command};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use inshellah::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
@@ -14,7 +17,7 @@ fn unique_temp_dir(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
 }
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
@@ -31,7 +34,7 @@ fn write_executable(bin_dir: &Path, name: &str, script: &str) {
 }
 
 fn path_with_bin(bin_dir: &Path) -> String {
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let old_path = env::var_os("PATH").unwrap_or_default();
     format!("{}:{}", bin_dir.display(), old_path.to_string_lossy())
 }
 
@@ -40,10 +43,9 @@ fn write_fake_nu(bin_dir: &Path, commands_json: &str) {
         bin_dir,
         "nu",
         &format!(
-            r#"#!/bin/sh
-printf '%s\n' '{}'
-"#,
-            commands_json
+            r"#!/bin/sh
+printf '%s\n' '{commands_json}'
+"
         ),
     );
 }
@@ -59,11 +61,11 @@ fn completion_values(stdout: &[u8]) -> Vec<String> {
         .as_array()
         .expect("completion array")
         .iter()
-        .map(|v| {
-            v.get("value")
+        .map(|item| {
+            item.get("value")
                 .and_then(|value| value.as_str())
                 .unwrap_or("")
-                .to_string()
+                .to_owned()
         })
         .collect()
 }
@@ -117,8 +119,8 @@ exit 2
     let parent = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![ManpageSubcommand::new(
-            "clone".to_string(),
-            "Clone a repository".to_string(),
+            "clone".to_owned(),
+            "Clone a repository".to_owned(),
         )],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -126,7 +128,7 @@ exit 2
     };
     write_result(&cache_dir, "fakecmd", "help", &parent).expect("parent cache");
 
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let old_path = env::var_os("PATH").unwrap_or_default();
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("complete")
         .arg("--dir")
@@ -157,7 +159,7 @@ exit 2
         "subcommand cache was not written"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -196,9 +198,9 @@ exit 2
     let parent = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![ManpageSubcommand {
-            name: "clone".to_string(),
-            desc: "Clone a repository".to_string(),
-            aliases: vec!["cl".to_string()],
+            name: "clone".to_owned(),
+            desc: "Clone a repository".to_owned(),
+            aliases: vec!["cl".to_owned()],
         }],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -206,7 +208,7 @@ exit 2
     };
     write_result(&cache_dir, "fakealias", "help", &parent).expect("parent cache");
 
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let old_path = env::var_os("PATH").unwrap_or_default();
     let run = |sub: &str| {
         Command::new(env!("CARGO_BIN_EXE_inshellah"))
             .args(["complete", "--dir"])
@@ -225,7 +227,7 @@ exit 2
     assert!(via_alias.contains("--depth"), "alias path: {via_alias}");
 
     // and `complete fakealias ''` advertises the alias in the tooltip.
-    let listing = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+    let listing_out = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .args(["complete", "--dir"])
         .arg(&cache_dir)
         .args(["--timeout-ms", "1000", "fakealias", ""])
@@ -235,10 +237,10 @@ exit 2
         )
         .output()
         .expect("run listing");
-    let listing = String::from_utf8(listing.stdout).expect("stdout");
+    let listing = String::from_utf8(listing_out.stdout).expect("stdout");
     assert!(listing.contains("(aka cl)"), "listing: {listing}");
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -266,7 +268,7 @@ exit 2
     perms.set_mode(0o755);
     fs::set_permissions(&slow, perms).expect("chmod");
 
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let old_path = env::var_os("PATH").unwrap_or_default();
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("complete")
         .arg("--dir")
@@ -294,7 +296,7 @@ exit 2
         "partial timed-out help was cached"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -307,13 +309,13 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
 
     let parent = ManpageResult {
         entries: vec![ManpageEntry {
-            switch: OwnedSwitch::Long("config".to_string()),
-            param: Some(OwnedParam::Mandatory("FILE".to_string())),
-            desc: "config file".to_string(),
+            switch: OwnedSwitch::Long("config".to_owned()),
+            param: Some(OwnedParam::Mandatory("FILE".to_owned())),
+            desc: "config file".to_owned(),
         }],
         subcommands: vec![ManpageSubcommand::new(
-            "sub".to_string(),
-            "subcommand".to_string(),
+            "sub".to_owned(),
+            "subcommand".to_owned(),
         )],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -321,9 +323,9 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
     };
     let child = ManpageResult {
         entries: vec![ManpageEntry {
-            switch: OwnedSwitch::Long("child".to_string()),
+            switch: OwnedSwitch::Long("child".to_owned()),
             param: None,
-            desc: "child flag".to_string(),
+            desc: "child flag".to_owned(),
         }],
         subcommands: Vec::new(),
         positional_choices: Vec::new(),
@@ -358,7 +360,7 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
         "resolved parent instead of child: {stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -429,10 +431,14 @@ exit 2
         "dynamic provider invoked PATH git: {stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
+#[expect(
+    clippy::literal_string_with_formatting_args,
+    reason = "`${NIX_GET_COMPLETIONS:-}` is shell parameter expansion in a fake nix script"
+)]
 fn complete_nix_value_position_includes_dynamic_candidates_when_static_matches() {
     let root = unique_temp_dir("inshellah-nix-static-dynamic");
     let bin_dir = root.join("bin");
@@ -454,8 +460,8 @@ exit 0
     let nix_root = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![ManpageSubcommand::new(
-            "develop".to_string(),
-            "Run a development shell".to_string(),
+            "develop".to_owned(),
+            "Run a development shell".to_owned(),
         )],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -465,8 +471,8 @@ exit 0
         entries: Vec::new(),
         subcommands: Vec::new(),
         positional_choices: vec![ManpageSubcommand::new(
-            "nixpkgs#zinc".to_string(),
-            "cached installable".to_string(),
+            "nixpkgs#zinc".to_owned(),
+            "cached installable".to_owned(),
         )],
         positionals: Vec::new(),
         description: String::new(),
@@ -488,15 +494,19 @@ exit 0
     );
     assert_eq!(
         completion_values(&output.stdout),
-        vec!["nixpkgs#zig".to_string(), "nixpkgs#zinc".to_string()],
+        vec!["nixpkgs#zig".to_owned(), "nixpkgs#zinc".to_owned()],
         "stdout = {}",
         String::from_utf8_lossy(&output.stdout)
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
+#[expect(
+    clippy::literal_string_with_formatting_args,
+    reason = "`${NIX_GET_COMPLETIONS:-}` is shell parameter expansion in a fake nix script"
+)]
 fn complete_long_flag_false_positive_falls_through_to_dynamic() {
     let root = unique_temp_dir("inshellah-long-flag-dynamic");
     let bin_dir = root.join("bin");
@@ -517,9 +527,9 @@ exit 0
 
     let nix_develop = ManpageResult {
         entries: vec![ManpageEntry {
-            switch: OwnedSwitch::Long("no-write-lock-file".to_string()),
+            switch: OwnedSwitch::Long("no-write-lock-file".to_owned()),
             param: None,
-            desc: "do not update the lock file".to_string(),
+            desc: "do not update the lock file".to_owned(),
         }],
         subcommands: Vec::new(),
         positional_choices: Vec::new(),
@@ -547,7 +557,7 @@ exit 0
     );
     assert!(!stdout.contains("no-write-lock-file"), "stdout = {stdout}");
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -581,7 +591,7 @@ fn complete_does_not_scan_path_at_command_position() {
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert_eq!(stdout.trim(), "null", "stdout = {stdout}");
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -593,8 +603,8 @@ fn complete_ignores_cached_command_missing_from_path() {
     let result = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![ManpageSubcommand::new(
-            "start".to_string(),
-            "start it".to_string(),
+            "start".to_owned(),
+            "start it".to_owned(),
         )],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -618,7 +628,7 @@ fn complete_ignores_cached_command_missing_from_path() {
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert_eq!(stdout.trim(), "null", "stdout = {stdout}");
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -632,8 +642,8 @@ fn complete_uses_boundary_aware_fuzzy_ranking() {
     let result = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![
-            ManpageSubcommand::new("load".to_string(), "load something".to_string()),
-            ManpageSubcommand::new("clone".to_string(), "clone something".to_string()),
+            ManpageSubcommand::new("load".to_owned(), "load something".to_owned()),
+            ManpageSubcommand::new("clone".to_owned(), "clone something".to_owned()),
         ],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -664,7 +674,7 @@ fn complete_uses_boundary_aware_fuzzy_ranking() {
         "expected boundary match to outrank substring match, stdout = {stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -677,9 +687,9 @@ fn complete_returns_flags_only_after_hyphen() {
 
     let result = ManpageResult {
         entries: vec![ManpageEntry {
-            switch: OwnedSwitch::Long("verbose".to_string()),
+            switch: OwnedSwitch::Long("verbose".to_owned()),
             param: None,
-            desc: "verbose output".to_string(),
+            desc: "verbose output".to_owned(),
         }],
         subcommands: Vec::new(),
         positional_choices: Vec::new(),
@@ -725,7 +735,7 @@ fn complete_returns_flags_only_after_hyphen() {
         "stdout = {flag_stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -746,9 +756,9 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
     let parent = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![
-            ManpageSubcommand::new("status".to_string(), "show status".to_string()),
-            ManpageSubcommand::new("poweroff".to_string(), "power off".to_string()),
-            ManpageSubcommand::new("preset".to_string(), "set preset".to_string()),
+            ManpageSubcommand::new("status".to_owned(), "show status".to_owned()),
+            ManpageSubcommand::new("poweroff".to_owned(), "power off".to_owned()),
+            ManpageSubcommand::new("preset".to_owned(), "set preset".to_owned()),
         ],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -796,7 +806,7 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
         "partial at the right depth should still match parent subs; stdout = {top_stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -814,8 +824,8 @@ fn complete_drops_exact_subcommand_match() {
     let result = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![
-            ManpageSubcommand::new("status".to_string(), "show status".to_string()),
-            ManpageSubcommand::new("start".to_string(), "start unit".to_string()),
+            ManpageSubcommand::new("status".to_owned(), "show status".to_owned()),
+            ManpageSubcommand::new("start".to_owned(), "start unit".to_owned()),
         ],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -860,7 +870,7 @@ fn complete_drops_exact_subcommand_match() {
         "partial should still match both; stdout = {partial_stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -911,21 +921,10 @@ exit 2
         "stdout = {stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
-#[test]
-fn complete_adb_dynamic_values_use_live_devices_and_packages() {
-    let root = unique_temp_dir("inshellah-adb-dynamic-complete");
-    let bin_dir = root.join("bin");
-    let cache_dir = root.join("cache");
-    fs::create_dir_all(&bin_dir).expect("bin dir");
-    fs::create_dir_all(&cache_dir).expect("cache dir");
-
-    let adb = bin_dir.join("adb");
-    fs::write(
-        &adb,
-        r#"#!/bin/sh
+const FAKE_ADB: &str = r#"#!/bin/sh
 selector=""
 case "$1" in
   -s|--serial|--one-device)
@@ -977,12 +976,17 @@ if [ "$1" = "shell" ] && [ "$2" = "pm" ] && [ "$3" = "list" ] && [ "$4" = "packa
 fi
 
 exit 2
-"#,
-    )
-    .expect("write adb");
-    let mut perms = fs::metadata(&adb).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&adb, perms).expect("chmod");
+"#;
+
+#[test]
+fn complete_adb_dynamic_values_use_live_devices_and_packages() {
+    let root = unique_temp_dir("inshellah-adb-dynamic-complete");
+    let bin_dir = root.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+
+    write_executable(&bin_dir, "adb", FAKE_ADB);
 
     let run_complete = |args: &[&str]| -> String {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_inshellah"));
@@ -1005,84 +1009,41 @@ exit 2
         );
         String::from_utf8(output.stdout).expect("stdout")
     };
+    let has = |stdout: &str, needle: &str| assert!(stdout.contains(needle), "stdout = {stdout}");
+    let lacks = |stdout: &str, needle: &str| assert!(!stdout.contains(needle), "stdout = {stdout}");
 
     let stdout = run_complete(&["adb", "-s", ""]);
-    assert!(
-        stdout.contains(r#""value":"emulator-5554""#),
-        "stdout = {stdout}"
-    );
-    assert!(
-        stdout.contains(r#""description":"device sdk gphone x86 Pixel 8""#),
-        "stdout = {stdout}"
-    );
-    assert!(
-        stdout.contains(r#""value":"R58M123456""#),
-        "stdout = {stdout}"
-    );
-    assert!(
-        stdout.contains(r#""value":"offline-1""#),
-        "stdout = {stdout}"
-    );
+    has(&stdout, r#""value":"emulator-5554""#);
+    has(&stdout, r#""description":"device sdk gphone x86 Pixel 8""#);
+    has(&stdout, r#""value":"R58M123456""#);
+    has(&stdout, r#""value":"offline-1""#);
 
     let prefixed_stdout = run_complete(&["adb", "--serial=R5"]);
-    assert!(
-        prefixed_stdout.contains(r#""value":"--serial=R58M123456""#),
-        "stdout = {prefixed_stdout}"
-    );
-    assert!(
-        !prefixed_stdout.contains(r#""value":"--serial=emulator-5554""#),
-        "stdout = {prefixed_stdout}"
-    );
+    has(&prefixed_stdout, r#""value":"--serial=R58M123456""#);
+    lacks(&prefixed_stdout, r#""value":"--serial=emulator-5554""#);
 
     let one_device_stdout = run_complete(&["adb", "--one-device", ""]);
-    assert!(
-        one_device_stdout.contains(r#""value":"emulator-5554""#),
-        "stdout = {one_device_stdout}"
-    );
+    has(&one_device_stdout, r#""value":"emulator-5554""#);
 
     let transport_stdout = run_complete(&["adb", "-t", ""]);
-    assert!(
-        transport_stdout.contains(r#""value":"1""#),
-        "stdout = {transport_stdout}"
+    has(&transport_stdout, r#""value":"1""#);
+    has(
+        &transport_stdout,
+        r#""description":"emulator-5554 device sdk gphone x86 Pixel 8""#,
     );
-    assert!(
-        transport_stdout.contains(r#""description":"emulator-5554 device sdk gphone x86 Pixel 8""#),
-        "stdout = {transport_stdout}"
-    );
-    assert!(
-        transport_stdout.contains(r#""value":"2""#),
-        "stdout = {transport_stdout}"
-    );
+    has(&transport_stdout, r#""value":"2""#);
 
     let transport_prefixed_stdout = run_complete(&["adb", "--transport-id=2"]);
-    assert!(
-        transport_prefixed_stdout.contains(r#""value":"--transport-id=2""#),
-        "stdout = {transport_prefixed_stdout}"
-    );
-    assert!(
-        !transport_prefixed_stdout.contains(r#""value":"--transport-id=1""#),
-        "stdout = {transport_prefixed_stdout}"
-    );
+    has(&transport_prefixed_stdout, r#""value":"--transport-id=2""#);
+    lacks(&transport_prefixed_stdout, r#""value":"--transport-id=1""#);
 
     let uninstall_stdout = run_complete(&["adb", "uninstall", "org"]);
-    assert!(
-        uninstall_stdout.contains(r#""value":"org.default.path""#),
-        "stdout = {uninstall_stdout}"
-    );
-    assert!(
-        !uninstall_stdout.contains(r#""value":"com.default.app""#),
-        "stdout = {uninstall_stdout}"
-    );
+    has(&uninstall_stdout, r#""value":"org.default.path""#);
+    lacks(&uninstall_stdout, r#""value":"com.default.app""#);
 
     let clear_stdout = run_complete(&["adb", "-s", "emulator-5554", "shell", "pm", "clear", ""]);
-    assert!(
-        clear_stdout.contains(r#""value":"com.example.emu""#),
-        "stdout = {clear_stdout}"
-    );
-    assert!(
-        !clear_stdout.contains(r#""value":"com.example.transport""#),
-        "stdout = {clear_stdout}"
-    );
+    has(&clear_stdout, r#""value":"com.example.emu""#);
+    lacks(&clear_stdout, r#""value":"com.example.transport""#);
 
     let force_stop_stdout = run_complete(&[
         "adb",
@@ -1095,14 +1056,8 @@ exit 2
         "0",
         "com.",
     ]);
-    assert!(
-        force_stop_stdout.contains(r#""value":"com.example.transport""#),
-        "stdout = {force_stop_stdout}"
-    );
-    assert!(
-        !force_stop_stdout.contains(r#""value":"com.example.emu""#),
-        "stdout = {force_stop_stdout}"
-    );
+    has(&force_stop_stdout, r#""value":"com.example.transport""#);
+    lacks(&force_stop_stdout, r#""value":"com.example.emu""#);
 
     let flag_value_stdout = run_complete(&["adb", "shell", "pm", "enable", "--user", ""]);
     assert_eq!(
@@ -1118,7 +1073,7 @@ exit 2
         "stdout = {shell_flag_stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 /// write a single-command cache directory exposing the given long flags,
@@ -1132,10 +1087,10 @@ fn flag_demo_cache(name: &str, flags: &[&str]) -> PathBuf {
     let result = ManpageResult {
         entries: flags
             .iter()
-            .map(|f| ManpageEntry {
-                switch: OwnedSwitch::Long((*f).to_string()),
+            .map(|flag| ManpageEntry {
+                switch: OwnedSwitch::Long((*flag).to_owned()),
                 param: None,
-                desc: format!("{f} flag"),
+                desc: format!("{flag} flag"),
             })
             .collect(),
         subcommands: Vec::new(),
@@ -1197,7 +1152,7 @@ fn purge_clears_user_cache_but_not_system_dirs() {
         "system dir must not be purged"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1212,9 +1167,9 @@ fn complete_dir_overlay_uses_user_before_system() {
 
     let user = ManpageResult {
         entries: vec![ManpageEntry {
-            switch: OwnedSwitch::Long("user".to_string()),
+            switch: OwnedSwitch::Long("user".to_owned()),
             param: None,
-            desc: "user flag".to_string(),
+            desc: "user flag".to_owned(),
         }],
         subcommands: Vec::new(),
         positional_choices: Vec::new(),
@@ -1223,9 +1178,9 @@ fn complete_dir_overlay_uses_user_before_system() {
     };
     let system = ManpageResult {
         entries: vec![ManpageEntry {
-            switch: OwnedSwitch::Long("system".to_string()),
+            switch: OwnedSwitch::Long("system".to_owned()),
             param: None,
-            desc: "system flag".to_string(),
+            desc: "system flag".to_owned(),
         }],
         subcommands: Vec::new(),
         positional_choices: Vec::new(),
@@ -1253,7 +1208,7 @@ fn complete_dir_overlay_uses_user_before_system() {
         "stdout = {stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1275,9 +1230,9 @@ fn complete_empty_native_file_does_not_shadow_json() {
     .expect("native cache");
     let json = ManpageResult {
         entries: vec![ManpageEntry {
-            switch: OwnedSwitch::Long("json".to_string()),
+            switch: OwnedSwitch::Long("json".to_owned()),
             param: None,
-            desc: "json flag".to_string(),
+            desc: "json flag".to_owned(),
         }],
         subcommands: Vec::new(),
         positional_choices: Vec::new(),
@@ -1302,7 +1257,7 @@ fn complete_empty_native_file_does_not_shadow_json() {
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains(r#""value":"--json""#), "stdout = {stdout}");
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1325,7 +1280,7 @@ fn complete_discovers_underscored_subcommand_from_encoded_cache() {
         subcommands: Vec::new(),
         positional_choices: Vec::new(),
         positionals: Vec::new(),
-        description: "underscored child".to_string(),
+        description: "underscored child".to_owned(),
     };
     write_result(&cache_dir, "demo", "manpage", &parent).expect("parent cache");
     write_result(&cache_dir, "demo foo_bar", "manpage", &child).expect("child cache");
@@ -1346,7 +1301,7 @@ fn complete_discovers_underscored_subcommand_from_encoded_cache() {
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains(r#""value":"foo_bar""#), "stdout = {stdout}");
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1386,7 +1341,7 @@ exit 2
 
     fs::write(
         man_dir.join("demo.1"),
-        r#".TH DEMO 1
+        r".TH DEMO 1
 .SH NAME
 demo \- demo command
 .SH OPTIONS
@@ -1397,11 +1352,11 @@ man flag
 .TP
 .B man-sub
 from man
-"#,
+",
     )
     .expect("write manpage");
 
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let old_path = env::var_os("PATH").unwrap_or_default();
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("complete")
         .arg("--dir")
@@ -1434,7 +1389,7 @@ from man
         .expect("cache json");
     let value: serde_json::Value = serde_json::from_str(&cache).expect("cache value");
     assert_eq!(
-        value.get("source").and_then(|v| v.as_str()),
+        value.get("source").and_then(|source| source.as_str()),
         Some("manpage+help")
     );
     assert!(
@@ -1450,11 +1405,11 @@ from man
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["name"] == "input"),
+            .any(|positional| positional["name"] == "input"),
         "cache = {cache}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1493,14 +1448,14 @@ exit 2
 
     fs::write(
         man_dir.join("demo.1"),
-        r#".TH DEMO 1
+        r".TH DEMO 1
 .SH NAME
 demo \- demo command
 .SH OPTIONS
 .TP
 .B \-\-man\-only\-flag
 man flag
-"#,
+",
     )
     .expect("write manpage");
 
@@ -1526,7 +1481,7 @@ man flag
         .expect("cache json");
     let value: serde_json::Value = serde_json::from_str(&cache).expect("cache value");
     assert_eq!(
-        value.get("source").and_then(|v| v.as_str()),
+        value.get("source").and_then(|source| source.as_str()),
         Some("manpage+help")
     );
     let entries = value["entries"].as_array().unwrap();
@@ -1551,7 +1506,7 @@ man flag
         "cache = {cache}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1587,7 +1542,7 @@ fn complete_flag_on_empty_env_surfaces_flags_after_space() {
         "stdout = {stdout}"
     );
 
-    let _ = fs::remove_dir_all(cache_dir.parent().unwrap());
+    fs::remove_dir_all(cache_dir.parent().unwrap()).expect("remove temp dir");
 }
 
 #[test]
@@ -1623,7 +1578,7 @@ fn complete_custom_trigger_char_surfaces_flags() {
         "stdout = {stdout}"
     );
 
-    let _ = fs::remove_dir_all(cache_dir.parent().unwrap());
+    fs::remove_dir_all(cache_dir.parent().unwrap()).expect("remove temp dir");
 }
 
 #[test]
@@ -1664,8 +1619,8 @@ exit 2
     let stale = ManpageResult {
         entries: Vec::new(),
         subcommands: vec![ManpageSubcommand::new(
-            "staleonly".to_string(),
-            "Only in the stale cache".to_string(),
+            "staleonly".to_owned(),
+            "Only in the stale cache".to_owned(),
         )],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
@@ -1675,14 +1630,14 @@ exit 2
     let cache_file = cache_dir.join(format!("{}.json", filename_of_command("fakerefresh")));
 
     // backdate the entry well past a 1s ttl (deterministic, no sleep).
-    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let old = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
     fs::File::options()
         .write(true)
         .open(&cache_file)
         .and_then(|file| file.set_modified(old))
         .expect("backdate cache mtime");
 
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let old_path = env::var_os("PATH").unwrap_or_default();
     let path_env = format!("{}:{}", bin_dir.display(), old_path.to_string_lossy());
     let run = |ttl: &str| {
         Command::new(env!("CARGO_BIN_EXE_inshellah"))
@@ -1738,7 +1693,7 @@ exit 2
         "cache should be rewritten with the fresh set; cache = {rewritten}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1774,7 +1729,7 @@ fn index_fails_when_nushell_command_discovery_is_unavailable() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1817,7 +1772,7 @@ fn index_skips_commands_reported_by_nushell_discovery() {
         "discovered command set should be stored"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -1835,9 +1790,12 @@ fn complete_max_completions_caps_results() {
         .env("PATH", flag_demo_path(&cache_dir))
         .output()
         .expect("run inshellah complete");
-    let stdout = String::from_utf8_lossy(&capped.stdout);
-    let count = stdout.matches(r#""value":"#).count();
-    assert_eq!(count, 2, "expected 2 capped candidates, stdout = {stdout}");
+    let capped_stdout = String::from_utf8_lossy(&capped.stdout);
+    let capped_count = capped_stdout.matches(r#""value":"#).count();
+    assert_eq!(
+        capped_count, 2,
+        "expected 2 capped candidates, stdout = {capped_stdout}"
+    );
 
     // without the cap, all four matching flags come back.
     let uncapped = Command::new(env!("CARGO_BIN_EXE_inshellah"))
@@ -1847,9 +1805,12 @@ fn complete_max_completions_caps_results() {
         .env("PATH", flag_demo_path(&cache_dir))
         .output()
         .expect("run inshellah complete");
-    let stdout = String::from_utf8_lossy(&uncapped.stdout);
-    let count = stdout.matches(r#""value":"#).count();
-    assert_eq!(count, 4, "expected 4 candidates, stdout = {stdout}");
+    let uncapped_stdout = String::from_utf8_lossy(&uncapped.stdout);
+    let uncapped_count = uncapped_stdout.matches(r#""value":"#).count();
+    assert_eq!(
+        uncapped_count, 4,
+        "expected 4 candidates, stdout = {uncapped_stdout}"
+    );
 
-    let _ = fs::remove_dir_all(cache_dir.parent().unwrap());
+    fs::remove_dir_all(cache_dir.parent().unwrap()).expect("remove temp dir");
 }

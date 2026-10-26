@@ -1,13 +1,17 @@
+#![cfg(test)]
+
+use std::env;
 use std::fs;
-use std::process::Command;
+use std::path::PathBuf;
+use std::process::{self, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
 }
 
 #[test]
@@ -17,13 +21,13 @@ fn manpage_command_uses_synopsis_name() {
     let manpage = root.join("btrfs-check.8");
     fs::write(
         &manpage,
-        r#".SH SYNOPSIS
+        r".SH SYNOPSIS
 btrfs check [options] <device>
 .SH OPTIONS
 .TP
 \fB\-\-repair\fR
 try to repair the filesystem
-"#,
+",
     )
     .expect("write manpage");
 
@@ -48,7 +52,7 @@ try to repair the filesystem
         "stdout = {stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -96,7 +100,7 @@ Add file contents to the index.
         "stdout = {stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -106,7 +110,7 @@ fn manpage_command_falls_back_when_synopsis_starts_with_prose() {
     let manpage = root.join("ld.so.8");
     fs::write(
         &manpage,
-        r#".SH SYNOPSIS
+        r".SH SYNOPSIS
 The dynamic linker can be run either indirectly by running some
 dynamically linked program or shared object
 (in which case no command-line options
@@ -121,7 +125,7 @@ section of the program is executed) or directly by running:
 .TP
 .BI \-\-argv0\~ string
 Set argv[0] to the value string.
-"#,
+",
     )
     .expect("write manpage");
 
@@ -146,5 +150,5 @@ Set argv[0] to the value string.
         "stdout = {stdout}"
     );
 
-    let _ = fs::remove_dir_all(root);
+    fs::remove_dir_all(root).expect("remove temp dir");
 }

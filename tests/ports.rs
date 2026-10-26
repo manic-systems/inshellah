@@ -1,14 +1,14 @@
-//! Tests ported from ../inshellah/test/test_inshellah.ml.
+//! Tests ported from ../`inshellah/test/test_inshellah.ml`.
 //!
 //! Covers the help parser, manpage parser, groff stripping, and nushell
 //! generation. The single .nu store parser test (`test_nu_file_parsing`) is
 //! not included — it requires porting store.ml first.
+#![cfg(test)]
 
 use inshellah::parsers::help::help_parser;
-use inshellah::parsers::manpage::{
-    ManpageResult, OwnedParam, OwnedSwitch, extract_synopsis_command, parse_manpage_string,
-    strip_groff_escapes,
-};
+use inshellah::parsers::manpage::groff::strip_groff_escapes;
+use inshellah::parsers::manpage::sections::extract_synopsis_command;
+use inshellah::parsers::manpage::{ManpageResult, OwnedParam, OwnedSwitch, parse_manpage_string};
 use inshellah::parsers::nushell::{generate_extern, generate_module, parse_nu_completions};
 use inshellah::store::{json_of_result, result_from_json};
 
@@ -18,8 +18,8 @@ use inshellah::parsers::manpage::{OwnedParam as Param, OwnedSwitch as Switch};
 
 fn parse(txt: &str) -> ManpageResult {
     match help_parser(txt) {
-        Ok((_, r)) => r,
-        Err(e) => panic!("parse_help failed: {e:?}"),
+        Ok((_, result)) => result,
+        Err(err) => panic!("parse_help failed: {err:?}"),
     }
 }
 
@@ -27,127 +27,127 @@ fn parse(txt: &str) -> ManpageResult {
 
 #[test]
 fn gnu_basic() {
-    let r = parse("  -a, --all                  do not ignore entries starting with .\n");
-    assert_eq!(r.entries.len(), 1);
-    let e = &r.entries[0];
-    assert!(matches!(&e.switch, Switch::Both('a', l) if *l == "all"));
-    assert!(e.param.is_none());
-    assert!(!e.desc.is_empty());
+    let result = parse("  -a, --all                  do not ignore entries starting with .\n");
+    assert_eq!(result.entries.len(), 1);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.switch, Switch::Both('a', long) if *long == "all"));
+    assert!(entry.param.is_none());
+    assert!(!entry.desc.is_empty());
 }
 
 #[test]
 fn gnu_eq_param() {
-    let r = parse("      --block-size=SIZE      scale sizes by SIZE\n");
-    assert_eq!(r.entries.len(), 1);
-    let e = &r.entries[0];
-    assert!(matches!(&e.switch, Switch::Long(l) if *l == "block-size"));
-    assert!(matches!(&e.param, Some(Param::Mandatory(p)) if *p == "SIZE"));
+    let result = parse("      --block-size=SIZE      scale sizes by SIZE\n");
+    assert_eq!(result.entries.len(), 1);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.switch, Switch::Long(long) if *long == "block-size"));
+    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "SIZE"));
 }
 
 #[test]
 fn gnu_opt_param() {
-    let r = parse("      --color[=WHEN]         color the output WHEN\n");
-    assert_eq!(r.entries.len(), 1);
-    let e = &r.entries[0];
-    assert!(matches!(&e.switch, Switch::Long(l) if *l == "color"));
-    assert!(matches!(&e.param, Some(Param::Optional(p)) if *p == "WHEN"));
+    let result = parse("      --color[=WHEN]         color the output WHEN\n");
+    assert_eq!(result.entries.len(), 1);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.switch, Switch::Long(long) if *long == "color"));
+    assert!(matches!(&entry.param, Some(Param::Optional(param)) if *param == "WHEN"));
 }
 
 #[test]
 fn underscore_param() {
-    let r = parse("      --time-style=TIME_STYLE  time/date format\n");
-    assert_eq!(r.entries.len(), 1);
-    let e = &r.entries[0];
-    assert!(matches!(&e.param, Some(Param::Mandatory(p)) if *p == "TIME_STYLE"));
+    let result = parse("      --time-style=TIME_STYLE  time/date format\n");
+    assert_eq!(result.entries.len(), 1);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "TIME_STYLE"));
 }
 
 #[test]
 fn short_only() {
-    let r = parse("  -v                       verbose output\n");
-    assert_eq!(r.entries.len(), 1);
-    assert!(matches!(r.entries[0].switch, Switch::Short('v')));
+    let result = parse("  -v                       verbose output\n");
+    assert_eq!(result.entries.len(), 1);
+    assert!(matches!(result.entries[0].switch, Switch::Short('v')));
 }
 
 #[test]
 fn long_only() {
-    let r = parse("      --help                 display help\n");
-    assert_eq!(r.entries.len(), 1);
-    assert!(matches!(&r.entries[0].switch, Switch::Long(l) if *l == "help"));
+    let result = parse("      --help                 display help\n");
+    assert_eq!(result.entries.len(), 1);
+    assert!(matches!(&result.entries[0].switch, Switch::Long(long) if *long == "help"));
 }
 
 #[test]
 fn multiline_desc() {
     let txt = "      --block-size=SIZE      with -l, scale sizes by SIZE when printing them;\n                               e.g., '--block-size=M'; see SIZE format below\n";
-    let r = parse(txt);
-    assert_eq!(r.entries.len(), 1);
-    let combined: String = r.entries[0].desc.clone();
+    let result = parse(txt);
+    assert_eq!(result.entries.len(), 1);
+    let combined: String = result.entries[0].desc.clone();
     assert!(combined.len() > 50, "desc was: {combined}");
 }
 
 #[test]
 fn multiple_entries() {
     let txt = "  -a, --all                  do not ignore entries starting with .\n  -A, --almost-all           do not list implied . and ..\n      --author               with -l, print the author of each file\n";
-    let r = parse(txt);
-    assert_eq!(r.entries.len(), 3);
+    let result = parse(txt);
+    assert_eq!(result.entries.len(), 3);
 }
 
 #[test]
 fn clap_short_sections() {
     let txt = "INPUT OPTIONS:\n  -e, --regexp=PATTERN       A pattern to search for.\n  -f, --file=PATTERNFILE     Search for patterns from the given file.\nSEARCH OPTIONS:\n  -s, --case-sensitive       Search case sensitively.\n";
-    let r = parse(txt);
-    assert_eq!(r.entries.len(), 3);
-    let e = &r.entries[0];
-    assert!(matches!(&e.switch, Switch::Both('e', l) if *l == "regexp"));
-    assert!(matches!(&e.param, Some(Param::Mandatory(p)) if *p == "PATTERN"));
+    let result = parse(txt);
+    assert_eq!(result.entries.len(), 3);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.switch, Switch::Both('e', long) if *long == "regexp"));
+    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "PATTERN"));
 }
 
 #[test]
 fn clap_long_style() {
     let txt = "  -H, --hidden\n          Include hidden directories and files.\n\n      --no-ignore\n          Do not respect ignore files.\n";
-    let r = parse(txt);
-    assert_eq!(r.entries.len(), 2);
-    let e = &r.entries[0];
-    assert!(matches!(&e.switch, Switch::Both('H', l) if *l == "hidden"));
-    assert!(!e.desc.is_empty());
+    let result = parse(txt);
+    assert_eq!(result.entries.len(), 2);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.switch, Switch::Both('H', long) if *long == "hidden"));
+    assert!(!entry.desc.is_empty());
 }
 
 #[test]
 fn clap_long_angle_param() {
     let txt = "      --nonprintable-notation <notation>\n          Set notation for non-printable characters.\n";
-    let r = parse(txt);
-    assert_eq!(r.entries.len(), 1);
-    let e = &r.entries[0];
-    assert!(matches!(&e.switch, Switch::Long(l) if *l == "nonprintable-notation"));
-    assert!(matches!(&e.param, Some(Param::Mandatory(p)) if *p == "notation"));
+    let result = parse(txt);
+    assert_eq!(result.entries.len(), 1);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.switch, Switch::Long(long) if *long == "nonprintable-notation"));
+    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "notation"));
 }
 
 #[test]
 fn space_upper_param() {
-    let r = parse("  -f, --foo FOO  foo help\n");
-    assert_eq!(r.entries.len(), 1);
-    let e = &r.entries[0];
-    assert!(matches!(&e.switch, Switch::Both('f', l) if *l == "foo"));
-    assert!(matches!(&e.param, Some(Param::Mandatory(p)) if *p == "FOO"));
+    let result = parse("  -f, --foo FOO  foo help\n");
+    assert_eq!(result.entries.len(), 1);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.switch, Switch::Both('f', long) if *long == "foo"));
+    assert!(matches!(&entry.param, Some(Param::Mandatory(param)) if *param == "FOO"));
 }
 
 #[test]
 fn go_cobra_flags() {
     let txt = "Flags:\n  -D, --debug              Enable debug mode\n  -H, --host string        Daemon socket to connect to\n  -v, --version            Print version information\n";
-    let r = parse(txt);
-    assert_eq!(r.entries.len(), 3);
-    let host = &r.entries[1];
-    assert!(matches!(&host.switch, Switch::Both('H', l) if *l == "host"));
-    assert!(matches!(&host.param, Some(Param::Mandatory(p)) if *p == "string"));
+    let result = parse(txt);
+    assert_eq!(result.entries.len(), 3);
+    let host = &result.entries[1];
+    assert!(matches!(&host.switch, Switch::Both('H', long) if *long == "host"));
+    assert!(matches!(&host.param, Some(Param::Mandatory(param)) if *param == "string"));
 }
 
 #[test]
 fn go_cobra_subcommands() {
     let txt = "Common Commands:\n  run         Create and run a new container from an image\n  exec        Execute a command in a running container\n  build       Build an image from a Dockerfile\n";
-    let r = parse(txt);
+    let result = parse(txt);
     assert!(
-        !r.subcommands.is_empty(),
+        !result.subcommands.is_empty(),
         "expected subcommands, got: {:?}",
-        r.subcommands.len()
+        result.subcommands.len()
     );
 }
 
@@ -156,8 +156,12 @@ fn aliased_subcommands_keep_canonical_name() {
     // cargo-style `name, alias` rows: the comma must not abort the entry.
     // the canonical (first) name is kept; the alias is discarded.
     let txt = "Commands:\n  build, b    Compile the current package\n  check, c    Analyze the current package\n  clean       Remove the target directory\n";
-    let r = parse(txt);
-    let names: Vec<&str> = r.subcommands.iter().map(|sc| sc.name.as_str()).collect();
+    let result = parse(txt);
+    let names: Vec<&str> = result
+        .subcommands
+        .iter()
+        .map(|sc| sc.name.as_str())
+        .collect();
     assert!(names.contains(&"build"), "subcommands: {names:?}");
     assert!(names.contains(&"check"), "subcommands: {names:?}");
     assert!(names.contains(&"clean"), "subcommands: {names:?}");
@@ -165,13 +169,17 @@ fn aliased_subcommands_keep_canonical_name() {
         !names.contains(&"b"),
         "alias leaked as subcommand: {names:?}"
     );
-    let build = r.subcommands.iter().find(|sc| sc.name == "build").unwrap();
+    let build = result
+        .subcommands
+        .iter()
+        .find(|sc| sc.name == "build")
+        .unwrap();
     assert_eq!(build.desc, "Compile the current package");
 }
 
 #[test]
 fn help_parser_ignores_value_enums_and_defaults() {
-    let txt = r#"Usage: tar [OPTION...] [FILE]...
+    let txt = "Usage: tar [OPTION...] [FILE]...
 
  Main operation mode:
   -c, --create               create a new archive
@@ -191,49 +199,51 @@ fn help_parser_ignores_value_enums_and_defaults() {
 *This* tar defaults to:
 --format=gnu -f- -b20 --quoting-style=escape
 --rmt-command=/nix/store/example/libexec/rmt
-"#;
-    let r = parse(txt);
+";
+    let result = parse(txt);
     assert!(
-        r.subcommands.is_empty(),
+        result.subcommands.is_empty(),
         "enum values became subcommands: {:?}",
-        r.subcommands.len()
+        result.subcommands.len()
     );
     assert!(
-        !r.entries
+        !result
+            .entries
             .iter()
-            .any(|e| matches!(&e.switch, Switch::Long(l) if *l == "rmt-command")),
+            .any(|entry| matches!(&entry.switch, Switch::Long(long) if *long == "rmt-command")),
         "default lines should not become flags"
     );
     assert!(
-        r.entries
+        result
+            .entries
             .iter()
-            .any(|e| matches!(&e.switch, Switch::Both('H', l) if *l == "format")),
+            .any(|entry| matches!(&entry.switch, Switch::Both('H', long) if *long == "format")),
         "real option should still be parsed"
     );
 }
 
 #[test]
 fn busybox_tab() {
-    let r = parse("\t-1\tOne column output\n\t-a\tInclude names starting with .\n");
-    assert_eq!(r.entries.len(), 2);
-    assert!(matches!(r.entries[0].switch, Switch::Short('1')));
+    let result = parse("\t-1\tOne column output\n\t-a\tInclude names starting with .\n");
+    assert_eq!(result.entries.len(), 2);
+    assert!(matches!(result.entries[0].switch, Switch::Short('1')));
 }
 
 #[test]
 fn no_debug_prints() {
     // the old ocaml parser had print_endline at module load time; this test
     // documents that no such side effects exist in the rust port.
-    let _ = parse("  -v  verbose\n");
+    parse("  -v  verbose\n");
 }
 
 #[test]
 fn slash_switch_separator() {
-    let r = parse("  --verbose / -v             Increase verbosity\n");
-    assert_eq!(r.entries.len(), 1);
-    let e = &r.entries[0];
-    assert!(matches!(&e.switch, Switch::Both('v', l) if *l == "verbose"));
-    assert!(e.param.is_none());
-    let combined = e.desc.clone();
+    let result = parse("  --verbose / -v             Increase verbosity\n");
+    assert_eq!(result.entries.len(), 1);
+    let entry = &result.entries[0];
+    assert!(matches!(&entry.switch, Switch::Both('v', long) if *long == "verbose"));
+    assert!(entry.param.is_none());
+    let combined = entry.desc.clone();
     assert_eq!(combined.trim(), "Increase verbosity");
 }
 
@@ -241,7 +251,7 @@ fn slash_switch_separator() {
 
 #[test]
 fn manpage_tp_style() {
-    let groff = r#".SH OPTIONS
+    let groff = r".SH OPTIONS
 .TP
 \fB\-a\fR, \fB\-\-all\fR
 do not ignore entries starting with .
@@ -253,13 +263,15 @@ do not list implied . and ..
 with \fB\-l\fR, scale sizes by SIZE
 .SH AUTHOR
 Written by someone.
-"#;
-    let r = parse_manpage_string(groff);
-    assert_eq!(r.entries.len(), 3, "entries: {:?}", r.entries);
-    assert!(matches!(&r.entries[0].switch, OwnedSwitch::Both('a', l) if l == "all"));
-    assert!(!r.entries[0].desc.is_empty());
-    assert!(matches!(&r.entries[2].switch, OwnedSwitch::Long(l) if l == "block-size"));
-    assert!(matches!(&r.entries[2].param, Some(OwnedParam::Mandatory(p)) if p == "SIZE"));
+";
+    let result = parse_manpage_string(groff);
+    assert_eq!(result.entries.len(), 3, "entries: {:?}", result.entries);
+    assert!(matches!(&result.entries[0].switch, OwnedSwitch::Both('a', long) if long == "all"));
+    assert!(!result.entries[0].desc.is_empty());
+    assert!(matches!(&result.entries[2].switch, OwnedSwitch::Long(long) if long == "block-size"));
+    assert!(
+        matches!(&result.entries[2].param, Some(OwnedParam::Mandatory(param)) if param == "SIZE")
+    );
 }
 
 #[test]
@@ -271,25 +283,30 @@ Allow insecure connections.
 Write output to file.
 .SH SEE ALSO
 "#;
-    let r = parse_manpage_string(groff);
-    assert_eq!(r.entries.len(), 2, "entries: {:?}", r.entries);
-    assert!(matches!(&r.entries[0].switch, OwnedSwitch::Both('k', l) if l == "insecure"));
+    let result = parse_manpage_string(groff);
+    assert_eq!(result.entries.len(), 2, "entries: {:?}", result.entries);
+    assert!(
+        matches!(&result.entries[0].switch, OwnedSwitch::Both('k', long) if long == "insecure")
+    );
 }
 
 #[test]
 fn manpage_groff_stripping() {
-    let s = strip_groff_escapes(r#"\fB\-\-color\fR[=\fIWHEN\fR]"#);
+    let stripped = strip_groff_escapes(r"\fB\-\-color\fR[=\fIWHEN\fR]");
     // font escapes removed
-    assert!(!(s.contains('f') && s.contains('B') && s.contains('\\')));
+    assert!(!(stripped.contains('f') && stripped.contains('B') && stripped.contains('\\')));
     // dashes converted
-    assert!(s.contains('-'));
-    let s2 = strip_groff_escapes(r#"\(aqhello\(aq"#);
-    assert!(s2.contains('\''), "expected apostrophe in: {s2}");
+    assert!(stripped.contains('-'));
+    let stripped2 = strip_groff_escapes(r"\(aqhello\(aq");
+    assert!(
+        stripped2.contains('\''),
+        "expected apostrophe in: {stripped2}"
+    );
 }
 
 #[test]
 fn manpage_getent_databases_from_description() {
-    let groff = r#".SH SYNOPSIS
+    let groff = r".SH SYNOPSIS
 .SY getent
 .RI [ option \~.\|.\|.\&]
 .I database
@@ -323,41 +340,41 @@ Override only specified databases with the specified service.
 .TP
 .B \-\-usage
 Print a short usage summary and exit.
-"#;
-    let r = parse_manpage_string(groff);
-    let positional_names: Vec<&str> = r
+";
+    let result = parse_manpage_string(groff);
+    let positional_names: Vec<&str> = result
         .positionals
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
     assert_eq!(positional_names, vec!["database", "key"]);
 
-    let service = r
+    let service = result
         .entries
         .iter()
-        .find(|e| matches!(&e.switch, OwnedSwitch::Both('s', name) if name == "service"))
+        .find(|entry| matches!(&entry.switch, OwnedSwitch::Both('s', name) if name == "service"))
         .expect("expected --service(-s)");
     assert!(matches!(
         &service.param,
         Some(OwnedParam::Mandatory(param)) if param == "service"
     ));
     assert!(
-        !r.entries
+        !result.entries
             .iter()
-            .any(|e| matches!(&e.switch, OwnedSwitch::Long(name) if name == "serviceservice" || name == "servicedatabase")),
+            .any(|entry| matches!(&entry.switch, OwnedSwitch::Long(name) if name == "serviceservice" || name == "servicedatabase")),
         "entries: {:?}",
-        r.entries
+        result.entries
     );
 
     // database names are prose-mined positional value choices, not real
     // subcommands — they live in their own channel (Phase 4) so they never
     // flow into the real-child paths (recursion, supplement, extern stubs).
     assert!(
-        r.subcommands.is_empty(),
+        result.subcommands.is_empty(),
         "database choices must not be filed as subcommands: {:?}",
-        r.subcommands
+        result.subcommands
     );
-    let choices: Vec<&str> = r
+    let choices: Vec<&str> = result
         .positional_choices
         .iter()
         .map(|sc| sc.name.as_str())
@@ -365,7 +382,7 @@ Print a short usage summary and exit.
     assert!(choices.contains(&"passwd"), "choices: {choices:?}");
     assert!(choices.contains(&"services"), "choices: {choices:?}");
 
-    let nu = generate_extern("getent", &r);
+    let nu = generate_extern("getent", &result);
     assert!(nu.contains("database: glob"), "nu = {nu}");
     assert!(nu.contains("...key: glob"), "nu = {nu}");
     assert!(nu.contains("--service(-s): string"), "nu = {nu}");
@@ -382,13 +399,14 @@ fn manpage_b_macro_option_tag_with_embedded_quotes() {
 .B "\-s ""\fIprogram\fR [\fIargument \fR...]\fB""\fR, \fB\-\-speller=""\fIprogram\fR [\fIargument \fR...]\fB"""
 Use this command to perform spell checking and correcting.
 "#;
-    let r = parse_manpage_string(groff);
+    let result = parse_manpage_string(groff);
     assert!(
-        r.entries
+        result
+            .entries
             .iter()
-            .any(|e| matches!(e.switch, OwnedSwitch::Short('s'))),
+            .any(|entry| matches!(entry.switch, OwnedSwitch::Short('s'))),
         "entries: {:?}",
-        r.entries
+        result.entries
     );
 }
 
@@ -406,8 +424,8 @@ fn manpage_synopsis_b_macro_bracket_args_keep_spaces() {
 .B ":= [" link "]" "[" address "]" "[" route "]"
 .SH OPTIONS
 "#;
-    let r = parse_manpage_string(groff);
-    let positional_names: Vec<&str> = r
+    let result = parse_manpage_string(groff);
+    let positional_names: Vec<&str> = result
         .positionals
         .iter()
         .map(|(name, _)| name.as_str())
@@ -430,38 +448,40 @@ fn bracketed_angle_positionals_keep_inner_ellipsis() {
 ]
 .SH OPTIONS
 "#;
-    let r = parse_manpage_string(groff);
+    let result = parse_manpage_string(groff);
     assert!(
-        r.positionals
+        result
+            .positionals
             .iter()
             .any(|(name, positional)| name == "filenames" && positional.variadic),
         "positionals: {:?}",
-        r.positionals
+        result.positionals
     );
 }
 
 #[test]
 fn nested_optional_positionals_keep_last_valid_inner_name() {
-    let groff = r#".SH SYNOPSIS
+    let groff = r".SH SYNOPSIS
 \fBfc-cat\fR [ \fB-rvVh\fR ]
  [ \fB [ \fIfonts-cache-%version%-files\fB ]  [ \fIdirs\fB ] \fR\fI...\fR ]
 .SH OPTIONS
-"#;
-    let r = parse_manpage_string(groff);
+";
+    let result = parse_manpage_string(groff);
     assert!(
-        r.positionals
+        result
+            .positionals
             .iter()
             .any(|(name, positional)| name == "dirs" && positional.optional && positional.variadic),
         "positionals: {:?}",
-        r.positionals
+        result.positionals
     );
 }
 
 #[test]
 fn manpage_empty_options() {
     let groff = ".SH NAME\nfoo \\- does stuff\n.SH DESCRIPTION\nDoes stuff.\n";
-    let r = parse_manpage_string(groff);
-    assert_eq!(r.entries.len(), 0);
+    let result = parse_manpage_string(groff);
+    assert_eq!(result.entries.len(), 0);
 }
 
 #[test]
@@ -483,12 +503,12 @@ Increase the logging verbosity level.
 Decrease the logging verbosity level.
 .SH SEE ALSO
 "#;
-    let r = parse_manpage_string(groff);
-    assert_eq!(r.entries.len(), 2, "entries: {:?}", r.entries);
-    assert!(matches!(&r.entries[0].switch, OwnedSwitch::Both('v', l) if l == "verbose"));
-    assert!(!r.entries[0].desc.is_empty());
-    assert!(matches!(&r.entries[1].switch, OwnedSwitch::Long(l) if l == "quiet"));
-    assert!(!r.entries[1].desc.is_empty());
+    let result = parse_manpage_string(groff);
+    assert_eq!(result.entries.len(), 2, "entries: {:?}", result.entries);
+    assert!(matches!(&result.entries[0].switch, OwnedSwitch::Both('v', long) if long == "verbose"));
+    assert!(!result.entries[0].desc.is_empty());
+    assert!(matches!(&result.entries[1].switch, OwnedSwitch::Long(long) if long == "quiet"));
+    assert!(!result.entries[1].desc.is_empty());
 }
 
 #[test]
@@ -512,12 +532,14 @@ Add path to search path entries.
 This option may be given multiple times.
 .SH SEE ALSO
 "#;
-    let r = parse_manpage_string(groff);
-    assert_eq!(r.entries.len(), 2, "entries: {:?}", r.entries);
-    assert!(matches!(&r.entries[0].switch, OwnedSwitch::Long(l) if l == "arg"));
-    assert!(r.entries[0].param.is_some());
-    assert!(matches!(&r.entries[1].switch, OwnedSwitch::Both('I', l) if l == "include"));
-    assert!(matches!(&r.entries[1].param, Some(OwnedParam::Mandatory(p)) if p == "path"));
+    let result = parse_manpage_string(groff);
+    assert_eq!(result.entries.len(), 2, "entries: {:?}", result.entries);
+    assert!(matches!(&result.entries[0].switch, OwnedSwitch::Long(long) if long == "arg"));
+    assert!(result.entries[0].param.is_some());
+    assert!(matches!(&result.entries[1].switch, OwnedSwitch::Both('I', long) if long == "include"));
+    assert!(
+        matches!(&result.entries[1].param, Some(OwnedParam::Mandatory(param)) if param == "path")
+    );
 }
 
 #[test]
@@ -549,7 +571,7 @@ fn synopsis_nix3() {
 
 #[test]
 fn italic_synopsis() {
-    let groff = ".SH Synopsis\n.LP\n\\f(CRnix-env\\fR \\fIoperation\\fR [\\fIoptions\\fR] [\\fIarguments…\\fR]\n.SH Description\n";
+    let groff = ".SH Synopsis\n.LP\n\\f(CRnix-env\\fR \\fIoperation\\fR [\\fIoptions\\fR] [\\fIarguments\u{2026}\\fR]\n.SH Description\n";
     let cmd = extract_synopsis_command(groff);
     assert_eq!(cmd.as_deref(), Some("nix-env"));
 }
@@ -566,7 +588,7 @@ fn synopsis_italic_command_name() {
 
 #[test]
 fn synopsis_skips_prose_before_invocation() {
-    let groff = r#".SH SYNOPSIS
+    let groff = r".SH SYNOPSIS
 The dynamic linker can be run either indirectly by running some
 dynamically linked program or shared object
 (in which case no command-line options
@@ -578,7 +600,7 @@ section of the program is executed) or directly by running:
 .I /lib/ld\-linux.so.*
 [OPTIONS] [PROGRAM [ARGUMENTS]]
 .SH DESCRIPTION
-"#;
+";
     let cmd = extract_synopsis_command(groff);
     assert_eq!(cmd.as_deref(), None);
 }
@@ -628,21 +650,21 @@ fn synopsis_br_macro_preserves_quoted_command_spaces() {
 
 #[test]
 fn synopsis_long_b_macro_is_not_prose() {
-    let groff = r#".SH SYNOPSIS
+    let groff = ".SH SYNOPSIS
 .ad l
 .in +8
 .ti -8
 .B tipc peer remove address
 .IR ADDRESS
 .SH OPTIONS
-"#;
+";
     let cmd = extract_synopsis_command(groff);
     assert_eq!(cmd.as_deref(), Some("tipc peer remove address"));
 }
 
 #[test]
 fn synopsis_ss_heading_is_accepted() {
-    let groff = r#".SH Name
+    let groff = r".SH Name
 .LP
 \f(CRnix-env --set\fR - set profile to contain a specified derivation
 .SS
@@ -651,7 +673,7 @@ Synopsis
 \f(CRnix-env\fR \f(CR--set\fR \fIdrvname\fR
 .SS
 Description
-"#;
+";
     let cmd = extract_synopsis_command(groff);
     assert_eq!(cmd.as_deref(), Some("nix-env"));
 }
@@ -661,18 +683,18 @@ Description
 #[test]
 fn font_boundary_spacing() {
     // \fB--max-results\fR\fIcount\fR should become "--max-results count"
-    let s = strip_groff_escapes(r#"\fB\-\-max\-results\fR\fIcount\fR"#);
-    assert!(s.contains("--max-results count"), "got: {s}");
+    let stripped = strip_groff_escapes(r"\fB\-\-max\-results\fR\fIcount\fR");
+    assert!(stripped.contains("--max-results count"), "got: {stripped}");
     // \fB--color\fR[=\fIWHEN\fR] should NOT insert space before =
-    let s2 = strip_groff_escapes(r#"\fB\-\-color\fR[=\fIWHEN\fR]"#);
-    assert!(s2.contains("--color[=WHEN]"), "got: {s2}");
+    let stripped2 = strip_groff_escapes(r"\fB\-\-color\fR[=\fIWHEN\fR]");
+    assert!(stripped2.contains("--color[=WHEN]"), "got: {stripped2}");
 }
 
 // --- COMMANDS section tests ---
 
 #[test]
 fn commands_section_subcommands() {
-    let groff = r#".SH OPTIONS
+    let groff = r".SH OPTIONS
 .TP
 \fB\-\-user\fR
 Talk to the service manager of the calling user.
@@ -696,15 +718,33 @@ Stop (deactivate) one or more units.
 Asks all units to reload their configuration.
 .RE
 .SH SEE ALSO
-"#;
-    let r = parse_manpage_string(groff);
-    assert_eq!(r.entries.len(), 2, "options entries: {:?}", r.entries);
-    assert_eq!(r.subcommands.len(), 3, "subcommands: {:?}", r.subcommands);
-    let names: Vec<&str> = r.subcommands.iter().map(|sc| sc.name.as_str()).collect();
+";
+    let result = parse_manpage_string(groff);
+    assert_eq!(
+        result.entries.len(),
+        2,
+        "options entries: {:?}",
+        result.entries
+    );
+    assert_eq!(
+        result.subcommands.len(),
+        3,
+        "subcommands: {:?}",
+        result.subcommands
+    );
+    let names: Vec<&str> = result
+        .subcommands
+        .iter()
+        .map(|sc| sc.name.as_str())
+        .collect();
     assert!(names.contains(&"start"));
     assert!(names.contains(&"stop"));
     assert!(names.contains(&"reload"));
-    let start_sc = r.subcommands.iter().find(|sc| sc.name == "start").unwrap();
+    let start_sc = result
+        .subcommands
+        .iter()
+        .find(|sc| sc.name == "start")
+        .unwrap();
     assert!(!start_sc.desc.is_empty());
 }
 
@@ -727,19 +767,23 @@ Add file contents to the index.
 Record changes to the repository.
 .RE
 "#;
-    let r = parse_manpage_string(groff);
-    let names: Vec<&str> = r.subcommands.iter().map(|sc| sc.name.as_str()).collect();
+    let result = parse_manpage_string(groff);
+    let names: Vec<&str> = result
+        .subcommands
+        .iter()
+        .map(|sc| sc.name.as_str())
+        .collect();
     assert!(
         names.contains(&"git-add"),
         "subcommands: {:?}",
-        r.subcommands
+        result.subcommands
     );
     assert!(
         names.contains(&"git-commit"),
         "subcommands: {:?}",
-        r.subcommands
+        result.subcommands
     );
-    let add = r
+    let add = result
         .subcommands
         .iter()
         .find(|sc| sc.name == "git-add")
@@ -751,8 +795,8 @@ Record changes to the repository.
 
 #[test]
 fn nushell_basic() {
-    let r = parse("  -a, --all                  do not ignore entries starting with .\n");
-    let nu = generate_extern("ls", &r);
+    let result = parse("  -a, --all                  do not ignore entries starting with .\n");
+    let nu = generate_extern("ls", &result);
     assert!(nu.contains("export extern \"ls\""), "nu = {nu}");
     assert!(nu.contains("--all(-a)"), "nu = {nu}");
     assert!(nu.contains("# do not ignore"), "nu = {nu}");
@@ -761,8 +805,8 @@ fn nushell_basic() {
 #[test]
 fn nushell_param_types() {
     let txt = "  -w, --width=COLS           set output width\n      --block-size=SIZE      scale sizes\n  -o, --output FILE          output file\n";
-    let r = parse(txt);
-    let nu = generate_extern("ls", &r);
+    let result = parse(txt);
+    let nu = generate_extern("ls", &result);
     assert!(nu.contains("--width(-w): int"), "nu = {nu}");
     assert!(nu.contains("--block-size: string"), "nu = {nu}");
     assert!(nu.contains("--output(-o): path"), "nu = {nu}");
@@ -771,8 +815,8 @@ fn nushell_param_types() {
 #[test]
 fn nushell_subcommands() {
     let txt = "Common Commands:\n  run         Create and run a new container\n  exec        Execute a command\n\nFlags:\n  -D, --debug              Enable debug mode\n";
-    let r = parse(txt);
-    let nu = generate_extern("docker", &r);
+    let result = parse(txt);
+    let nu = generate_extern("docker", &result);
     assert!(nu.contains("export extern \"docker\""), "nu = {nu}");
     assert!(nu.contains("--debug(-D)"), "nu = {nu}");
     assert!(nu.contains("export extern \"docker run\""), "nu = {nu}");
@@ -812,7 +856,7 @@ fn positional_order_survives_cache_and_generation() {
 
 #[test]
 fn nushell_from_manpage() {
-    let groff = r#".SH OPTIONS
+    let groff = r".SH OPTIONS
 .TP
 \fB\-a\fR, \fB\-\-all\fR
 do not ignore entries starting with .
@@ -820,7 +864,7 @@ do not ignore entries starting with .
 \fB\-\-block\-size\fR=\fISIZE\fR
 scale sizes by SIZE
 .SH AUTHOR
-"#;
+";
     let result = parse_manpage_string(groff);
     let nu = generate_extern("ls", &result);
     assert!(nu.contains("export extern \"ls\""), "nu = {nu}");
@@ -830,8 +874,8 @@ scale sizes by SIZE
 
 #[test]
 fn nushell_module() {
-    let r = parse("  -v, --verbose              verbose output\n");
-    let nu = generate_module("myapp", &r);
+    let result = parse("  -v, --verbose              verbose output\n");
+    let nu = generate_module("myapp", &result);
     assert!(nu.contains("module myapp-completions"), "nu = {nu}");
     assert!(nu.contains("export extern \"myapp\""), "nu = {nu}");
     assert!(nu.contains("--verbose(-v)"), "nu = {nu}");
@@ -844,23 +888,23 @@ fn long_switch_rejects_dash_only_separator_lines() {
     // the first two chars look like a `--` prefix; the rest is just dashes.
     // without an alphanumeric-first guard, the parser would treat the whole
     // separator as a flag named `------…`.
-    let r = parse(
+    let result = parse(
         "  ---------------------------------------------------\n  -a, --all                  show all\n",
     );
     assert_eq!(
-        r.entries.len(),
+        result.entries.len(),
         1,
         "separator should not parse as a flag, got {} entries",
-        r.entries.len()
+        result.entries.len()
     );
-    assert!(matches!(&r.entries[0].switch, Switch::Both('a', l) if *l == "all"));
+    assert!(matches!(&result.entries[0].switch, Switch::Both('a', long) if *long == "all"));
 }
 
 #[test]
 fn dedup_entries_help() {
     let txt = "  -v, --verbose              verbose output\n  --verbose                  verbose mode\n  -v                         be verbose\n";
-    let r = parse(txt);
-    let nu = generate_extern("test", &r);
+    let result = parse(txt);
+    let nu = generate_extern("test", &result);
     let count = nu.matches("--verbose").count();
     assert_eq!(count, 1, "expected --verbose to appear once, nu = {nu}");
     assert!(nu.contains("--verbose(-v)"), "nu = {nu}");
@@ -868,18 +912,18 @@ fn dedup_entries_help() {
 
 #[test]
 fn dedup_manpage_entries() {
-    let groff = r#".SH OPTIONS
+    let groff = r".SH OPTIONS
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Be verbose.
 .SH DESCRIPTION
 Use \fB\-v\fR for verbose output.
 Use \fB\-\-verbose\fR to see more.
-"#;
+";
     let result = parse_manpage_string(groff);
     let nu = generate_extern("test", &result);
     assert!(nu.contains("--verbose(-v)"), "nu = {nu}");
-    let verbose_lines: Vec<&str> = nu.lines().filter(|l| l.contains("verbose")).collect();
+    let verbose_lines: Vec<&str> = nu.lines().filter(|line| line.contains("verbose")).collect();
     assert_eq!(
         verbose_lines.len(),
         1,
@@ -909,22 +953,22 @@ fn nu_file_parsing() {
 
 use completions *
 "#;
-    let r = parse_nu_completions("mytool", nu_source);
-    assert_eq!(r.entries.len(), 2, "entries: {:?}", r.entries);
+    let result = parse_nu_completions("mytool", nu_source);
+    assert_eq!(result.entries.len(), 2, "entries: {:?}", result.entries);
     assert!(
-        !r.subcommands.is_empty(),
+        !result.subcommands.is_empty(),
         "subcommands: {:?}",
-        r.subcommands
+        result.subcommands
     );
-    assert!(r.subcommands.iter().any(|sc| sc.name == "list"));
-    assert_eq!(r.description, "Unofficial CLI tool");
+    assert!(result.subcommands.iter().any(|sc| sc.name == "list"));
+    assert_eq!(result.description, "Unofficial CLI tool");
 
     let r2 = parse_nu_completions("mytool list", nu_source);
     assert_eq!(r2.entries.len(), 3, "list entries: {:?}", r2.entries);
     let has_format = r2
         .entries
         .iter()
-        .any(|e| matches!(&e.switch, OwnedSwitch::Both('f', l) if l == "format"));
+        .any(|entry| matches!(&entry.switch, OwnedSwitch::Both('f', long) if long == "format"));
     assert!(
         has_format,
         "list should have --format(-f): {:?}",
@@ -935,7 +979,7 @@ use completions *
 
 #[test]
 fn self_listing_detection() {
-    let txt = r#"systemctl [OPTIONS...] COMMAND ...
+    let txt = "systemctl [OPTIONS...] COMMAND ...
 
 Unit Commands:
   start UNIT...                       Start (activate) one or more units
@@ -945,16 +989,17 @@ Unit Commands:
 Options:
   --user                              Talk to the user service manager
   --system                            Talk to the system service manager
-"#;
-    let r = parse(txt);
-    let has_start = r.subcommands.iter().any(|sc| sc.name == "start");
+";
+    let result = parse(txt);
+    let has_start = result.subcommands.iter().any(|sc| sc.name == "start");
     assert!(
         has_start,
         "expected start in subcommands: {:?}",
-        r.subcommands
+        result
+            .subcommands
             .iter()
             .map(|sc| sc.name.as_str())
             .collect::<Vec<_>>()
     );
-    assert!(r.entries.len() >= 2);
+    assert!(result.entries.len() >= 2);
 }

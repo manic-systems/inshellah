@@ -26,7 +26,7 @@ pub struct Args {
     pub scrape: Scrape,
 }
 
-pub fn run(args: Args) -> io::Result<()> {
+pub fn run(args: &Args) -> io::Result<()> {
     let sources = read_sources(&args.sources)?;
     cmd_merge(
         &args.profile,

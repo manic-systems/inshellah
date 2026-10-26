@@ -2,11 +2,11 @@
 //! `inshellah diff`.
 
 use std::collections::BTreeSet;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use inshellah::indexer::{
-    find_manpage_path, list_manpages, parse_help_text, try_help, try_help_args,
-};
+use inshellah::indexer::probe::{parse_help_text, try_help, try_help_args};
+use inshellah::indexer::{find_manpage_path, list_manpages};
 use inshellah::parsers::manpage::{
     ManpageEntry, ManpageResult, OwnedSwitch, parse_manpage_string, read_manpage_file,
 };
@@ -15,23 +15,23 @@ use super::common::find_in_path;
 
 fn mandirs_for_bin(bin: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(prefix) = bin.parent().and_then(|p| p.parent()) {
+    if let Some(prefix) = bin.parent().and_then(Path::parent) {
         out.push(prefix.join("share/man"));
     }
-    for p in [
+    for dir in [
         "/run/current-system/sw/share/man",
         "/usr/share/man",
         "/usr/local/share/man",
     ] {
-        out.push(PathBuf::from(p));
+        out.push(PathBuf::from(dir));
     }
-    out.into_iter().filter(|p| p.is_dir()).collect()
+    out.into_iter().filter(|dir| dir.is_dir()).collect()
 }
 
-fn switch_key(e: &ManpageEntry) -> String {
-    match &e.switch {
-        OwnedSwitch::Both(_, l) | OwnedSwitch::Long(l) => format!("--{l}"),
-        OwnedSwitch::Short(c) => format!("-{c}"),
+fn switch_key(entry: &ManpageEntry) -> String {
+    match &entry.switch {
+        OwnedSwitch::Both(_, long) | OwnedSwitch::Long(long) => format!("--{long}"),
+        OwnedSwitch::Short(short) => format!("-{short}"),
     }
 }
 
@@ -54,15 +54,13 @@ fn diff_sets(label: &str, man: &[String], help: &[String]) {
     }
 }
 
-pub fn run(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
-    let Some((base, sub_args)) = cmd_args.split_first() else {
-        eprintln!("error: diff requires a CMD argument");
-        std::process::exit(1);
-    };
-    let Some(bin) = find_in_path(base) else {
-        eprintln!("error: {base} not found in PATH");
-        std::process::exit(1);
-    };
+pub fn run(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) -> io::Result<()> {
+    let (base, sub_args) = cmd_args.split_first().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "diff requires a CMD argument")
+    })?;
+    let bin = find_in_path(base).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("{base} not found in PATH"))
+    })?;
     let mut mandirs = mandirs_for_bin(&bin);
     mandirs.extend(extra_mandirs.iter().cloned());
     let hyphenated = if sub_args.is_empty() {
@@ -75,8 +73,8 @@ pub fn run(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
     let man_path = find_manpage_path(&mandirs, &hyphenated);
     let man = man_path
         .as_ref()
-        .and_then(|p| read_manpage_file(p).ok())
-        .map(|c| parse_manpage_string(&c));
+        .and_then(|path| read_manpage_file(path).ok())
+        .map(|contents| parse_manpage_string(&contents));
     let bin_s = bin.to_string_lossy().to_string();
     let help_text = if sub_args.is_empty() {
         try_help(&bin, timeout_ms)
@@ -90,22 +88,29 @@ pub fn run(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
         "  manpage: {}",
         man_path
             .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(none)".into())
+            .map_or_else(|| "(none)".into(), |path| path.display().to_string())
     );
     println!(
         "  help:    {}",
         if help_text.is_some() { "ok" } else { "(none)" }
     );
 
-    let subs = |r: &Option<ManpageResult>| -> Vec<String> {
-        r.as_ref()
-            .map(|r| r.subcommands.iter().map(|s| s.name.clone()).collect())
+    let subs = |parsed: &Option<ManpageResult>| -> Vec<String> {
+        parsed
+            .as_ref()
+            .map(|result| {
+                result
+                    .subcommands
+                    .iter()
+                    .map(|sub| sub.name.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     };
-    let flags = |r: &Option<ManpageResult>| -> Vec<String> {
-        r.as_ref()
-            .map(|r| r.entries.iter().map(switch_key).collect())
+    let flags = |parsed: &Option<ManpageResult>| -> Vec<String> {
+        parsed
+            .as_ref()
+            .map(|result| result.entries.iter().map(switch_key).collect())
             .unwrap_or_default()
     };
     let man_subs = subs(&man);
@@ -116,7 +121,7 @@ pub fn run(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
     if man_subs.is_empty() && !help_subs.is_empty() {
         let covered = help_subs
             .iter()
-            .filter(|s| find_manpage_path(&mandirs, &format!("{hyphenated}-{s}")).is_some())
+            .filter(|sub| find_manpage_path(&mandirs, &format!("{hyphenated}-{sub}")).is_some())
             .count();
         println!(
             "  GAP: manpage body has 0 subcommands, help has {}; sibling pages cover {covered}/{}",
@@ -124,13 +129,14 @@ pub fn run(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) {
             help_subs.len()
         );
     }
+    Ok(())
 }
 
-fn looks_like_unenumerated_group(r: &ManpageResult) -> bool {
-    r.subcommands.is_empty()
-        && r.positionals.iter().any(|(n, _)| {
+fn looks_like_unenumerated_group(result: &ManpageResult) -> bool {
+    result.subcommands.is_empty()
+        && result.positionals.iter().any(|(name, _)| {
             matches!(
-                n.to_ascii_lowercase().as_str(),
+                name.to_ascii_lowercase().as_str(),
                 "command" | "commands" | "subcommand" | "subcommands"
             )
         })
@@ -138,9 +144,9 @@ fn looks_like_unenumerated_group(r: &ManpageResult) -> bool {
 
 pub fn run_scan(prefix: &Path, timeout_ms: u64) {
     let mandirs = vec![prefix.join("share/man")];
-    let mut suspects = 0u32;
-    let mut help_recoverable = 0u32;
-    let mut sibling_covered = 0u32;
+    let mut suspects = 0_u32;
+    let mut help_recoverable = 0_u32;
+    let mut sibling_covered = 0_u32;
     for page in list_manpages(&mandirs) {
         let Ok(contents) = read_manpage_file(&page) else {
             continue;
@@ -151,10 +157,9 @@ pub fn run_scan(prefix: &Path, timeout_ms: u64) {
         }
         let stem = page
             .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.split('.').next().unwrap_or(n))
-            .unwrap_or("");
-        let toks: Vec<String> = stem.split('-').map(str::to_string).collect();
+            .and_then(|name| name.to_str())
+            .map_or("", |name| name.split('.').next().unwrap_or(name));
+        let toks: Vec<String> = stem.split('-').map(str::to_owned).collect();
         let Some((base, sub)) = toks.split_first() else {
             continue;
         };
@@ -171,14 +176,20 @@ pub fn run_scan(prefix: &Path, timeout_ms: u64) {
         let help_subs: Vec<String> = help_text
             .as_deref()
             .map(parse_help_text)
-            .map(|r| r.subcommands.into_iter().map(|s| s.name).collect())
+            .map(|result| {
+                result
+                    .subcommands
+                    .into_iter()
+                    .map(|child| child.name)
+                    .collect()
+            })
             .unwrap_or_default();
         if help_subs.is_empty() {
             continue;
         }
         let covered = help_subs
             .iter()
-            .filter(|s| find_manpage_path(&mandirs, &format!("{stem}-{s}")).is_some())
+            .filter(|child| find_manpage_path(&mandirs, &format!("{stem}-{child}")).is_some())
             .count();
         let kind = if covered == help_subs.len() {
             sibling_covered += 1;
@@ -209,7 +220,7 @@ mod tests {
     fn detects_unenumerated_group_placeholder() {
         let mut result = ManpageResult::default();
         result.positionals.push((
-            "subcommands".to_string(),
+            "subcommands".to_owned(),
             Positional {
                 optional: false,
                 variadic: false,

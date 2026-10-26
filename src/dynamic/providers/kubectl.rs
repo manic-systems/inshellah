@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: EUPL-1.2
-use super::super::shared::{Candidate, DynCtx, run};
+use crate::complete::Candidate;
+use crate::dynamic::shared::{DynCtx, run};
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if !ctx.slot.positional() {
         return None;
     }
-    let sub = spans.get(1).map(String::as_str).unwrap_or("");
+    let sub = spans.get(1).map_or("", String::as_str);
     let resource_verbs = [
         "get", "describe", "delete", "edit", "scale", "annotate", "label",
     ];
     if resource_verbs.contains(&sub) && spans.len() >= 4 {
-        let kind = spans.get(2).map(String::as_str).unwrap_or("");
+        let kind = spans.get(2).map_or("", String::as_str);
         return kubectl_names(kind, spans, ctx);
     }
     if (sub == "logs" || sub == "exec" || sub == "port-forward") && spans.len() >= 3 {
         return kubectl_names("pods", spans, ctx);
     }
     if sub == "rollout" && spans.len() >= 5 {
-        let action = spans.get(2).map(String::as_str).unwrap_or("");
-        let kind = spans.get(3).map(String::as_str).unwrap_or("");
+        let action = spans.get(2).map_or("", String::as_str);
+        let kind = spans.get(3).map_or("", String::as_str);
         if matches!(
             action,
             "history" | "pause" | "restart" | "resume" | "status" | "undo"
@@ -28,13 +29,15 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
     None
 }
 
-pub(crate) struct KubeScope {
-    pub(crate) args: Vec<String>,
-    pub(crate) all: bool,
+pub struct KubeScope {
+    pub args: Vec<String>,
+    pub all: bool,
 }
 
-pub(crate) fn kubectl_scope(spans: &[String]) -> KubeScope {
-    let all_namespaces = spans.iter().any(|s| s == "-A" || s == "--all-namespaces");
+pub fn kubectl_scope(spans: &[String]) -> KubeScope {
+    let all_namespaces = spans
+        .iter()
+        .any(|span| span == "-A" || span == "--all-namespaces");
     if all_namespaces {
         return KubeScope {
             args: vec!["--all-namespaces".into()],
@@ -42,12 +45,12 @@ pub(crate) fn kubectl_scope(spans: &[String]) -> KubeScope {
         };
     }
     let mut namespace: Option<String> = None;
-    let mut i = 0usize;
+    let mut i = 0_usize;
     while i < spans.len() {
-        let s = &spans[i];
-        if let Some(rest) = s.strip_prefix("--namespace=") {
-            namespace = Some(rest.to_string());
-        } else if (s == "-n" || s == "--namespace") && i + 1 < spans.len() {
+        let span = &spans[i];
+        if let Some(rest) = span.strip_prefix("--namespace=") {
+            namespace = Some(rest.to_owned());
+        } else if (span == "-n" || span == "--namespace") && i + 1 < spans.len() {
             namespace = Some(spans[i + 1].clone());
             i += 1;
         }
@@ -78,9 +81,9 @@ fn cluster_args(spans: &[String]) -> Vec<String> {
         }
         if let Some(value) = inline
             .or_else(|| iter.next().map(String::as_str))
-            .filter(|v| !v.is_empty())
+            .filter(|value| !value.is_empty())
         {
-            args.extend([flag.to_string(), value.to_string()]);
+            args.extend([flag.to_owned(), value.to_owned()]);
         }
     }
     args
@@ -102,23 +105,23 @@ fn kubectl_names(kind: &str, spans: &[String], ctx: &DynCtx) -> Option<Vec<Candi
     args.extend(
         ["--no-headers", "-o", columns]
             .into_iter()
-            .map(str::to_string),
+            .map(str::to_owned),
     );
     let out = run(&args, ctx)?;
     let mut candidates = Vec::new();
     for line in out.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
         if scope.all {
-            let parts: Vec<&str> = line.split_whitespace().collect();
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
             if parts.len() < 2 {
                 continue;
             }
             candidates.push(Candidate::new(parts[1], format!("{kind} in {}", parts[0])));
         } else {
-            candidates.push(Candidate::new(line, kind));
+            candidates.push(Candidate::new(trimmed, kind));
         }
     }
     (!candidates.is_empty()).then_some(candidates)

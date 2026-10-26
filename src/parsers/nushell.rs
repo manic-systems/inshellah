@@ -2,6 +2,7 @@
 //! generate nushell `extern` definitions from a [`ManpageResult`].
 
 use std::borrow::Cow;
+use std::mem;
 
 use crate::parsers::manpage::{
     ManpageEntry, ManpageResult, ManpageSubcommand, OwnedParam, OwnedSwitch,
@@ -18,47 +19,47 @@ pub fn nushell_type_of_param(name: &str) -> &'static str {
     }
 }
 
-pub fn escape_nu(s: &str) -> Cow<'_, str> {
-    if !s
+pub fn escape_nu(text: &str) -> Cow<'_, str> {
+    if text
         .bytes()
-        .any(|b| matches!(b, b'"' | b'\\' | b'\n' | b'\r' | b'\t'))
+        .any(|byte| matches!(byte, b'"' | b'\\' | b'\n' | b'\r' | b'\t'))
     {
-        Cow::Borrowed(s)
-    } else {
-        let mut buf = String::with_capacity(s.len() + 4);
-        for c in s.chars() {
-            match c {
+        let mut buf = String::with_capacity(text.len() + 4);
+        for ch in text.chars() {
+            match ch {
                 '"' => buf.push_str("\\\""),
                 '\\' => buf.push_str("\\\\"),
                 '\n' => buf.push_str("\\n"),
                 '\r' => buf.push_str("\\r"),
                 '\t' => buf.push_str("\\t"),
-                c => buf.push(c),
+                other => buf.push(other),
             }
         }
         Cow::Owned(buf)
+    } else {
+        Cow::Borrowed(text)
     }
 }
 
-fn sanitize_token(s: &str) -> Cow<'_, str> {
-    if s.chars().any(char::is_control) {
-        Cow::Owned(s.chars().filter(|c| !c.is_control()).collect())
+fn sanitize_token(token: &str) -> Cow<'_, str> {
+    if token.chars().any(char::is_control) {
+        Cow::Owned(token.chars().filter(|ch| !ch.is_control()).collect())
     } else {
-        Cow::Borrowed(s)
+        Cow::Borrowed(token)
     }
 }
 
 /// desc is right-padded to column 40 with a "# " prefix.
 pub fn format_flag(entry: &ManpageEntry) -> String {
-    let name = match &entry.switch {
-        OwnedSwitch::Both(c, l) => format!("--{l}(-{c})"),
-        OwnedSwitch::Long(l) => format!("--{l}"),
-        OwnedSwitch::Short(c) => format!("-{c}"),
+    let raw_name = match &entry.switch {
+        OwnedSwitch::Both(short, long) => format!("--{long}(-{short})"),
+        OwnedSwitch::Long(long) => format!("--{long}"),
+        OwnedSwitch::Short(short) => format!("-{short}"),
     };
-    let name = sanitize_token(&name);
+    let name = sanitize_token(&raw_name);
     let typed = match &entry.param {
-        Some(OwnedParam::Mandatory(p)) | Some(OwnedParam::Optional(p)) => {
-            format!(": {}", nushell_type_of_param(p))
+        Some(OwnedParam::Mandatory(param) | OwnedParam::Optional(param)) => {
+            format!(": {}", nushell_type_of_param(param))
         }
         None => String::new(),
     };
@@ -66,22 +67,30 @@ pub fn format_flag(entry: &ManpageEntry) -> String {
     if entry.desc.is_empty() {
         flag
     } else {
-        let pad_len = 40usize.saturating_sub(flag.len()).max(1);
+        let pad_len = 40_usize.saturating_sub(flag.len()).max(1);
         format!("{flag}{}# {}", " ".repeat(pad_len), escape_nu(&entry.desc))
     }
 }
 
 /// hyphens become underscores, nushell identifiers can't contain hyphens.
-pub fn format_positional(name: &str, p: &Positional) -> String {
+pub fn format_positional(name: &str, positional: &Positional) -> String {
     let name_underscored: String = sanitize_token(name)
         .chars()
-        .map(|c| if c == '-' { '_' } else { c })
+        .map(|ch| if ch == '-' { '_' } else { ch })
         .collect();
     let name_upper = name.to_ascii_uppercase();
-    let prefix = if p.variadic { "..." } else { "" };
-    let suffix = if p.optional && !p.variadic { "?" } else { "" };
-    let typ = nushell_type_of_param(&name_upper);
-    let typ = if typ == "string" { "glob" } else { typ };
+    let prefix = if positional.variadic { "..." } else { "" };
+    let suffix = if positional.optional && !positional.variadic {
+        "?"
+    } else {
+        ""
+    };
+    let base_type = nushell_type_of_param(&name_upper);
+    let typ = if base_type == "string" {
+        "glob"
+    } else {
+        base_type
+    };
     format!("    {prefix}{name_underscored}{suffix}: {typ}")
 }
 
@@ -91,38 +100,36 @@ pub fn fixup_positionals(positionals: Vec<(String, Positional)>) -> Vec<(String,
     let mut seen_optional = false;
     let mut seen_variadic = false;
     let mut out = Vec::with_capacity(positionals.len());
-    for (name, mut p) in positionals {
-        if p.variadic {
+    for (name, mut positional) in positionals {
+        if positional.variadic {
             if seen_variadic {
                 continue;
             }
             seen_variadic = true;
             seen_optional = true;
-            out.push((name, p));
         } else if seen_optional {
-            p.optional = true;
-            out.push((name, p));
+            positional.optional = true;
         } else {
-            seen_optional = p.optional;
-            out.push((name, p));
+            seen_optional = positional.optional;
         }
+        out.push((name, positional));
     }
     out
 }
 
 pub fn module_name_of(cmd_name: &str) -> String {
-    let mut s: String = cmd_name
+    let mut module: String = cmd_name
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
             } else {
                 '-'
             }
         })
         .collect();
-    s.push_str("-completions");
-    s
+    module.push_str("-completions");
+    module
 }
 
 /// unresolved subcommands get a stub block whose only content is a `# desc`
@@ -132,9 +139,11 @@ pub fn generate_extern(cmd_name: &str, result: &ManpageResult) -> String {
     let positionals = fixup_positionals(result.positionals.clone());
 
     let mut out = String::new();
-    out.push_str(&format!("export extern \"{escaped_name}\" [\n"));
-    for (name, p) in &positionals {
-        out.push_str(&format_positional(name, p));
+    out.push_str("export extern \"");
+    out.push_str(&escaped_name);
+    out.push_str("\" [\n");
+    for (name, positional) in &positionals {
+        out.push_str(&format_positional(name, positional));
         out.push('\n');
     }
     for entry in &result.entries {
@@ -143,13 +152,14 @@ pub fn generate_extern(cmd_name: &str, result: &ManpageResult) -> String {
     }
     out.push_str("]\n");
 
-    for sc in &result.subcommands {
-        out.push_str(&format!(
-            "\nexport extern \"{} {}\" [  # {}\n]\n",
-            escaped_name,
-            escape_nu(&sc.name),
-            escape_nu(&sc.desc)
-        ));
+    for subcommand in &result.subcommands {
+        out.push_str("\nexport extern \"");
+        out.push_str(&escaped_name);
+        out.push(' ');
+        out.push_str(&escape_nu(&subcommand.name));
+        out.push_str("\" [  # ");
+        out.push_str(&escape_nu(&subcommand.desc));
+        out.push_str("\n]\n");
     }
     out
 }
@@ -174,27 +184,26 @@ pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
         let trimmed = line.trim();
         if !in_block {
             if let Some(stripped) = trimmed.strip_prefix("# ") {
-                current_desc = stripped.trim().to_string();
+                stripped.trim().clone_into(&mut current_desc);
             } else if trimmed.contains("export extern")
                 && let Some(cmd) = extract_extern_name(trimmed)
             {
                 in_block = true;
                 block = NuBlock {
                     cmd,
-                    description: std::mem::take(&mut current_desc),
+                    description: mem::take(&mut current_desc),
                     ..Default::default()
                 };
             } else {
                 current_desc.clear();
             }
         } else if trimmed.starts_with(']') {
-            blocks.push(std::mem::take(&mut block));
+            blocks.push(mem::take(&mut block));
             in_block = false;
         } else {
-            let (param_part, desc) = match trimmed.find('#') {
-                Some(idx) => (trimmed[..idx].trim(), trimmed[idx + 1..].trim()),
-                None => (trimmed, ""),
-            };
+            let (param_part, desc) = trimmed
+                .split_once('#')
+                .map_or((trimmed, ""), |(param, desc)| (param.trim(), desc.trim()));
             parse_nu_param_line_into(param_part, desc, &mut block);
         }
     }
@@ -202,20 +211,20 @@ pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
         blocks.push(block);
     }
 
-    let Some(matched) = blocks.iter().find(|b| b.cmd == target_cmd) else {
+    let Some(matched) = blocks.iter().find(|parsed| parsed.cmd == target_cmd) else {
         return ManpageResult::default();
     };
 
     let prefix = format!("{target_cmd} ");
     let mut subcommands: Vec<ManpageSubcommand> = Vec::new();
-    for b in &blocks {
-        if let Some(suffix) = b.cmd.strip_prefix(&prefix)
+    for child in &blocks {
+        if let Some(suffix) = child.cmd.strip_prefix(&prefix)
             && !suffix.contains(' ')
             && !suffix.is_empty()
         {
             subcommands.push(ManpageSubcommand::new(
-                suffix.to_string(),
-                b.description.clone(),
+                suffix.to_owned(),
+                child.description.clone(),
             ));
         }
     }
@@ -230,19 +239,19 @@ pub fn parse_nu_completions(target_cmd: &str, contents: &str) -> ManpageResult {
 }
 
 fn extract_extern_name(line: &str) -> Option<String> {
-    let idx = line.find("export extern")?;
-    let after = line[idx + "export extern".len()..].trim_start();
+    let (_, tail) = line.split_once("export extern")?;
+    let after = tail.trim_start();
     if let Some(rest) = after.strip_prefix('"') {
-        let end = rest.find('"')?;
-        Some(rest[..end].to_string())
+        let (name, _) = rest.split_once('"')?;
+        Some(name.to_owned())
     } else {
-        let end = after
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-            .unwrap_or(after.len());
-        if end == 0 {
+        let name = after
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+            .next()?;
+        if name.is_empty() {
             None
         } else {
-            Some(after[..end].to_string())
+            Some(name.to_owned())
         }
     }
 }
@@ -252,52 +261,54 @@ fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
         return;
     }
     if let Some(after) = param_part.strip_prefix("--") {
-        let (name, rest) = split_at_non_name_char(after);
+        let (name, after_name) = split_at_non_name_char(after);
         if name.is_empty() {
             return;
         }
         let mut short: Option<char> = None;
-        let mut rest = rest;
-        if let Some(after_open) = rest.strip_prefix("(-")
-            && let Some(c) = after_open.chars().next()
-            && after_open[c.len_utf8()..].starts_with(')')
-        {
-            short = Some(c);
-            rest = &after_open[c.len_utf8() + 1..];
+        let mut rest = after_name;
+        if let Some(after_open) = after_name.strip_prefix("(-") {
+            let mut chars = after_open.chars();
+            if let Some(ch) = chars.next()
+                && let Some(tail) = chars.as_str().strip_prefix(')')
+            {
+                short = Some(ch);
+                rest = tail;
+            }
         }
         let param = parse_type_suffix(rest);
-        let switch = match short {
-            Some(c) => OwnedSwitch::Both(c, name.to_string()),
-            None => OwnedSwitch::Long(name.to_string()),
-        };
+        let switch = short.map_or_else(
+            || OwnedSwitch::Long(name.to_owned()),
+            |ch| OwnedSwitch::Both(ch, name.to_owned()),
+        );
         block.entries.push(ManpageEntry {
             switch,
             param,
-            desc: desc.to_string(),
+            desc: desc.to_owned(),
         });
     } else if param_part.starts_with('-') {
-        if let Some(c) = param_part.chars().nth(1)
-            && c.is_ascii_alphanumeric()
+        if let Some(ch) = param_part.chars().nth(1)
+            && ch.is_ascii_alphanumeric()
         {
             block.entries.push(ManpageEntry {
-                switch: OwnedSwitch::Short(c),
+                switch: OwnedSwitch::Short(ch),
                 param: None,
-                desc: desc.to_string(),
+                desc: desc.to_owned(),
             });
         }
     } else {
-        let variadic = param_part.starts_with("...");
-        let after_prefix = if variadic {
-            &param_part[3..]
-        } else {
-            param_part
-        };
+        let (variadic, after_prefix) = param_part
+            .strip_prefix("...")
+            .map_or((false, param_part), |rest| (true, rest));
         let optional = after_prefix.contains('?');
-        let name_end = after_prefix.find([':', '?']).unwrap_or(after_prefix.len());
-        let name = after_prefix[..name_end].trim();
-        let name: String = name
+        let raw_name = after_prefix
+            .split([':', '?'])
+            .next()
+            .unwrap_or(after_prefix)
+            .trim();
+        let name: String = raw_name
             .chars()
-            .map(|c| if c == '-' { '_' } else { c })
+            .map(|ch| if ch == '-' { '_' } else { ch })
             .collect();
         if !name.is_empty() && !name.starts_with('-') {
             let duplicate = block
@@ -317,26 +328,22 @@ fn parse_nu_param_line_into(param_part: &str, desc: &str, block: &mut NuBlock) {
     }
 }
 
-fn split_at_non_name_char(s: &str) -> (&str, &str) {
-    let end = s
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-        .unwrap_or(s.len());
-    (&s[..end], &s[end..])
+fn split_at_non_name_char(text: &str) -> (&str, &str) {
+    let end = text
+        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .unwrap_or(text.len());
+    text.split_at_checked(end).unwrap_or((text, ""))
 }
 
 /// always Mandatory: nushell extern syntax has no optional-with-default to
 /// distinguish.
-fn parse_type_suffix(s: &str) -> Option<OwnedParam> {
-    let s = s.trim_start();
-    let s = s.strip_prefix(':')?;
-    let s = s.trim_start();
-    let end = s
-        .find(|c: char| !c.is_ascii_alphabetic())
-        .unwrap_or(s.len());
-    if end == 0 {
+fn parse_type_suffix(text: &str) -> Option<OwnedParam> {
+    let typed = text.trim_start().strip_prefix(':')?.trim_start();
+    let type_name = typed.split(|ch: char| !ch.is_ascii_alphabetic()).next()?;
+    if type_name.is_empty() {
         None
     } else {
-        Some(OwnedParam::Mandatory(s[..end].to_string()))
+        Some(OwnedParam::Mandatory(type_name.to_owned()))
     }
 }
 
@@ -426,9 +433,9 @@ use completions *
         let list = parse_nu_completions("mytool list", nu_source);
         assert_eq!(list.entries.len(), 3, "list entries: {:?}", list.entries);
         assert!(
-            list.entries
-                .iter()
-                .any(|e| matches!(&e.switch, OwnedSwitch::Both('f', long) if long == "format")),
+            list.entries.iter().any(
+                |entry| matches!(&entry.switch, OwnedSwitch::Both('f', long) if long == "format")
+            ),
             "list should have --format(-f): {:?}",
             list.entries
         );

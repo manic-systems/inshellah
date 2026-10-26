@@ -1,9 +1,9 @@
 use nom::{
+    IResult, Parser as _,
     character::complete::space0,
     combinator::verify,
     multi::many0,
     sequence::{preceded, terminated},
-    IResult, Parser,
 };
 
 use crate::make_parser;
@@ -11,7 +11,7 @@ use crate::parsers::help::helpers::{at_least_indent, eol, rest_of_line};
 
 // indented (≥8 visual cols), non-flag-shaped line belonging to the previous
 // flag's desc. blank-but-indented lines accepted, filtered by the caller's join.
-make_parser!(continuation_line -> &'a str,
+make_parser!(continuation_line<'src> -> &'src str,
     verify(
         preceded(
             // assert without consuming, space0 inside `rest_of_line`'s preceded
@@ -26,7 +26,7 @@ make_parser!(continuation_line -> &'a str,
 
 // always succeeds, first line may be empty (switch immediately followed by a
 // newline, "clap long" style).
-make_parser!(pub description -> (&'a str, Vec<&'a str>),
+make_parser!(pub description<'src> -> (&'src str, Vec<&'src str>),
 (
     terminated(preceded(space0, rest_of_line), eol),
     many0(continuation_line),

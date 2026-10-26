@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
+use std::collections::HashSet;
 use std::fmt;
+use std::fs;
 
 use serde_core::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
 
-use super::super::shared::{Candidate, DynCtx, run};
+use crate::complete::Candidate;
+use crate::dynamic::shared::{DynCtx, run};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match spans[0].as_str() {
@@ -19,14 +22,14 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candida
 
 fn npm_like_completions(spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let cmd = spans[0].as_str();
-    let sub = spans.get(1).map(String::as_str).unwrap_or("");
+    let sub = spans.get(1).map_or("", String::as_str);
     let span_len = spans.len();
     let wants = (cmd == "yarn" && span_len == 2)
         || ((sub == "run" || sub == "run-script") && span_len == 3);
     if !wants {
         return None;
     }
-    let contents = std::fs::read_to_string("package.json").ok()?;
+    let contents = fs::read_to_string("package.json").ok()?;
     let Package(scripts) = serde_json::from_str(&contents).ok()?;
     let Scripts(candidates) = scripts?;
     (!candidates.is_empty()).then_some(candidates)
@@ -38,7 +41,10 @@ struct Package(Option<Scripts>);
 struct Scripts(Vec<Candidate>);
 
 impl<'de> Deserialize<'de> for Package {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         struct PackageVisitor;
 
         impl<'de> Visitor<'de> for PackageVisitor {
@@ -48,7 +54,10 @@ impl<'de> Deserialize<'de> for Package {
                 formatter.write_str("a package.json object")
             }
 
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Package, M::Error> {
+            fn visit_map<M>(self, mut map: M) -> Result<Package, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
                 let mut scripts = None;
                 while let Some(key) = map.next_key::<String>()? {
                     if key == "scripts" {
@@ -66,7 +75,10 @@ impl<'de> Deserialize<'de> for Package {
 }
 
 impl<'de> Deserialize<'de> for Scripts {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         struct ScriptsVisitor;
 
         impl<'de> Visitor<'de> for ScriptsVisitor {
@@ -76,7 +88,10 @@ impl<'de> Deserialize<'de> for Scripts {
                 formatter.write_str("an object of scripts")
             }
 
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Scripts, M::Error> {
+            fn visit_map<M>(self, mut map: M) -> Result<Scripts, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
                 let mut candidates = Vec::new();
                 while let Some((name, command)) = map.next_entry::<String, serde_json::Value>()? {
                     candidates.push(Candidate::new(name, command.as_str().unwrap_or("")));
@@ -93,24 +108,22 @@ fn make_completions(spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if spans.len() > 2 {
         return None;
     }
-    let contents = std::fs::read_to_string("Makefile").ok()?;
-    let mut seen = std::collections::HashSet::new();
+    let contents = fs::read_to_string("Makefile").ok()?;
+    let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     for line in contents.lines() {
-        let Some(colon) = line.find(':') else {
+        let Some((lhs, _)) = line.split_once(':') else {
             continue;
         };
-        let lhs = &line[..colon];
         if lhs.is_empty() || lhs.starts_with('.') {
             continue;
         }
-        if !lhs
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '/' || c == '-')
-        {
+        if !lhs.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '/' || ch == '-'
+        }) {
             continue;
         }
-        if seen.insert(lhs.to_string()) {
+        if seen.insert(lhs.to_owned()) {
             candidates.push(Candidate::new(lhs, ""));
         }
     }
@@ -134,12 +147,12 @@ fn just_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
         let Some(name) = iter.next() else { continue };
         if !name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
         {
             continue;
         }
         let desc = match trimmed.split_once('#') {
-            Some((_, after)) => after.trim().to_string(),
+            Some((_, after)) => after.trim().to_owned(),
             None => String::new(),
         };
         candidates.push(Candidate::new(name, desc));
@@ -167,39 +180,48 @@ fn cargo_completions(ctx: &DynCtx) -> Option<Vec<Candidate>> {
     )?;
     let parsed: serde_json::Value = serde_json::from_str(&out).ok()?;
     let packages = parsed.get("packages")?.as_array()?;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     if want_package {
         for pkg in packages {
-            let name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let version = pkg.get("version").and_then(|v| v.as_str()).unwrap_or("");
+            let name = pkg
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let version = pkg
+                .get("version")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             if name.is_empty() {
                 continue;
             }
-            if seen.insert(name.to_string()) {
+            if seen.insert(name.to_owned()) {
                 candidates.push(Candidate::new(name, version));
             }
         }
     } else {
         let kind = prev.trim_start_matches('-');
         for pkg in packages {
-            let Some(targets) = pkg.get("targets").and_then(|v| v.as_array()) else {
+            let Some(targets) = pkg.get("targets").and_then(|value| value.as_array()) else {
                 continue;
             };
-            for t in targets {
-                let kinds = match t.get("kind").and_then(|v| v.as_array()) {
-                    Some(a) => a,
-                    None => continue,
+            for target in targets {
+                let Some(kinds) = target.get("kind").and_then(|value| value.as_array()) else {
+                    continue;
                 };
-                let kind_strs: Vec<&str> = kinds.iter().filter_map(|v| v.as_str()).collect();
+                let kind_strs: Vec<&str> =
+                    kinds.iter().filter_map(|value| value.as_str()).collect();
                 if !kind_strs.contains(&kind) {
                     continue;
                 }
-                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let name = target
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 if name.is_empty() {
                     continue;
                 }
-                if seen.insert(name.to_string()) {
+                if seen.insert(name.to_owned()) {
                     candidates.push(Candidate::new(name, kind_strs.join(",")));
                 }
             }
@@ -221,7 +243,7 @@ fn zig_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let mut candidates = Vec::new();
     for line in out.lines() {
         let trimmed = line.trim_start();
-        let mut iter = trimmed.split_whitespace().peekable();
+        let mut iter = trimmed.split_whitespace();
         let name = iter.next()?;
         candidates.push(Candidate::new(name, iter.collect::<Vec<&str>>().join(" ")));
     }

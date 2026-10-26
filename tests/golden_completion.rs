@@ -11,11 +11,13 @@
 //! Goldens capture CURRENT behavior, bugs included — that is the point: the
 //! refactor must not change behavior silently. Known-pinned oddities are noted
 //! in `goldens-NOTES.md` alongside the snapshots.
+#![cfg(test)]
 
+use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{self, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inshellah::parsers::manpage::{
@@ -33,15 +35,15 @@ fn unique_temp_dir(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
 }
 
 fn switch_long(name: &str) -> OwnedSwitch {
-    OwnedSwitch::Long(name.to_string())
+    OwnedSwitch::Long(name.to_owned())
 }
 
-fn switch_both(c: char, long: &str) -> OwnedSwitch {
-    OwnedSwitch::Both(c, long.to_string())
+fn switch_both(short: char, long: &str) -> OwnedSwitch {
+    OwnedSwitch::Both(short, long.to_owned())
 }
 
 fn write_stub_executable(bin: &Path, name: &str) {
@@ -55,13 +57,13 @@ fn write_stub_executable(bin: &Path, name: &str) {
 fn entry(switch: OwnedSwitch, param: Option<&str>, desc: &str) -> ManpageEntry {
     ManpageEntry {
         switch,
-        param: param.map(|name| OwnedParam::Mandatory(name.to_string())),
-        desc: desc.to_string(),
+        param: param.map(|name| OwnedParam::Mandatory(name.to_owned())),
+        desc: desc.to_owned(),
     }
 }
 
 fn sub(name: &str, desc: &str) -> ManpageSubcommand {
-    ManpageSubcommand::new(name.to_string(), desc.to_string())
+    ManpageSubcommand::new(name.to_owned(), desc.to_owned())
 }
 
 /// Build the hermetic fixture: a user cache, a system cache, and a fake `tool`
@@ -87,7 +89,7 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
         ],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
-        description: "A demo tool".to_string(),
+        description: "A demo tool".to_owned(),
     };
     write_result(&user, "tool", "manpage", &tool).expect("write tool");
 
@@ -100,7 +102,7 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
         subcommands: Vec::new(),
         positional_choices: Vec::new(),
         positionals: Vec::new(),
-        description: "Compile the package".to_string(),
+        description: "Compile the package".to_owned(),
     };
     write_result(&user, "tool build", "manpage", &tool_build).expect("write tool build");
 
@@ -114,7 +116,7 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
         ],
         positional_choices: Vec::new(),
         positionals: Vec::new(),
-        description: "Other tool".to_string(),
+        description: "Other tool".to_owned(),
     };
     write_result(&system, "othertool", "manpage", &othertool).expect("write othertool");
 
@@ -147,7 +149,7 @@ exit 2
 
 fn run_complete(user: &Path, system: &Path, bin: &Path, spans: &[&str]) -> String {
     let dir = format!("{}:{}", user.display(), system.display());
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let old_path = env::var_os("PATH").unwrap_or_default();
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("complete")
         .arg("--dir")
@@ -204,12 +206,12 @@ fn golden_completion_matrix() {
         // fresh user cache per case so on-the-fly resolves are deterministic
         let case_user = root.join(format!("user-{name}"));
         fs::create_dir_all(&case_user).expect("case user dir");
-        for entry in fs::read_dir(&user).expect("read user") {
-            let entry = entry.expect("dir entry");
+        for dir_entry in fs::read_dir(&user).expect("read user") {
+            let entry = dir_entry.expect("dir entry");
             fs::copy(entry.path(), case_user.join(entry.file_name())).expect("seed case user");
         }
         let actual = run_complete(&case_user, &system, &bin, spans);
         common::check_golden("completion", name, "json", &actual);
     }
-    let _ = fs::remove_dir_all(&root);
+    fs::remove_dir_all(&root).expect("remove temp dir");
 }

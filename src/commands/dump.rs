@@ -9,7 +9,7 @@ pub fn run(dirs: &[PathBuf]) {
     let cmds = all_commands(dirs);
     println!("{} commands", cmds.len());
     for cmd in &cmds {
-        let src = file_type_of(dirs, cmd).unwrap_or_else(|| "?".to_string());
+        let src = file_type_of(dirs, cmd).unwrap_or_else(|| "?".to_owned());
         println!("{src:>8}  {cmd}");
     }
 }

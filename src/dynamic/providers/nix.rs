@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
-use super::super::shared::{Candidate, DynCtx, run_with};
+use crate::complete::Candidate;
+use crate::dynamic::shared::{DynCtx, run_with};
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if spans.len() < 2 {
         return None;
@@ -8,7 +9,7 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
         return None;
     }
     let nix_index = spans.len() - 1;
-    let last = spans.last().map(String::as_str).unwrap_or("");
+    let last = spans.last().map_or("", String::as_str);
     let cmd_args = ctx.command_spans(spans);
     let raw = run_with(&cmd_args, ctx, |cmd| {
         cmd.env("NIX_GET_COMPLETIONS", nix_index.to_string());
@@ -40,31 +41,32 @@ pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>>
 }
 
 fn parse_nix_completion_line(line: &str) -> Option<Candidate> {
-    let line = line.trim();
-    if line.is_empty() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
         return None;
     }
-    let (value, description) = line
+    let (value, description) = trimmed
         .split_once('\t')
-        .map(|(value, description)| (value.trim(), description.trim()))
-        .unwrap_or((line, ""));
+        .map_or((trimmed, ""), |(value, description)| {
+            (value.trim(), description.trim())
+        });
     (!value.is_empty()).then(|| Candidate::new(value, description))
 }
 
-pub(crate) fn looks_like_flake_pkg(s: &str) -> bool {
-    let Some((lhs, rhs)) = s.split_once('#') else {
+pub fn looks_like_flake_pkg(word: &str) -> bool {
+    let Some((lhs, rhs)) = word.split_once('#') else {
         return false;
     };
     is_flake_ident(lhs) && is_flake_ident(rhs)
 }
 
-fn is_flake_ident(s: &str) -> bool {
-    let mut chars = s.chars();
+fn is_flake_ident(ident: &str) -> bool {
+    let mut chars = ident.chars();
     match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() => {}
+        Some(first) if first.is_ascii_alphabetic() => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
 fn nix_eval_description(installable: &str, ctx: &DynCtx) -> Option<String> {
@@ -88,6 +90,6 @@ fn nix_eval_description(installable: &str, ctx: &DynCtx) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(trimmed.to_owned())
     }
 }

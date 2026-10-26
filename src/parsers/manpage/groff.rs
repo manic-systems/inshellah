@@ -1,21 +1,22 @@
 //! groff escape/formatting stripping and line classification.
 //!
 //! also exports `make_macro_walker!`: the "scan lines, run a handler per
-//! .MACRO_NAME, advance, accumulate" loop shared by every strategy_*.
+//! .`MACRO_NAME`, advance, accumulate" loop shared by every strategy_*.
 
-/// on each macro named `$mname`, invoke the body with `(lines, i, args)`. the
-/// body returns `Option<(T, usize)>`: `Some((value, new_i))` pushes and advances
+/// on each macro named `$mname`, invoke the body with `(lines, i, args)`.
+///
+/// the body returns `Option<(T, usize)>`: `Some((value, new_i))` pushes and advances
 /// the cursor to `new_i`; `None` advances by one and keeps scanning.
 #[macro_export]
 macro_rules! make_macro_walker {
     (pub $name:ident -> Vec<$t:ty>, on macro $mname:expr =>
      |$lines:ident, $i:ident, $args:ident| $body:expr) => {
-        pub fn $name(lines_input: &[$crate::parsers::manpage::GroffLine]) -> Vec<$t> {
+        pub fn $name(lines_input: &[$crate::parsers::manpage::groff::GroffLine]) -> Vec<$t> {
             let mut out = Vec::new();
             let mut cursor = 0;
-            let $lines: &[$crate::parsers::manpage::GroffLine] = lines_input;
+            let $lines: &[$crate::parsers::manpage::groff::GroffLine] = lines_input;
             while cursor < $lines.len() {
-                if let $crate::parsers::manpage::GroffLine::Macro {
+                if let $crate::parsers::manpage::groff::GroffLine::Macro {
                     name: macro_name,
                     args: $args,
                 } = &$lines[cursor]
@@ -24,7 +25,6 @@ macro_rules! make_macro_walker {
                         let $i = cursor;
                         // IIFE so an early `return None` exits the handler, not
                         // the strategy function.
-                        #[allow(clippy::redundant_closure_call)]
                         let result: Option<($t, usize)> = (|| $body)();
                         if let Some((value, new_i)) = result {
                             out.push(value);
@@ -60,11 +60,15 @@ fn named_char_of(name: &str) -> Option<char> {
     }
 }
 
-fn is_alnum(c: u8) -> bool {
-    c.is_ascii_alphanumeric()
+const fn is_alnum(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
 }
 
 /// replace named chars with text equivalents and discard formatting directives.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match arm per escape kind over a shared byte cursor"
+)]
 pub fn strip_groff_escapes(source: &str) -> String {
     let bytes = source.as_bytes();
     let len = bytes.len();
@@ -113,9 +117,9 @@ pub fn strip_groff_escapes(source: &str) -> String {
                 b'(' => {
                     // two-char named char: \(aq, \(lq, \(rq, etc.
                     if let Some(name) = source.get(pos + 2..pos + 4) {
-                        if let Some(c) = named_char_of(name) {
-                            buffer.push(c);
-                            prev_char = c as u8;
+                        if let Some(named) = named_char_of(name) {
+                            buffer.push(named);
+                            prev_char = u8::try_from(named).unwrap_or(0);
                         }
                         pos += 4;
                     } else {
@@ -128,10 +132,9 @@ pub fn strip_groff_escapes(source: &str) -> String {
                     let start = pos;
                     skip_to_byte(bytes, len, &mut pos, b']');
                     if pos < len {
-                        let name = &source[start..pos];
-                        if let Some(c) = named_char_of(name) {
-                            buffer.push(c);
-                            prev_char = c as u8;
+                        if let Some(named) = source.get(start..pos).and_then(named_char_of) {
+                            buffer.push(named);
+                            prev_char = u8::try_from(named).unwrap_or(0);
                         }
                         pos += 1;
                     }
@@ -181,12 +184,7 @@ pub fn strip_groff_escapes(source: &str) -> String {
                     pos += 2;
                     skip_groff_reference(bytes, len, &mut pos);
                 }
-                b'e' => {
-                    buffer.push('\\');
-                    prev_char = b'\\';
-                    pos += 2;
-                }
-                b'\\' => {
+                b'e' | b'\\' => {
                     buffer.push('\\');
                     prev_char = b'\\';
                     pos += 2;
@@ -202,17 +200,18 @@ pub fn strip_groff_escapes(source: &str) -> String {
                     pos += 2;
                 }
             }
+        } else if let Some(ch) = source.get(pos..).and_then(|rest| rest.chars().next()) {
+            buffer.push(ch);
+            prev_char = u8::try_from(ch).unwrap_or(0);
+            pos += ch.len_utf8();
         } else {
-            let c = source[pos..].chars().next().unwrap();
-            buffer.push(c);
-            prev_char = if c.is_ascii() { c as u8 } else { 0 };
-            pos += c.len_utf8();
+            pos += 1;
         }
     }
     buffer
 }
 
-fn skip_to_byte(bytes: &[u8], len: usize, pos: &mut usize, delim: u8) {
+const fn skip_to_byte(bytes: &[u8], len: usize, pos: &mut usize, delim: u8) {
     while *pos < len && bytes[*pos] != delim {
         *pos += 1;
     }
@@ -222,7 +221,7 @@ fn skip_to_byte(bytes: &[u8], len: usize, pos: &mut usize, delim: u8) {
 ///   single char, e.g. \*X or \nX
 ///   ( + 2 chars, e.g. \*(XX or \n(XX
 ///   [ to ], e.g. \*[name] or \n[name]
-fn skip_groff_reference(bytes: &[u8], len: usize, pos: &mut usize) {
+const fn skip_groff_reference(bytes: &[u8], len: usize, pos: &mut usize) {
     if *pos < len {
         if bytes[*pos] == b'(' {
             *pos += 3; // skip past '(' + two-character name
@@ -238,8 +237,9 @@ fn skip_groff_reference(bytes: &[u8], len: usize, pos: &mut usize) {
     }
 }
 
-/// render inline alternating-font macros (.BI, .BR, .IR, ...). args concatenate
-/// without spaces, matching groff:
+/// render inline alternating-font macros (.BI, .BR, .IR, ...).
+///
+/// args concatenate without spaces, matching groff:
 ///   .BI "--output " "FILE"  ->  "--outputFILE"
 /// quoted strings keep inner spaces (quotes stripped); unquoted spaces consumed.
 pub fn strip_inline_macro_args(text: &str) -> String {
@@ -252,9 +252,11 @@ pub fn strip_inline_macro_args(text: &str) -> String {
             // quoted arg: keep inner spaces, copy to closing quote
             pos += 1;
             while pos < len && bytes[pos] != b'"' {
-                let c = text[pos..].chars().next().unwrap();
-                buffer.push(c);
-                pos += c.len_utf8();
+                let Some(ch) = text.get(pos..).and_then(|rest| rest.chars().next()) else {
+                    break;
+                };
+                buffer.push(ch);
+                pos += ch.len_utf8();
             }
             if pos < len {
                 pos += 1;
@@ -263,9 +265,11 @@ pub fn strip_inline_macro_args(text: &str) -> String {
             // unquoted whitespace skipped, args concatenate
             pos += 1;
         } else {
-            let c = text[pos..].chars().next().unwrap();
-            buffer.push(c);
-            pos += c.len_utf8();
+            let Some(ch) = text.get(pos..).and_then(|rest| rest.chars().next()) else {
+                break;
+            };
+            buffer.push(ch);
+            pos += ch.len_utf8();
         }
     }
     buffer
@@ -276,19 +280,16 @@ pub fn strip_inline_macro_args(text: &str) -> String {
 pub fn strip_space_macro_args(text: &str) -> String {
     strip_groff_escapes(&text.replace('"', ""))
         .trim()
-        .to_string()
+        .to_owned()
 }
 
 pub fn strip_groff(line: &str) -> String {
-    strip_groff_escapes(line).trim().to_string()
+    strip_groff_escapes(line).trim().to_owned()
 }
 
 /// `.\"` and `\"` comment forms.
-fn is_comment_line(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    (len >= 3 && bytes[0] == b'.' && bytes[1] == b'\\' && bytes[2] == b'"')
-        || (len >= 2 && bytes[0] == b'\\' && bytes[1] == b'"')
+const fn is_comment_line(line: &str) -> bool {
+    matches!(line.as_bytes(), [b'.', b'\\', b'"', ..] | [b'\\', b'"', ..])
 }
 
 /// classify a single line of manpage source. macro lines start with '.' or '\''
@@ -298,40 +299,35 @@ pub fn classify_line(line: &str) -> GroffLine {
     if is_comment_line(line) {
         return GroffLine::Comment;
     }
-    let len = line.len();
-    if len == 0 {
+    let bytes = line.as_bytes();
+    if bytes.is_empty() {
         return GroffLine::Blank;
     }
-    let bytes = line.as_bytes();
     // dot-backslash forms are also comments
-    if len >= 2 && bytes[0] == b'.' && bytes[1] == b'\\' && (len < 3 || bytes[2] == b'"') {
+    if matches!(bytes, [b'.', b'\\'] | [b'.', b'\\', b'"', ..]) {
         return GroffLine::Comment;
     }
-    if len >= 3 && bytes[0] == b'\\' && bytes[1] == b'"' {
+    if matches!(bytes, [b'\\', b'"', _, ..]) {
         return GroffLine::Comment;
     }
-    if bytes[0] == b'.' || bytes[0] == b'\'' {
-        let rest = line[1..].trim();
-        let split_at = rest.find([' ', '\t']);
-        match split_at {
-            Some(idx) => {
-                let name = rest[..idx].to_string();
-                let args = rest[idx + 1..].trim();
-                let args = if args.len() >= 2
-                    && args.starts_with('"')
-                    && args.ends_with('"')
-                    && !args[1..args.len() - 1].contains('"')
-                {
-                    args[1..args.len() - 1].to_string()
-                } else {
-                    args.to_string()
-                };
-                GroffLine::Macro { name, args }
-            }
-            None => GroffLine::Macro {
-                name: rest.to_string(),
+    if let Some(after_control) = line.strip_prefix(['.', '\'']) {
+        let rest = after_control.trim();
+        let Some((name, raw_args)) = rest.split_once([' ', '\t']) else {
+            return GroffLine::Macro {
+                name: rest.to_owned(),
                 args: String::new(),
-            },
+            };
+        };
+        let trimmed = raw_args.trim();
+        let args = trimmed
+            .strip_prefix('"')
+            .and_then(|inner| inner.strip_suffix('"'))
+            .filter(|inner| !inner.contains('"'))
+            .unwrap_or(trimmed)
+            .to_owned();
+        GroffLine::Macro {
+            name: name.to_owned(),
+            args,
         }
     } else {
         let stripped = strip_groff(line);
@@ -349,8 +345,8 @@ mod tests {
 
     #[test]
     fn two_char_named_escape_followed_by_multibyte_does_not_panic() {
-        for input in ["\\(é", "\\(λx", "a \\(€ b", "\\("] {
-            let _ = strip_groff_escapes(input);
+        for input in ["\\(\u{e9}", "\\(\u{3bb}x", "a \\(\u{20ac} b", "\\("] {
+            drop(strip_groff_escapes(input));
         }
     }
 

@@ -3,18 +3,20 @@
 
 mod commands;
 mod desc;
-mod groff;
+pub mod groff;
 mod mdoc;
-mod sections;
+pub mod sections;
 mod strategies;
 
-use std::io::{self, Read};
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Read as _};
 use std::path::Path;
+use std::{fs, mem};
 
+use flate2::read::GzDecoder;
+
+use crate::parsers::manpage::groff::{GroffLine, classify_line};
 use crate::types::Positional;
-
-pub use self::groff::{GroffLine, classify_line, strip_groff_escapes};
-pub use self::sections::{extract_subcommand_sections, extract_synopsis_command};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedSwitch {
@@ -46,7 +48,7 @@ pub struct ManpageSubcommand {
 }
 
 impl ManpageSubcommand {
-    pub fn new(name: String, desc: String) -> Self {
+    pub const fn new(name: String, desc: String) -> Self {
         Self {
             name,
             desc,
@@ -70,10 +72,10 @@ impl ManpageResult {
     /// canonicalise so the cache holds one shape. runs once at the end of every
     /// parse path.
     pub fn normalize(&mut self) {
-        let entries = std::mem::take(&mut self.entries);
+        let entries = mem::take(&mut self.entries);
         self.entries = dedup_entries(merge_short_long_pairs(entries));
-        for e in &mut self.entries {
-            clamp_description(&mut e.desc);
+        for entry in &mut self.entries {
+            clamp_description(&mut entry.desc);
         }
         for sc in self
             .subcommands
@@ -95,36 +97,36 @@ pub(crate) fn clamp_description(desc: &mut String) {
     let Some((cut, _)) = desc.char_indices().nth(MAX_DESC_LEN) else {
         return;
     };
-    let end = desc[cut..]
-        .find(char::is_whitespace)
-        .map(|off| cut + off)
-        .unwrap_or(cut);
+    let end = desc
+        .get(cut..)
+        .and_then(|tail| tail.find(char::is_whitespace))
+        .map_or(cut, |off| cut + off);
     desc.truncate(end);
     let trimmed = desc.trim_end().len();
     desc.truncate(trimmed);
-    desc.push('…');
+    desc.push('\u{2026}');
 }
 
-fn entry_key(e: &ManpageEntry) -> String {
-    match &e.switch {
-        OwnedSwitch::Short(c) => format!("-{c}"),
-        OwnedSwitch::Long(l) | OwnedSwitch::Both(_, l) => format!("--{l}"),
+fn entry_key(entry: &ManpageEntry) -> String {
+    match &entry.switch {
+        OwnedSwitch::Short(short) => format!("-{short}"),
+        OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => format!("--{long}"),
     }
 }
 
-fn entry_score(e: &ManpageEntry) -> i32 {
-    let switch_bonus = if matches!(e.switch, OwnedSwitch::Both(_, _)) {
+fn entry_score(entry: &ManpageEntry) -> usize {
+    let switch_bonus = if matches!(entry.switch, OwnedSwitch::Both(_, _)) {
         10
     } else {
         0
     };
-    let param_bonus = if e.param.is_some() { 5 } else { 0 };
-    let desc_bonus = (e.desc.len() / 10).min(5) as i32;
+    let param_bonus = if entry.param.is_some() { 5 } else { 0 };
+    let desc_bonus = (entry.desc.len() / 10).min(5);
     switch_bonus + param_bonus + desc_bonus
 }
 
 type ShortAliasCandidate = (usize, char, Option<OwnedParam>);
-type LongAliasCandidate<'a> = (usize, &'a str);
+type LongAliasCandidate<'src> = (usize, &'src str);
 
 /// collapse duplicate entries for the same flag. manpages emit dups: clap lists
 /// inherited globals, btrfs documents a flag as both a deprecated alias and a
@@ -134,45 +136,43 @@ type LongAliasCandidate<'a> = (usize, &'a str);
 /// char a surviving `Both` already covers. survivor sits at its key's first
 /// occurrence so order is stable.
 pub fn dedup_entries(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
     if entries.len() < 2 {
         return entries;
     }
 
     let mut best: HashMap<String, usize> = HashMap::new();
-    for (i, e) in entries.iter().enumerate() {
-        let key = entry_key(e);
+    for (idx, entry) in entries.iter().enumerate() {
+        let key = entry_key(entry);
         match best.get(&key) {
-            Some(&prev) if entry_score(&entries[prev]) >= entry_score(e) => {}
+            Some(&prev) if entry_score(&entries[prev]) >= entry_score(entry) => {}
             _ => {
-                best.insert(key, i);
+                best.insert(key, idx);
             }
         }
     }
 
-    let mut covered: HashSet<char> = HashSet::new();
-    for &idx in best.values() {
-        if let OwnedSwitch::Both(c, _) = &entries[idx].switch {
-            covered.insert(*c);
-        }
-    }
+    let covered: HashSet<char> = best
+        .values()
+        .filter_map(|&idx| match &entries[idx].switch {
+            OwnedSwitch::Both(short, _) => Some(*short),
+            OwnedSwitch::Short(_) | OwnedSwitch::Long(_) => None,
+        })
+        .collect();
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<ManpageEntry> = Vec::with_capacity(entries.len());
-    for e in entries.iter() {
-        let key = entry_key(e);
+    for entry in &entries {
+        let key = entry_key(entry);
         if seen.contains(&key) {
             continue;
         }
-        if let OwnedSwitch::Short(c) = &e.switch
-            && covered.contains(c)
+        if let OwnedSwitch::Short(short) = &entry.switch
+            && covered.contains(short)
         {
             continue;
         }
         seen.insert(key.clone());
-        let best_idx = *best.get(&key).unwrap();
+        let best_idx = best[&key];
         out.push(entries[best_idx].clone());
     }
     out
@@ -187,37 +187,34 @@ pub fn dedup_entries(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
 /// abbreviate the long, and tiny generic descriptions pair only for obvious
 /// aliases.
 pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
     // a flag restated across sections can yield all three forms (Both, standalone
     // Short, standalone Long); index existing Both so pairing doesn't emit a
     // second Both with the same (c, l).
     let mut existing_both: HashSet<(char, &str)> = HashSet::new();
-    for e in entries.iter() {
-        if let OwnedSwitch::Both(c, l) = &e.switch {
-            existing_both.insert((*c, l.as_str()));
+    for entry in &entries {
+        if let OwnedSwitch::Both(short, long) = &entry.switch {
+            existing_both.insert((*short, long.as_str()));
         }
     }
 
     let mut shorts_by_desc: HashMap<&str, Vec<ShortAliasCandidate>> = HashMap::new();
     let mut longs_by_desc: HashMap<&str, Vec<LongAliasCandidate<'_>>> = HashMap::new();
-    for (i, e) in entries.iter().enumerate() {
-        if let OwnedSwitch::Short(c) = &e.switch
-            && !e.desc.is_empty()
+    for (idx, entry) in entries.iter().enumerate() {
+        if let OwnedSwitch::Short(short) = &entry.switch
+            && !entry.desc.is_empty()
         {
             shorts_by_desc
-                .entry(e.desc.as_str())
+                .entry(entry.desc.as_str())
                 .or_default()
-                .push((i, *c, e.param.clone()));
+                .push((idx, *short, entry.param.clone()));
         }
-        if let OwnedSwitch::Long(l) = &e.switch
-            && !e.desc.is_empty()
+        if let OwnedSwitch::Long(long) = &entry.switch
+            && !entry.desc.is_empty()
         {
             longs_by_desc
-                .entry(e.desc.as_str())
+                .entry(entry.desc.as_str())
                 .or_default()
-                .push((i, l.as_str()));
+                .push((idx, long.as_str()));
         }
     }
     if shorts_by_desc.is_empty() || longs_by_desc.is_empty() {
@@ -226,35 +223,35 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
 
     let mut to_drop: HashSet<usize> = HashSet::new();
     let mut out: Vec<ManpageEntry> = Vec::with_capacity(entries.len());
-    for (i, e) in entries.iter().enumerate() {
-        if let OwnedSwitch::Long(l) = &e.switch
-            && !e.desc.is_empty()
-            && let Some(shorts) = shorts_by_desc.get(e.desc.as_str())
-            && let Some(longs) = longs_by_desc.get(e.desc.as_str())
+    for (idx, entry) in entries.iter().enumerate() {
+        if let OwnedSwitch::Long(long) = &entry.switch
+            && !entry.desc.is_empty()
+            && let Some(shorts) = shorts_by_desc.get(entry.desc.as_str())
+            && let Some(longs) = longs_by_desc.get(entry.desc.as_str())
             && shorts.len() == 1
             && longs.len() == 1
         {
-            let (s_idx, c, s_param) = &shorts[0];
-            if existing_both.contains(&(*c, l.as_str())) {
+            let (s_idx, short, s_param) = &shorts[0];
+            if existing_both.contains(&(*short, long.as_str())) {
                 // matching Both already present; drop the redundant standalone pair.
                 to_drop.insert(*s_idx);
-                to_drop.insert(i);
-                out.push(e.clone());
-            } else if *s_idx != i
+                to_drop.insert(idx);
+                out.push(entry.clone());
+            } else if *s_idx != idx
                 && !to_drop.contains(s_idx)
-                && plausible_description_alias(*c, l, &e.desc)
+                && plausible_description_alias(*short, long, &entry.desc)
             {
                 to_drop.insert(*s_idx);
                 out.push(ManpageEntry {
-                    switch: OwnedSwitch::Both(*c, l.clone()),
-                    param: e.param.clone().or_else(|| s_param.clone()),
-                    desc: e.desc.clone(),
+                    switch: OwnedSwitch::Both(*short, long.clone()),
+                    param: entry.param.clone().or_else(|| s_param.clone()),
+                    desc: entry.desc.clone(),
                 });
             } else {
-                out.push(e.clone());
+                out.push(entry.clone());
             }
         } else {
-            out.push(e.clone());
+            out.push(entry.clone());
         }
     }
     if to_drop.is_empty() {
@@ -262,20 +259,20 @@ pub fn merge_short_long_pairs(entries: Vec<ManpageEntry>) -> Vec<ManpageEntry> {
     }
     out.into_iter()
         .enumerate()
-        .filter_map(|(i, e)| (!to_drop.contains(&i)).then_some(e))
+        .filter_map(|(idx, entry)| (!to_drop.contains(&idx)).then_some(entry))
         .collect()
 }
 
 fn plausible_description_alias(short: char, long: &str, desc: &str) -> bool {
-    let short = short.to_ascii_lowercase();
+    let short_lower = short.to_ascii_lowercase();
     let first = long
         .chars()
-        .find(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase());
-    if first != Some(short) {
+        .find(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase());
+    if first != Some(short_lower) {
         return false;
     }
-    if is_common_obvious_alias(short, long) {
+    if is_common_obvious_alias(short_lower, long) {
         return true;
     }
     desc.split_whitespace().count() >= 4
@@ -284,7 +281,7 @@ fn plausible_description_alias(short: char, long: &str, desc: &str) -> bool {
 fn is_common_obvious_alias(short: char, long: &str) -> bool {
     matches!(
         (short, long.to_ascii_lowercase().as_str()),
-        ('h', "help") | ('v', "verbose") | ('v', "version")
+        ('h', "help") | ('v', "verbose" | "version")
     )
 }
 
@@ -304,30 +301,32 @@ fn parse_manpage_lines_raw(lines: &[GroffLine]) -> ManpageResult {
         // names since it carries the description.
         let synopsis_flags = sections::extract_synopsis_flags(lines);
         if !synopsis_flags.is_empty() {
-            let have_long: std::collections::HashSet<String> = entries
+            let have_long: HashSet<String> = entries
                 .iter()
-                .filter_map(|e| match &e.switch {
-                    OwnedSwitch::Long(l) | OwnedSwitch::Both(_, l) => Some(l.to_ascii_lowercase()),
-                    _ => None,
+                .filter_map(|entry| match &entry.switch {
+                    OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => {
+                        Some(long.to_ascii_lowercase())
+                    }
+                    OwnedSwitch::Short(_) => None,
                 })
                 .collect();
-            let have_short: std::collections::HashSet<char> = entries
+            let have_short: HashSet<char> = entries
                 .iter()
-                .filter_map(|e| match &e.switch {
-                    OwnedSwitch::Short(c) | OwnedSwitch::Both(c, _) => Some(*c),
-                    _ => None,
+                .filter_map(|entry| match &entry.switch {
+                    OwnedSwitch::Short(short) | OwnedSwitch::Both(short, _) => Some(*short),
+                    OwnedSwitch::Long(_) => None,
                 })
                 .collect();
-            for e in synopsis_flags {
-                let dup = match &e.switch {
-                    OwnedSwitch::Long(l) => have_long.contains(&l.to_ascii_lowercase()),
-                    OwnedSwitch::Short(c) => have_short.contains(c),
-                    OwnedSwitch::Both(c, l) => {
-                        have_short.contains(c) || have_long.contains(&l.to_ascii_lowercase())
+            for flag in synopsis_flags {
+                let dup = match &flag.switch {
+                    OwnedSwitch::Long(long) => have_long.contains(&long.to_ascii_lowercase()),
+                    OwnedSwitch::Short(short) => have_short.contains(short),
+                    OwnedSwitch::Both(short, long) => {
+                        have_short.contains(short) || have_long.contains(&long.to_ascii_lowercase())
                     }
                 };
                 if !dup {
-                    entries.push(e);
+                    entries.push(flag);
                 }
             }
         }
@@ -395,8 +394,8 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
         // SUBCOMMAND-section names are authoritative for clap manpages.
         result.subcommands = sub_sections
             .iter()
-            .map(|(name, desc, _)| {
-                let mut desc = desc.clone();
+            .map(|(name, section_desc, _)| {
+                let mut desc = section_desc.clone();
                 clamp_description(&mut desc);
                 ManpageSubcommand::new(name.to_ascii_lowercase(), desc)
             })
@@ -407,13 +406,13 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
     // each body with the same strategy-picker as top-level OPTIONS.
     let subs: Vec<(String, ManpageResult)> = sub_sections
         .into_iter()
-        .map(|(name, desc, lines)| {
-            let mut positionals = sections::extract_synopsis_positionals(&lines);
+        .map(|(name, desc, body)| {
+            let mut positionals = sections::extract_synopsis_positionals(&body);
             if positionals.is_empty() {
-                positionals = sections::extract_usage_positionals_from_lines(&lines);
+                positionals = sections::extract_usage_positionals_from_lines(&body);
             }
             let mut sub_result = ManpageResult {
-                entries: strategies::extract_entries(&lines),
+                entries: strategies::extract_entries(&body),
                 subcommands: Vec::new(),
                 positional_choices: Vec::new(),
                 positionals,
@@ -427,20 +426,33 @@ pub fn parse_manpage_with_subs(contents: &str) -> (ManpageResult, Vec<(String, M
 }
 
 /// decompresses .gz (most installed manpages).
-pub fn read_manpage_file<P: AsRef<Path>>(path: P) -> io::Result<String> {
-    let path = path.as_ref();
-    let bytes = std::fs::read(path)?;
-    if path.extension().and_then(|e| e.to_str()) == Some("gz") {
-        let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+///
+/// # Errors
+///
+/// fails when the file is unreadable, the gzip stream is corrupt, or the text is not UTF-8.
+pub fn read_manpage_file<P>(path: P) -> io::Result<String>
+where
+    P: AsRef<Path>,
+{
+    let file = path.as_ref();
+    let bytes = fs::read(file)?;
+    if file.extension().and_then(|ext| ext.to_str()) == Some("gz") {
+        let mut decoder = GzDecoder::new(&*bytes);
         let mut out = String::new();
         decoder.read_to_string(&mut out)?;
         Ok(out)
     } else {
-        String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 }
 
-pub fn parse_manpage_file<P: AsRef<Path>>(path: P) -> io::Result<ManpageResult> {
+/// # Errors
+///
+/// fails when [`read_manpage_file`] does.
+pub fn parse_manpage_file<P>(path: P) -> io::Result<ManpageResult>
+where
+    P: AsRef<Path>,
+{
     let contents = read_manpage_file(path)?;
     Ok(parse_manpage_string(&contents))
 }
@@ -451,20 +463,20 @@ mod tests {
 
     #[test]
     fn clamp_leaves_short_descriptions_untouched() {
-        let mut d = "a short description".to_string();
-        clamp_description(&mut d);
-        assert_eq!(d, "a short description");
-        assert!(!d.ends_with('…'));
+        let mut desc = "a short description".to_owned();
+        clamp_description(&mut desc);
+        assert_eq!(desc, "a short description");
+        assert!(!desc.ends_with('\u{2026}'));
     }
 
     #[test]
     fn clamp_breaks_long_descriptions_on_a_word_boundary() {
         let word = "lorem ipsum ";
-        let mut d = word.repeat(40); // ~480 chars
-        clamp_description(&mut d);
-        assert!(d.ends_with('…'));
-        assert!(d.chars().count() <= MAX_DESC_LEN + 16);
-        let body = d.trim_end_matches('…');
+        let mut desc = word.repeat(40); // ~480 chars
+        clamp_description(&mut desc);
+        assert!(desc.ends_with('\u{2026}'));
+        assert!(desc.chars().count() <= MAX_DESC_LEN + 16);
+        let body = desc.trim_end_matches('\u{2026}');
         assert!(!body.ends_with(' '));
         assert!(
             body.split(' ')
@@ -474,19 +486,19 @@ mod tests {
 
     #[test]
     fn clamp_hard_cuts_an_unbroken_token_with_no_trailing_space() {
-        let mut d = "x".repeat(400);
-        clamp_description(&mut d);
-        assert_eq!(d.chars().count(), MAX_DESC_LEN + 1);
-        assert!(d.ends_with('…'));
+        let mut desc = "x".repeat(400);
+        clamp_description(&mut desc);
+        assert_eq!(desc.chars().count(), MAX_DESC_LEN + 1);
+        assert!(desc.ends_with('\u{2026}'));
     }
 
     #[test]
     fn clamp_respects_utf8_char_boundaries() {
         // multibyte chars straddling the cap must not split a code point.
-        let mut d = "é".repeat(400);
-        clamp_description(&mut d);
-        assert!(d.ends_with('…'));
-        assert!(d.chars().all(|c| c == 'é' || c == '…'));
+        let mut desc = "\u{e9}".repeat(400);
+        clamp_description(&mut desc);
+        assert!(desc.ends_with('\u{2026}'));
+        assert!(desc.chars().all(|ch| ch == '\u{e9}' || ch == '\u{2026}'));
     }
 
     #[test]
@@ -506,7 +518,7 @@ mod tests {
         ManpageEntry {
             switch,
             param: None,
-            desc: desc.to_string(),
+            desc: desc.to_owned(),
         }
     }
 
@@ -514,18 +526,18 @@ mod tests {
     fn merges_non_adjacent_short_long_with_identical_desc() {
         let entries = vec![
             entry(OwnedSwitch::Short('h'), "show help"),
-            entry(OwnedSwitch::Long("verbose".to_string()), "be verbose"),
-            entry(OwnedSwitch::Long("help".to_string()), "show help"),
+            entry(OwnedSwitch::Long("verbose".to_owned()), "be verbose"),
+            entry(OwnedSwitch::Long("help".to_owned()), "show help"),
         ];
         let merged = merge_short_long_pairs(entries);
         assert_eq!(merged.len(), 2, "expected the short to fold into the long");
         assert!(matches!(
             merged[0].switch,
-            OwnedSwitch::Long(ref l) if l == "verbose"
+            OwnedSwitch::Long(ref long) if long == "verbose"
         ));
         assert!(matches!(
             merged[1].switch,
-            OwnedSwitch::Both('h', ref l) if l == "help"
+            OwnedSwitch::Both('h', ref long) if long == "help"
         ));
     }
 
@@ -533,16 +545,16 @@ mod tests {
     fn merge_skips_empty_or_mismatched_descriptions() {
         let entries = vec![
             entry(OwnedSwitch::Short('q'), ""),
-            entry(OwnedSwitch::Long("quiet".to_string()), ""),
+            entry(OwnedSwitch::Long("quiet".to_owned()), ""),
             entry(OwnedSwitch::Short('n'), "number of results"),
-            entry(OwnedSwitch::Long("no-color".to_string()), "disable colors"),
+            entry(OwnedSwitch::Long("no-color".to_owned()), "disable colors"),
         ];
         let merged = merge_short_long_pairs(entries);
         assert_eq!(merged.len(), 4, "no pair should merge");
         assert!(matches!(merged[0].switch, OwnedSwitch::Short('q')));
-        assert!(matches!(merged[1].switch, OwnedSwitch::Long(ref l) if l == "quiet"));
+        assert!(matches!(merged[1].switch, OwnedSwitch::Long(ref long) if long == "quiet"));
         assert!(matches!(merged[2].switch, OwnedSwitch::Short('n')));
-        assert!(matches!(merged[3].switch, OwnedSwitch::Long(ref l) if l == "no-color"));
+        assert!(matches!(merged[3].switch, OwnedSwitch::Long(ref long) if long == "no-color"));
     }
 
     #[test]
@@ -551,19 +563,19 @@ mod tests {
         // alone is not enough to synthesize either alias.
         let entries = vec![
             entry(OwnedSwitch::Short('h'), "show help"),
-            entry(OwnedSwitch::Long("help".to_string()), "show help"),
-            entry(OwnedSwitch::Long("usage".to_string()), "show help"),
+            entry(OwnedSwitch::Long("help".to_owned()), "show help"),
+            entry(OwnedSwitch::Long("usage".to_owned()), "show help"),
         ];
         let merged = merge_short_long_pairs(entries);
         assert_eq!(merged.len(), 3);
         assert!(matches!(merged[0].switch, OwnedSwitch::Short('h')));
         assert!(matches!(
             merged[1].switch,
-            OwnedSwitch::Long(ref l) if l == "help"
+            OwnedSwitch::Long(ref long) if long == "help"
         ));
         assert!(matches!(
             merged[2].switch,
-            OwnedSwitch::Long(ref l) if l == "usage"
+            OwnedSwitch::Long(ref long) if long == "usage"
         ));
     }
 
@@ -571,12 +583,12 @@ mod tests {
     fn merge_drops_redundant_pair_when_both_already_present() {
         let entries = vec![
             ManpageEntry {
-                switch: OwnedSwitch::Both('h', "help".to_string()),
+                switch: OwnedSwitch::Both('h', "help".to_owned()),
                 param: None,
-                desc: "show help".to_string(),
+                desc: "show help".to_owned(),
             },
             entry(OwnedSwitch::Short('h'), "show help"),
-            entry(OwnedSwitch::Long("help".to_string()), "show help"),
+            entry(OwnedSwitch::Long("help".to_owned()), "show help"),
         ];
         let merged = merge_short_long_pairs(entries);
         assert_eq!(
@@ -586,7 +598,7 @@ mod tests {
         );
         assert!(matches!(
             merged[0].switch,
-            OwnedSwitch::Both('h', ref l) if l == "help"
+            OwnedSwitch::Both('h', ref long) if long == "help"
         ));
     }
 
@@ -597,22 +609,22 @@ mod tests {
         // Both('v', "version") rather than drop as redundant.
         let entries = vec![
             ManpageEntry {
-                switch: OwnedSwitch::Both('v', "verbose".to_string()),
+                switch: OwnedSwitch::Both('v', "verbose".to_owned()),
                 param: None,
-                desc: "be verbose".to_string(),
+                desc: "be verbose".to_owned(),
             },
             entry(OwnedSwitch::Short('v'), "print version"),
-            entry(OwnedSwitch::Long("version".to_string()), "print version"),
+            entry(OwnedSwitch::Long("version".to_owned()), "print version"),
         ];
         let merged = merge_short_long_pairs(entries);
         assert_eq!(merged.len(), 2);
         assert!(matches!(
             merged[0].switch,
-            OwnedSwitch::Both('v', ref l) if l == "verbose"
+            OwnedSwitch::Both('v', ref long) if long == "verbose"
         ));
         assert!(matches!(
             merged[1].switch,
-            OwnedSwitch::Both('v', ref l) if l == "version"
+            OwnedSwitch::Both('v', ref long) if long == "version"
         ));
     }
 
@@ -621,18 +633,18 @@ mod tests {
         let entries = vec![
             ManpageEntry {
                 switch: OwnedSwitch::Short('o'),
-                param: Some(OwnedParam::Mandatory("FILE".to_string())),
-                desc: "write command output to file".to_string(),
+                param: Some(OwnedParam::Mandatory("FILE".to_owned())),
+                desc: "write command output to file".to_owned(),
             },
             entry(
-                OwnedSwitch::Long("output".to_string()),
+                OwnedSwitch::Long("output".to_owned()),
                 "write command output to file",
             ),
         ];
         let merged = merge_short_long_pairs(entries);
         assert_eq!(merged.len(), 1);
         match &merged[0].param {
-            Some(OwnedParam::Mandatory(p)) => assert_eq!(p, "FILE"),
+            Some(OwnedParam::Mandatory(param)) => assert_eq!(param, "FILE"),
             other => panic!("expected param carried over, got {other:?}"),
         }
     }

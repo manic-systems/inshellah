@@ -4,6 +4,7 @@
 mod commands;
 
 use std::path::PathBuf;
+use std::process;
 
 use pound::Parse;
 
@@ -98,70 +99,79 @@ fn main() {
     // rust ignores SIGPIPE, so a broken-pipe write becomes a BrokenPipe error
     // that `println!` panics on. restore the default so piping into `head` exits
     // quietly.
+    // SAFETY: runs first in main, before any thread exists, and SIG_DFL is a valid handler.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     match Cli::parse() {
         Cli::Index { args } => {
-            if let Err(e) = commands::index::run(args) {
-                eprintln!("index failed: {e}");
-                std::process::exit(1);
+            if let Err(err) = commands::index::run(args) {
+                eprintln!("index failed: {err}");
+                process::exit(1);
             }
         }
         Cli::Merge { args } => {
-            if let Err(e) = commands::merge::run(args) {
-                eprintln!("merge failed: {e}");
-                std::process::exit(1);
+            if let Err(err) = commands::merge::run(&args) {
+                eprintln!("merge failed: {err}");
+                process::exit(1);
             }
         }
-        Cli::Manpage { file } => {
-            if let Err(e) = commands::manpage::run(&file) {
-                eprintln!("manpage failed: {e}");
-                std::process::exit(1);
-            }
-        }
-        Cli::ManpageDir { dir } => {
-            if let Err(e) = commands::manpage_dir::run(&dir) {
-                eprintln!("manpage-dir failed: {e}");
-                std::process::exit(1);
-            }
-        }
+        Cli::Manpage { file } => commands::manpage::run(&file),
+        Cli::ManpageDir { dir } => commands::manpage_dir::run(&dir),
         Cli::Complete {
             dirs,
-            timeout_ms,
+            timeout_ms: timeout_override,
             spans,
         } => {
             let cfg = Config::from_env();
-            let timeout_ms = timeout_ms.unwrap_or(cfg.timeout_ms);
+            let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
             let (user_dir, system_dirs) =
                 commands::complete::default_user_dir_and_system_dirs(dirs.resolve());
             let mandirs = commands::complete::mandirs_for_system_dirs(&system_dirs);
-            commands::complete::run(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg);
+            if let Err(err) =
+                commands::complete::run(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
+            {
+                eprintln!("complete failed: {err}");
+                process::exit(1);
+            }
         }
         Cli::Query { dirs, cmd } => {
-            if let Err(e) = commands::query::run(&cmd.join(" "), &dirs.resolve()) {
-                eprintln!("query failed: {e}");
-                std::process::exit(1);
+            if let Err(err) = commands::query::run(&cmd.join(" "), &dirs.resolve()) {
+                eprintln!("{err}");
+                process::exit(1);
             }
         }
         Cli::Dump { dirs } => commands::dump::run(&dirs.resolve()),
         Cli::Diff {
             scan,
             dir,
-            timeout_ms,
+            timeout_ms: timeout_override,
             cmd,
         } => {
-            let timeout_ms = timeout_ms.unwrap_or_else(|| Config::from_env().timeout_ms);
+            let timeout_ms = timeout_override.unwrap_or_else(|| Config::from_env().timeout_ms);
             match scan {
                 Some(prefix) => commands::diff::run_scan(&prefix, timeout_ms),
-                None => commands::diff::run(&cmd, &dir, timeout_ms),
+                None => {
+                    if let Err(err) = commands::diff::run(&cmd, &dir, timeout_ms) {
+                        eprintln!("error: {err}");
+                        process::exit(1);
+                    }
+                }
             }
         }
         Cli::Purge { dirs } => {
             // only the writable user dir is purged, never the system overlays
-            let mut dirs = dirs.resolve();
-            commands::purge::run(&dirs.swap_remove(0));
+            let mut resolved = dirs.resolve();
+            if let Err(err) = commands::purge::run(&resolved.swap_remove(0)) {
+                eprintln!("purge failed: {err}");
+                process::exit(1);
+            }
         }
-        Cli::Completions => commands::completions::run(Cli::SPEC),
+        Cli::Completions => {
+            if let Err(err) = commands::completions::run(Cli::SPEC) {
+                eprintln!("completions failed: {err}");
+                process::exit(1);
+            }
+        }
     }
 }

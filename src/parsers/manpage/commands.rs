@@ -15,18 +15,18 @@ fn is_valid_subcmd(name: &str) -> bool {
         && !name.starts_with('-')
         && name
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
 }
 
 /// subcommand name from bold groff text:
 ///   "\fBlist\-units\fR [\fIPATTERN\fR...]" -> "list-units"
 fn extract_bold_command_name(text: &str) -> Option<String> {
     let trimmed = text.trim();
-    if trimmed.len() >= 4 && trimmed.starts_with("\\fB") {
+    if let Some(after) = trimmed.strip_prefix("\\fB")
+        && !after.is_empty()
+    {
         // segment between leading \fB and the next \
-        let after = &trimmed[3..];
-        let segment_end = after.find('\\').unwrap_or(after.len());
-        let name_part = &after[..segment_end];
+        let name_part = after.split_once('\\').map_or(after, |(head, _)| head);
         let reconstructed = format!("\\fB{name_part}\\fR");
         let name = normalize_command_token(strip_groff_escapes(&reconstructed).trim());
         if is_valid_subcmd(&name) {
@@ -37,21 +37,16 @@ fn extract_bold_command_name(text: &str) -> Option<String> {
     let stripped = strip_groff_escapes(trimmed);
     let first_word = stripped.split_whitespace().next().unwrap_or("");
     let name = normalize_command_token(first_word);
-    if is_valid_subcmd(&name) {
-        Some(name)
-    } else {
-        None
-    }
+    is_valid_subcmd(&name).then_some(name)
 }
 
 fn normalize_command_token(token: &str) -> String {
-    let token = token.trim();
-    let token = token
-        .find('(')
-        .map(|idx| &token[..idx])
-        .unwrap_or(token)
-        .trim_end_matches(',');
-    token.to_string()
+    let trimmed = token.trim();
+    trimmed
+        .split_once('(')
+        .map_or(trimmed, |(head, _)| head)
+        .trim_end_matches(',')
+        .to_owned()
 }
 
 fn extract_command_name_from_line(line: &GroffLine) -> Option<String> {
@@ -66,7 +61,7 @@ fn extract_command_name_from_line(line: &GroffLine) -> Option<String> {
             let rendered = strip_groff_escapes(&strip_inline_macro_args(args));
             extract_bold_command_name(&rendered)
         }
-        _ => None,
+        GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => None,
     }
 }
 
@@ -96,11 +91,11 @@ pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubc
                 if i >= lines.len() {
                     continue;
                 }
-                if let Some(name) = extract_command_name_from_line(&lines[i]) {
+                if let Some(cmd_name) = extract_command_name_from_line(&lines[i]) {
                     let (desc, new_i) = collect_subcmd_desc(lines, i + 1);
                     let short_desc = first_sentence(&desc);
                     out.push(ManpageSubcommand::new(
-                        name.to_ascii_lowercase(),
+                        cmd_name.to_ascii_lowercase(),
                         short_desc,
                     ));
                     i = new_i;
@@ -108,7 +103,12 @@ pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubc
                     i += 1;
                 }
             }
-            _ => i += 1,
+            GroffLine::Macro { .. }
+            | GroffLine::Text(_)
+            | GroffLine::Blank
+            | GroffLine::Comment => {
+                i += 1;
+            }
         }
     }
     // a tool may repeat a command name across `.TP` tags (bash repeats `bind`
@@ -124,16 +124,13 @@ fn dedup_by_name(raw: Vec<ManpageSubcommand>) -> Vec<ManpageSubcommand> {
     let mut out: Vec<ManpageSubcommand> = Vec::with_capacity(raw.len());
     for sc in raw {
         let key = sc.name.to_ascii_lowercase();
-        match best.get(&key) {
-            Some(&idx) => {
-                if sc.desc.len() > out[idx].desc.len() {
-                    out[idx].desc = sc.desc;
-                }
+        if let Some(&idx) = best.get(&key) {
+            if sc.desc.len() > out[idx].desc.len() {
+                out[idx].desc = sc.desc;
             }
-            None => {
-                best.insert(key, out.len());
-                out.push(sc);
-            }
+        } else {
+            best.insert(key, out.len());
+            out.push(sc);
         }
     }
     out
@@ -147,39 +144,38 @@ pub fn extract_subcommand_xrefs(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
     let mut raw: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        match &lines[i] {
-            GroffLine::Macro { name, .. } if name == "TP" => {}
-            _ => {
-                i += 1;
-                continue;
-            }
+        if !matches!(&lines[i], GroffLine::Macro { name, .. } if name == "TP") {
+            i += 1;
+            continue;
         }
         i += 1;
-        let Some(GroffLine::Text(term)) = lines.get(i) else {
+        let Some(GroffLine::Text(raw_term)) = lines.get(i) else {
             continue;
         };
         i += 1;
         // require the "...(N)" xref shape so this can't misfire on other tools'
         // `.SH SUBCOMMAND` layouts.
-        let term = strip_groff_escapes(term);
-        let term = term.trim();
-        let Some(token) = term.strip_suffix(')').and_then(|t| t.rsplit_once('(')) else {
+        let rendered = strip_groff_escapes(raw_term);
+        let term = rendered.trim();
+        let Some((xref, section)) = term
+            .strip_suffix(')')
+            .and_then(|inner| inner.rsplit_once('('))
+        else {
             continue;
         };
-        let (token, section) = token;
-        if !section.bytes().all(|b| b.is_ascii_digit()) || section.is_empty() {
+        if !section.bytes().all(|byte| byte.is_ascii_digit()) || section.is_empty() {
             continue;
         }
-        let token = token.trim();
+        let token = xref.trim();
         if token.is_empty() || token.contains(char::is_whitespace) {
             continue;
         }
         let (desc, new_i) = collect_xref_desc(lines, i);
         i = new_i;
-        raw.push((token.to_string(), first_sentence(&desc)));
+        raw.push((token.to_owned(), first_sentence(&desc)));
     }
     // strip the shared prefix (e.g. "jj-bookmark-").
-    let prefix = shared_dash_prefix(raw.iter().map(|(t, _)| t.as_str()));
+    let prefix = shared_dash_prefix(raw.iter().map(|(token, _)| token.as_str()));
     raw.into_iter()
         .filter_map(|(token, desc)| {
             let child = token.strip_prefix(&prefix).unwrap_or(&token);
@@ -190,28 +186,29 @@ pub fn extract_subcommand_xrefs(lines: &[GroffLine]) -> Vec<ManpageSubcommand> {
 
 /// longest common prefix truncated to the last `-`, so the remainder is a
 /// whole subcommand name. empty for fewer than two tokens.
-fn shared_dash_prefix<'a>(tokens: impl Iterator<Item = &'a str>) -> String {
-    let tokens: Vec<&str> = tokens.collect();
-    let Some((first, rest)) = tokens.split_first() else {
+fn shared_dash_prefix<'src>(tokens: impl Iterator<Item = &'src str>) -> String {
+    let all: Vec<&str> = tokens.collect();
+    let Some((first, rest)) = all.split_first() else {
         return String::new();
     };
     if rest.is_empty() {
         return String::new();
     }
     let mut len = first.len();
-    for t in rest {
+    for token in rest {
         len = first
             .bytes()
-            .zip(t.bytes())
+            .zip(token.bytes())
             .take(len)
-            .take_while(|(a, b)| a == b)
+            .take_while(|(lhs, rhs)| lhs == rhs)
             .count();
     }
-    let common = &first[..first.floor_char_boundary(len)];
-    match common.rfind('-') {
-        Some(idx) => common[..=idx].to_string(),
-        None => String::new(),
-    }
+    let Some(common) = first.get(..first.floor_char_boundary(len)) else {
+        return String::new();
+    };
+    common
+        .rsplit_once('-')
+        .map_or_else(String::new, |(head, _)| format!("{head}-"))
 }
 
 /// xref description: text lines until the next .TP/.SH/.SS. Text is already
@@ -240,38 +237,40 @@ fn collect_subcmd_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
                 i += 1;
                 while i < lines.len() {
                     match &lines[i] {
-                        GroffLine::Macro { name, .. } if name == "RE" => {
+                        GroffLine::Macro { name: inner, .. } if inner == "RE" => {
                             return (acc.join(" "), i + 1);
                         }
-                        GroffLine::Text(t) => {
-                            acc.push(t.clone());
+                        GroffLine::Text(text) => {
+                            acc.push(text.clone());
                             i += 1;
                         }
-                        GroffLine::Macro { name, .. }
-                            if name == "PP" || name == "SH" || name == "SS" =>
+                        GroffLine::Macro { name: inner, .. }
+                            if inner == "PP" || inner == "SH" || inner == "SS" =>
                         {
                             return (acc.join(" "), i);
                         }
-                        _ => i += 1,
+                        GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => i += 1,
                     }
                 }
                 return (acc.join(" "), i);
             }
-            GroffLine::Text(t) => {
-                acc.push(t.clone());
+            GroffLine::Text(text) => {
+                acc.push(text.clone());
                 i += 1;
             }
-            _ => return (acc.join(" "), i),
+            GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => {
+                return (acc.join(" "), i);
+            }
         }
     }
     (acc.join(" "), i)
 }
 
-fn first_sentence(s: &str) -> String {
-    let s = s.trim();
-    match s.find('.') {
-        Some(idx) if idx > 0 => s[..idx].trim().to_string(),
-        _ => s.to_string(),
+fn first_sentence(text: &str) -> String {
+    let trimmed = text.trim();
+    match trimmed.split_once('.') {
+        Some((head, _)) if !head.is_empty() => head.trim().to_owned(),
+        _ => trimmed.to_owned(),
     }
 }
 
@@ -317,7 +316,8 @@ mod tests {
     fn duplicate_names_collapse_keeping_longest_desc() {
         // bash repeats `bind` once per flag; the parser keeps one entry with
         // the richest description.
-        let src = ".TP\n.B bind\nshort.\n.TP\n.B bind\nDisplay current key and function bindings.\n";
+        let src =
+            ".TP\n.B bind\nshort.\n.TP\n.B bind\nDisplay current key and function bindings.\n";
         let got = commands_of(src);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, "bind");
