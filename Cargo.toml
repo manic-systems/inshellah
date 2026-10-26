@@ -58,3 +58,9 @@ single_call_fn                     = "allow"
 std_instead_of_alloc               = "allow"
 std_instead_of_core                = "allow"
 tests_outside_test_module          = "allow"
+
+[profile.release]
+opt-level     = 3
+strip         = "symbols"
+lto           = "thin"
+codegen-units = 1
