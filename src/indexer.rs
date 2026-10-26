@@ -644,7 +644,7 @@ impl ScrapeCtx {
         pool.wait();
         // no workers alive, so the Arc has a single strong ref
         let Ok(ctx) = Arc::try_unwrap(ctx) else {
-            return Ok(HashSet::new());
+            unreachable!("ScrapePool::wait joins every worker");
         };
         if let Some(e) = ctx
             .write_error
