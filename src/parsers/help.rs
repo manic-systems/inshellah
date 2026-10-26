@@ -124,7 +124,11 @@ fn classify_section_line(line: &str) -> Option<HelpSection> {
     }
     let command_header = matches!(lower.as_str(), "command" | "commands" | "subcommands")
         || lower.ends_with(" commands")
-        || lower.ends_with(" subcommands");
+        || lower.ends_with(" subcommands")
+        || (trimmed.ends_with(':')
+            && lower
+                .split_whitespace()
+                .any(|word| matches!(word, "commands" | "subcommands")));
     if command_header && !lower.contains("option") && !lower.contains("flag") {
         return Some(HelpSection::Commands);
     }
