@@ -9,6 +9,9 @@ const DOCKER_IMAGE_VERBS: &[&str] = &[
 ];
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    if !ctx.slot.positional() {
+        return None;
+    }
     let cmd = ctx.bin(spans[0].as_str());
     let sub = spans.get(1).map(String::as_str).unwrap_or("");
     if DOCKER_CONTAINER_VERBS.contains(&sub) {

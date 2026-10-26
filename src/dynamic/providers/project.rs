@@ -3,10 +3,11 @@ use super::super::shared::{Candidate, DynCtx, run};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match spans[0].as_str() {
+        "cargo" => cargo_completions(ctx),
+        _ if !ctx.slot.positional() => None,
         "npm" | "pnpm" | "yarn" => npm_like_completions(spans, ctx),
         "make" => make_completions(spans, ctx),
         "just" => just_completions(spans, ctx),
-        "cargo" => cargo_completions(spans, ctx),
         "zig" => zig_completions(spans, ctx),
         _ => None,
     }
@@ -90,12 +91,8 @@ fn just_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn cargo_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let prev = if spans.len() >= 2 {
-        spans[spans.len() - 2].as_str()
-    } else {
-        ""
-    };
+fn cargo_completions(ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let prev = ctx.slot.value_flag().unwrap_or("");
     let target_flags = ["--bin", "--example", "--test", "--bench"];
     let want_package = prev == "-p" || prev == "--package";
     let want_target = target_flags.contains(&prev);

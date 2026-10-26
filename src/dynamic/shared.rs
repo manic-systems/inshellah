@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
+use crate::dynamic::Slot;
 use crate::subprocess;
 
 // the typed candidate and scorer are shared with the static completer.
@@ -14,6 +15,7 @@ pub(crate) struct DynCtx<'a> {
     pub(crate) limit: usize,
     pub(crate) cmd_name: &'a str,
     pub(crate) explicit_cmd_path: Option<&'a Path>,
+    pub(crate) slot: Slot<'a>,
 }
 
 impl DynCtx<'_> {

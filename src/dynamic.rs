@@ -13,6 +13,37 @@ mod shared;
 
 use shared::{DynCtx, filter_candidates};
 
+/// what the word under the cursor fills.
+#[derive(Clone, Copy)]
+pub enum Slot<'a> {
+    Positional,
+    /// the static cache says this flag takes a value.
+    FlagValue(&'a str),
+    /// the previous word is a flag of unknown arity.
+    MaybeFlagValue(&'a str),
+}
+
+impl<'a> Slot<'a> {
+    /// guessed from the previous word alone, for callers without a cache.
+    pub fn from_spans(spans: &'a [String]) -> Self {
+        match spans.len().checked_sub(2).map(|at| spans[at].as_str()) {
+            Some(prev) if prev.starts_with('-') && prev != "--" => Self::MaybeFlagValue(prev),
+            _ => Self::Positional,
+        }
+    }
+
+    pub(crate) fn value_flag(self) -> Option<&'a str> {
+        match self {
+            Self::FlagValue(flag) | Self::MaybeFlagValue(flag) => Some(flag),
+            Self::Positional => None,
+        }
+    }
+
+    pub(crate) fn positional(self) -> bool {
+        !matches!(self, Self::FlagValue(_))
+    }
+}
+
 /// candidates as JSON, or None to hand off to nu's file completer.
 pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
     dynamic_complete_with_path(spans, None, cfg)
@@ -40,6 +71,7 @@ pub fn dynamic_value_completions(
         limit: 0,
         cmd_name,
         explicit_cmd_path,
+        slot: Slot::from_spans(&spans),
     };
     let raw = providers::value_completions(&spans, &ctx)?;
     Some(raw.into_iter().map(|c| c.into_json()).collect())
@@ -52,13 +84,14 @@ pub fn dynamic_complete_with_path(
     explicit_cmd_path: Option<&Path>,
     cfg: &Config,
 ) -> Option<Vec<String>> {
-    dynamic_complete_candidates_with_path(spans, explicit_cmd_path, cfg)
+    dynamic_complete_candidates_with_path(spans, explicit_cmd_path, Slot::from_spans(spans), cfg)
         .map(|candidates| candidates.into_iter().map(|c| c.into_json()).collect())
 }
 
 pub fn dynamic_complete_candidates_with_path(
     spans: &[String],
     explicit_cmd_path: Option<&Path>,
+    slot: Slot<'_>,
     cfg: &Config,
 ) -> Option<Vec<Candidate>> {
     if spans.is_empty() {
@@ -74,6 +107,7 @@ pub fn dynamic_complete_candidates_with_path(
         limit: cfg.dynamic_limit,
         cmd_name: &spans[0],
         explicit_cmd_path,
+        slot,
     };
     let raw = providers::dispatch(spans, &ctx)?;
     let last = spans.last().map(String::as_str).unwrap_or("");

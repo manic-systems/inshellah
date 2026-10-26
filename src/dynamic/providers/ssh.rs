@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 use super::super::shared::{Candidate, DynCtx};
-pub(super) fn complete(_spans: &[String], _ctx: &DynCtx) -> Option<Vec<Candidate>> {
+pub(super) fn complete(_spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    if !ctx.slot.positional() && ctx.slot.value_flag() != Some("-J") {
+        return None;
+    }
     let mut seen = std::collections::HashSet::new();
     let mut out: Vec<Candidate> = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {

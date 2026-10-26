@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 use super::super::shared::{Candidate, DynCtx, parse_tabular, run};
+use crate::dynamic::Slot;
 const GIT_TOP_VERBS: &[&str] = &[
     "add",
     "bisect",
@@ -97,7 +98,7 @@ const GIT_WORKTREE_VERBS: &[&str] = &[
 ];
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    match git_completion(spans)? {
+    match git_completion(spans, ctx.slot)? {
         GitCompletion::Static {
             values,
             description,
@@ -138,14 +139,10 @@ fn static_candidates(values: &'static [&'static str], description: &'static str)
         .collect()
 }
 
-fn git_completion(spans: &[String]) -> Option<GitCompletion> {
+fn git_completion(spans: &[String], slot: Slot) -> Option<GitCompletion> {
     let span_len = spans.len();
     let sub = spans.get(1).map(String::as_str).unwrap_or("");
-    let prev = if span_len >= 2 {
-        spans[span_len - 2].as_str()
-    } else {
-        ""
-    };
+    let prev = slot.value_flag().unwrap_or("");
     let positionals_after_sub: Vec<&str> = spans
         .iter()
         .skip(2)
@@ -153,6 +150,12 @@ fn git_completion(spans: &[String]) -> Option<GitCompletion> {
         .map(String::as_str)
         .collect();
 
+    if sub == "restore" && (prev == "--source" || prev == "-s") {
+        return Some(GitCompletion::Refs);
+    }
+    if !slot.positional() {
+        return None;
+    }
     if span_len <= 2 {
         return Some(GitCompletion::Static {
             values: GIT_TOP_VERBS,
@@ -266,9 +269,6 @@ fn git_completion(spans: &[String]) -> Option<GitCompletion> {
         return Some(GitCompletion::StatusPaths);
     }
     if sub == "restore" && span_len >= 3 {
-        if prev == "--source" || prev == "-s" {
-            return Some(GitCompletion::Refs);
-        }
         return Some(GitCompletion::StatusPaths);
     }
     if sub == "rm" && span_len >= 3 {

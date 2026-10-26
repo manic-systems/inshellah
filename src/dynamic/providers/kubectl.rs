@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 use super::super::shared::{Candidate, DynCtx, run};
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    if !ctx.slot.positional() {
+        return None;
+    }
     let sub = spans.get(1).map(String::as_str).unwrap_or("");
     let resource_verbs = [
         "get", "describe", "delete", "edit", "scale", "annotate", "label",

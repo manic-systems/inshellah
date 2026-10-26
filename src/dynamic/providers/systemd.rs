@@ -3,9 +3,10 @@ use super::super::shared::{Candidate, DynCtx, run};
 
 pub(super) fn complete(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match spans[0].as_str() {
-        "systemctl" => systemctl_completions(spans, ctx),
         "journalctl" => journalctl_completions(spans, ctx),
         "coredumpctl" => coredumpctl_completions(spans, ctx),
+        _ if !ctx.slot.positional() => None,
+        "systemctl" => systemctl_completions(spans, ctx),
         "loginctl" => loginctl_completions(spans, ctx),
         "machinectl" => machinectl_completions(spans, ctx),
         "networkctl" => networkctl_completions(spans, ctx),
@@ -100,14 +101,14 @@ fn unit_candidates(scope: &[&str], prefix: &str, ctx: &DynCtx) -> Option<Vec<Can
 }
 
 fn journalctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if spans.len() < 2 {
-        return None;
-    }
-    let prev = spans[spans.len() - 2].as_str();
+    let prev = ctx.slot.value_flag()?;
     // -u takes a unit and may end a combined short group (-xeu); --unit and
     // --user-unit take one too.
     let takes_unit = matches!(prev, "--unit" | "--user-unit")
-        || (prev.len() >= 2 && prev.starts_with('-') && !prev.starts_with("--") && prev.ends_with('u'));
+        || (prev.len() >= 2
+            && prev.starts_with('-')
+            && !prev.starts_with("--")
+            && prev.ends_with('u'));
     if !takes_unit {
         return None;
     }
@@ -127,9 +128,11 @@ fn coredumpctl_completions(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candida
     // units are valid only as the `-u`/`--unit` value; the bare MATCH positional
     // takes a PID, COMM, or exe path. only offer units for `-u` so they don't
     // leak into the positional where they can never match a recorded coredump.
-    let prev = spans.get(spans.len() - 2).map(String::as_str).unwrap_or("");
-    if prev == "-u" || prev == "--unit" {
+    if let Some("-u" | "--unit") = ctx.slot.value_flag() {
         return unit_candidates(&[], last, ctx);
+    }
+    if !ctx.slot.positional() {
+        return None;
     }
     let mut out: Vec<Candidate> = Vec::new();
 

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use inshellah::complete::{Candidate, generate_candidates};
 use inshellah::config::Config;
-use inshellah::dynamic::{dynamic_complete_candidates_with_path, dynamic_value_completions};
+use inshellah::dynamic::{Slot, dynamic_complete_candidates_with_path, dynamic_value_completions};
 use inshellah::indexer::{is_executable, resolve_command_path_and_cache};
 use inshellah::parsers::manpage::{ManpageResult, OwnedSwitch};
 use inshellah::store::{self, default_store_path, lookup, subcommands_of};
@@ -188,7 +188,18 @@ pub fn run(
     // spans are post-elevation, so `sudo nix ...` reaches this as
     // `[nix, ...]` and hits the nix branch.
     let dyn_candidates = (!typing_flag || candidates.is_empty())
-        .then(|| dynamic_complete_candidates_with_path(&spans, explicit_cmd_path.as_deref(), cfg))
+        .then(|| {
+            dynamic_complete_candidates_with_path(
+                &spans,
+                explicit_cmd_path.as_deref(),
+                match slot {
+                    ArgSlot::FlagValue(flag) => Slot::FlagValue(flag),
+                    ArgSlot::AfterDoubleDash => Slot::Positional,
+                    ArgSlot::Free => Slot::from_spans(&spans),
+                },
+                cfg,
+            )
+        })
         .flatten();
     match dyn_candidates {
         Some(dyn_candidates) if candidates.is_empty() || want_files => {
@@ -308,26 +319,26 @@ fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {
 
 /// the slot the token under the cursor fills.
 #[derive(Clone, Copy, PartialEq)]
-enum ArgSlot {
+enum ArgSlot<'a> {
     Free,
-    FlagValue,
+    FlagValue(&'a str),
     AfterDoubleDash,
 }
 
-struct CommandPath {
+struct CommandPath<'a> {
     path: Vec<String>,
     depth: usize,
-    slot: ArgSlot,
+    slot: ArgSlot<'a>,
     probe: bool,
 }
 
 /// `fresh` preserves flag metadata when caching fails.
-fn command_path(
+fn command_path<'a>(
     dirs: &[PathBuf],
     fresh: Option<(&str, &ManpageResult)>,
     cmd_name: &str,
-    rest: &[String],
-) -> CommandPath {
+    rest: &'a [String],
+) -> CommandPath<'a> {
     let node = |name: &str| match fresh {
         Some((fresh_name, result)) if fresh_name == name => Some(Cow::Borrowed(result)),
         _ => lookup(dirs, name).map(Cow::Owned),
@@ -338,14 +349,13 @@ fn command_path(
     let mut current_is_exact = current.is_some();
     let mut on_path = true;
     let mut probe = false;
-    let mut skip_next_value = false;
+    let mut value_of = None;
 
     for token in rest {
         if token.is_empty() {
             continue;
         }
-        if skip_next_value {
-            skip_next_value = false;
+        if value_of.take().is_some() {
             continue;
         }
         if token == "--" {
@@ -361,7 +371,7 @@ fn command_path(
                 .as_ref()
                 .is_some_and(|result| switch_takes_value(result, token))
             {
-                skip_next_value = true;
+                value_of = Some(token.as_str());
             }
             continue;
         }
@@ -393,15 +403,10 @@ fn command_path(
         current = child.or(current);
     }
 
-    let slot = if skip_next_value {
-        ArgSlot::FlagValue
-    } else {
-        ArgSlot::Free
-    };
     CommandPath {
         path,
         depth,
-        slot,
+        slot: value_of.map_or(ArgSlot::Free, ArgSlot::FlagValue),
         probe,
     }
 }

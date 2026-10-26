@@ -32,7 +32,7 @@ enum AdbDeviceCompletion<'a> {
 pub(super) fn complete(spans: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let rest = &spans[1..];
     let path = resolve_adb(ctx)?;
-    if let Some(completion) = adb_device_completion(rest) {
+    if let Some(completion) = adb_device_completion(rest, ctx) {
         return Some(adb_device_candidates(&path, completion, ctx));
     }
     if let Some(prefix) = adb_package_completion_prefix(rest) {
@@ -48,7 +48,7 @@ fn resolve_adb(ctx: &DynCtx) -> Option<PathBuf> {
         .or_else(|| find_in_path(ctx.cmd_name))
 }
 
-fn adb_device_completion(rest: &[String]) -> Option<AdbDeviceCompletion<'_>> {
+fn adb_device_completion<'a>(rest: &'a [String], ctx: &DynCtx) -> Option<AdbDeviceCompletion<'a>> {
     if !adb_command_tokens(rest).is_empty() {
         return None;
     }
@@ -71,22 +71,17 @@ fn adb_device_completion(rest: &[String]) -> Option<AdbDeviceCompletion<'_>> {
             replacement_prefix: "--transport-id=",
         });
     }
-    if rest.len() >= 2 {
-        let prev = rest[rest.len() - 2].as_str();
-        if prev == "-s" || prev == "--serial" || prev == "--one-device" {
-            return Some(AdbDeviceCompletion::Serial {
-                prefix: current,
-                replacement_prefix: "",
-            });
-        }
-        if prev == "-t" || prev == "--transport-id" {
-            return Some(AdbDeviceCompletion::TransportId {
-                prefix: current,
-                replacement_prefix: "",
-            });
-        }
+    match ctx.slot.value_flag()? {
+        "-s" | "--serial" | "--one-device" => Some(AdbDeviceCompletion::Serial {
+            prefix: current,
+            replacement_prefix: "",
+        }),
+        "-t" | "--transport-id" => Some(AdbDeviceCompletion::TransportId {
+            prefix: current,
+            replacement_prefix: "",
+        }),
+        _ => None,
     }
-    None
 }
 
 fn parse_adb_devices(output: &str) -> Vec<AdbDevice> {
