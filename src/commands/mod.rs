@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! CLI command implementations.
 
+pub mod cache;
 pub mod common;
 pub mod complete;
 pub mod completions;
@@ -10,5 +11,4 @@ pub mod index;
 pub mod manpage;
 pub mod manpage_dir;
 pub mod merge;
-pub mod purge;
 pub mod query;

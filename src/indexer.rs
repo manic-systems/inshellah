@@ -73,10 +73,12 @@ use crate::{
         resolve_node,
     },
     store::{
+        ExeIdentity,
         command_of_filename,
         ensure_dir,
         json_strings,
         read_result,
+        write_exe,
         write_file,
         write_native,
         write_result,
@@ -454,6 +456,13 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
     }
 
     let outcome = resolve_one(&probe, &job.base_cmd, &job.sub_args);
+    let identity = is_root.then(|| ExeIdentity::of(&job.bin_path)).flatten();
+    let with_exe = |written: io::Result<()>| -> io::Result<()> {
+        written?;
+        identity
+            .as_ref()
+            .map_or(Ok(()), |id| write_exe(&ctx.cache_dir, &job.base_cmd, id))
+    };
     if is_root && let Some(hash) = probe.root_help.get() {
         ctx.root_help
             .lock()
@@ -476,7 +485,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
 
     match outcome {
         Outcome::Native { nu } => {
-            let written = write_native(&ctx.cache_dir, &full_cmd, &nu);
+            let written = with_exe(write_native(&ctx.cache_dir, &full_cmd, &nu));
             ctx.record_write(full_cmd, written);
         },
         Outcome::Empty => {},
@@ -485,7 +494,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
             source,
             children,
         } => {
-            let written = write_result(&ctx.cache_dir, &full_cmd, source, &result);
+            let written = with_exe(write_result(&ctx.cache_dir, &full_cmd, source, &result));
             if ctx.record_write(full_cmd, written) && !probe.echoed.get() {
                 enqueue_child_jobs(ctx, job, &children, submit);
             }
@@ -584,7 +593,7 @@ where
             ) else {
                 continue;
             };
-            if ext != "json" && ext != "nu" {
+            if !matches!(ext, "json" | "nu" | "exe") {
                 continue;
             }
             let Some(cmd) = command_of_filename(stem) else {
@@ -620,8 +629,16 @@ where
         })
         .filter_map(|(_, cmd, _)| profile.paths.get_key_value(cmd))
         .collect();
-    for (path, _, root) in &owned {
-        if !rescrape.contains_key(root) {
+    for (path, cmd, root) in &owned {
+        if rescrape.contains_key(root) {
+            continue;
+        }
+        // cross builds index build twins, so name the profile's binary.
+        if path.extension().is_some_and(|ext| ext == "exe") {
+            if let Some(identity) = profile.paths.get(root).and_then(|bin| ExeIdentity::of(bin)) {
+                write_exe(dir, cmd, &identity)?;
+            }
+        } else {
             fs::copy(path, dir.join(path.file_name().unwrap_or_default()))?;
         }
     }
@@ -907,16 +924,6 @@ where
         }
         Ok(())
     }
-}
-
-pub fn resolve_and_cache(
-    user_dir: &Path,
-    mandirs: &[PathBuf],
-    cmd_name: &str,
-    path: &Path,
-    timeout_ms: u64,
-) -> Option<ManpageResult> {
-    resolve_command_path_and_cache(user_dir, mandirs, cmd_name, &[], path, timeout_ms)
 }
 
 // resolves each `cmd-*.N` page's real space-separated name from its content, so
@@ -1395,10 +1402,12 @@ fn resolve_one(probe: &RealProbe, base_cmd: &str, sub_args: &[String]) -> Outcom
     )
 }
 
-#[expect(
-    clippy::let_underscore_must_use,
-    reason = "runtime cache writes are best-effort, the resolved result is still returned"
-)]
+/// a resolved node and whether every cache write behind it landed.
+pub struct Resolved {
+    pub result: Option<ManpageResult>,
+    pub saved:  io::Result<()>,
+}
+
 pub fn resolve_command_path_and_cache(
     user_dir: &Path,
     mandirs: &[PathBuf],
@@ -1406,7 +1415,7 @@ pub fn resolve_command_path_and_cache(
     sub_args: &[String],
     path: &Path,
     timeout_ms: u64,
-) -> Option<ManpageResult> {
+) -> Resolved {
     let deadline =
         Instant::now() + Duration::from_millis(timeout_ms.saturating_mul(RESOLVE_BUDGET_MULTIPLE));
     let probe = RealProbe {
@@ -1421,40 +1430,52 @@ pub fn resolve_command_path_and_cache(
         echoed: Cell::new(false),
     };
     let full = resolver::full_cmd(base_cmd, sub_args);
+    let with_exe = |written: io::Result<()>| -> io::Result<()> {
+        written?;
+        ExeIdentity::of(path).map_or(Ok(()), |id| write_exe(user_dir, base_cmd, &id))
+    };
     match resolve_one(&probe, base_cmd, sub_args) {
         Outcome::Native { nu } => {
-            let _: io::Result<()> = write_native(user_dir, base_cmd, &nu);
-            Some(parse_nu_completions(&full, &nu))
+            Resolved {
+                saved:  with_exe(write_native(user_dir, base_cmd, &nu)),
+                result: Some(parse_nu_completions(&full, &nu)),
+            }
         },
-        Outcome::Empty => None,
+        Outcome::Empty => {
+            Resolved {
+                result: None,
+                saved:  Ok(()),
+            }
+        },
         Outcome::Content {
             result,
             source,
             children,
         } => {
-            let _: io::Result<()> = write_result(user_dir, &full, source, &result);
+            let written = with_exe(write_result(user_dir, &full, source, &result));
             // only --help eagerly populates the subtree; manpage children are
             // found on demand via sibling pages.
-            if source == "help" {
-                resolve_subtree(&probe, base_cmd, sub_args, children, deadline);
+            let subtree = if source == "help" {
+                resolve_subtree(&probe, base_cmd, sub_args, children, deadline)
+            } else {
+                Ok(())
+            };
+            Resolved {
+                result: Some(result),
+                saved:  written.and(subtree),
             }
-            Some(result)
         },
     }
 }
 
 // bounded by the result cap and shared deadline.
-#[expect(
-    clippy::let_underscore_must_use,
-    reason = "runtime cache writes are best-effort, a failed one is rescraped next time"
-)]
 fn resolve_subtree(
     probe: &RealProbe,
     base_cmd: &str,
     base_sub_args: &[String],
     roots: Vec<String>,
     deadline: Instant,
-) {
+) -> io::Result<()> {
     let mut queue: VecDeque<Vec<String>> = roots
         .into_iter()
         .map(|child| {
@@ -1464,6 +1485,7 @@ fn resolve_subtree(
         })
         .collect();
     let mut count = 0_usize;
+    let mut saved = Ok(());
     while let Some(sub) = queue.pop_front() {
         if count >= MAX_RESOLVE_RESULTS || Instant::now() >= deadline {
             break;
@@ -1480,7 +1502,8 @@ fn resolve_subtree(
         } = resolve_one(probe, base_cmd, &sub)
         {
             let full = resolver::full_cmd(base_cmd, &sub);
-            let _: io::Result<()> = write_result(probe.user_dir, &full, source, &result);
+            let written = write_result(probe.user_dir, &full, source, &result);
+            saved = saved.and(written);
             count += 1;
             for child in children {
                 let mut next = sub.clone();
@@ -1489,6 +1512,7 @@ fn resolve_subtree(
             }
         }
     }
+    saved
 }
 
 #[cfg(test)]

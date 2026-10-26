@@ -23,6 +23,7 @@ use std::{
         PathBuf,
     },
     process,
+    str::FromStr,
     sync::atomic::{
         AtomicU64,
         Ordering,
@@ -30,6 +31,7 @@ use std::{
     time::{
         Duration,
         SystemTime,
+        UNIX_EPOCH,
     },
 };
 
@@ -341,6 +343,113 @@ pub fn write_native(dir: &Path, command: &str, data: &str) -> io::Result<()> {
     remove_if_present(&dir.join(format!("{base}.json")))
 }
 
+/// the binary a command's cache entries came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExeIdentity {
+    path:     PathBuf,
+    len:      u64,
+    modified: u64,
+}
+
+impl ExeIdentity {
+    pub fn of(bin: &Path) -> Option<Self> {
+        let path = fs::canonicalize(bin).ok()?;
+        let meta = fs::metadata(&path).ok()?;
+        let modified = meta
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Some(Self {
+            path,
+            len: meta.len(),
+            modified,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Display for ExeIdentity {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}\t{}\t{}",
+            self.len,
+            self.modified,
+            self.path.display()
+        )
+    }
+}
+
+impl FromStr for ExeIdentity {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, ()> {
+        let mut fields = text.trim_end_matches('\n').splitn(3, '\t');
+        let len = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .ok_or(())?;
+        let modified = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .ok_or(())?;
+        let path = fields.next().filter(|field| !field.is_empty()).ok_or(())?;
+        Ok(Self {
+            path: PathBuf::from(path),
+            len,
+            modified,
+        })
+    }
+}
+
+/// # Errors
+/// fails when the sidecar write fails.
+pub fn write_exe(dir: &Path, command: &str, identity: &ExeIdentity) -> io::Result<()> {
+    let base = filename_of_command(command);
+    write_file(&dir.join(format!("{base}.exe")), &identity.to_string())
+}
+
+pub fn read_exe(dir: &Path, command: &str) -> Option<ExeIdentity> {
+    let base = filename_of_command(command);
+    read_file(&dir.join(format!("{base}.exe")))?.parse().ok()
+}
+
+/// remove `command`'s entries and its subcommands', returning how many went.
+///
+/// # Errors
+/// fails when `dir` cannot be read or an entry cannot be removed.
+pub fn purge_command(dir: &Path, command: &str) -> io::Result<usize> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let prefix = format!("{command} ");
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let owned = path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .and_then(command_of_filename)
+            .is_some_and(|stored| stored == command || stored.starts_with(&prefix));
+        let cache_ext = path
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|ext| matches!(ext, "json" | "nu" | "exe"));
+        if owned && cache_ext && path.is_file() {
+            fs::remove_file(&path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
@@ -586,7 +695,7 @@ pub fn all_commands(dirs: &[PathBuf]) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// only `.json`/`.nu` are removed so a misaimed dir won't wipe unrelated files.
+/// only `.json`/`.nu`/`.exe` go, so a misaimed dir keeps unrelated files.
 /// missing dir counts as already empty.
 ///
 /// # Errors
@@ -603,7 +712,7 @@ pub fn purge_dir(dir: &Path) -> io::Result<usize> {
         let is_cache_file = path
             .file_name()
             .and_then(OsStr::to_str)
-            .and_then(chop_extension)
+            .and_then(|name| chop_extension(name).or_else(|| name.strip_suffix(".exe")))
             .is_some();
         if is_cache_file && path.is_file() {
             fs::remove_file(&path)?;

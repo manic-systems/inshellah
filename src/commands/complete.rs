@@ -44,8 +44,11 @@ use inshellah::{
     },
     store::{
         self,
+        ExeIdentity,
         default_store_path,
         lookup,
+        purge_command,
+        read_exe,
         subcommands_of,
     },
 };
@@ -62,17 +65,21 @@ pub fn run(
     timeout_ms: u64,
     cfg: &Config,
 ) -> io::Result<()> {
-    let mut dirs: Vec<PathBuf> = Vec::with_capacity(system_dirs.len() + 1);
-    dirs.push(user_dir.to_path_buf());
-    dirs.extend(system_dirs.iter().cloned());
+    let mut all_dirs: Vec<PathBuf> = Vec::with_capacity(system_dirs.len() + 1);
+    all_dirs.push(user_dir.to_path_buf());
+    all_dirs.extend(system_dirs.iter().cloned());
 
-    let (spans, explicit_cmd_path) = strip_elevation(raw_spans, &dirs);
+    let (spans, explicit_cmd_path) = strip_elevation(raw_spans, &all_dirs);
     if spans.is_empty() || (explicit_cmd_path.is_none() && find_in_path(&spans[0]).is_none()) {
         return print_response(&Response::Defer);
     }
 
     let cmd_name = spans[0].clone();
     let rest: Vec<String> = spans[1..].to_vec();
+    let bin_path = explicit_cmd_path
+        .clone()
+        .or_else(|| find_in_path(&cmd_name));
+    let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, bin_path.as_deref());
 
     if let Some(candidates) =
         dynamic_value_completions(&cmd_name, &rest, explicit_cmd_path.as_deref(), timeout_ms)
@@ -97,10 +104,6 @@ pub fn run(
     };
 
     let mut found = find_result(&cmd_path.path);
-
-    let bin_path = explicit_cmd_path
-        .clone()
-        .or_else(|| find_in_path(&cmd_name));
     let all_mandirs = mandirs_with_bin_prefix(mandirs, bin_path.as_deref());
 
     while let Some(bin) = &bin_path
@@ -116,7 +119,9 @@ pub fn run(
             &cmd_path.path[1..],
             bin,
             timeout_ms,
-        ) else {
+        )
+        .result
+        else {
             break;
         };
         let resolved_len = cmd_path.path.len();
@@ -202,8 +207,26 @@ pub fn run(
     ))
 }
 
+/// dirs whose `cmd_name` entries match `bin`, purging stale user-cache ones.
+fn dirs_for_binary(
+    dirs: Vec<PathBuf>,
+    user_dir: &Path,
+    cmd_name: &str,
+    bin: Option<&Path>,
+) -> Vec<PathBuf> {
+    let Some(identity) = bin.and_then(ExeIdentity::of) else {
+        return dirs;
+    };
+    dirs.into_iter()
+        .filter(|dir| {
+            let stale = read_exe(dir, cmd_name).is_some_and(|stored| stored != identity);
+            !stale || (dir == user_dir && purge_command(dir, cmd_name).is_ok())
+        })
+        .collect()
+}
+
 /// also search the binary's own prefix for manpages.
-fn mandirs_with_bin_prefix(mandirs: &[PathBuf], bin_path: Option<&Path>) -> Vec<PathBuf> {
+pub fn mandirs_with_bin_prefix(mandirs: &[PathBuf], bin_path: Option<&Path>) -> Vec<PathBuf> {
     let mut all_mandirs = mandirs.to_vec();
     if let Some(prefix) = bin_path.and_then(Path::parent).and_then(Path::parent) {
         let share_man = prefix.join("share/man");

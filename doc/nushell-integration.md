@@ -70,8 +70,16 @@ inshellah diff CMD [SUB...] [--dir EXTRA_MANDIR] [--timeout-ms N]
 inshellah diff --scan PREFIX
     compare manpage-derived and --help-derived command data.
 
-inshellah purge [--dir PATH[:PATH...]]
-    clear the writable on-the-fly cache. read-only system dirs are untouched.
+inshellah purge [CMD...] [--dir PATH[:PATH...]]
+    clear the writable on-the-fly cache, or only CMD's entries. read-only
+    system dirs are untouched.
+
+inshellah refresh CMD... [--dir PATH[:PATH...]] [--timeout-ms N]
+    re-resolve CMD into the user cache from the binary on PATH.
+
+each command's cache entries record the binary they came from. when the
+binary on PATH changes, such as a different nix shell, `complete` drops
+the stale entries and resolves again.
 
 inshellah manpage FILE
     parse a manpage and emit a nushell extern block.

@@ -87,10 +87,22 @@ enum Cli {
         #[pound(value_name = "CMD", group = target)]
         cmd:        Vec<String>,
     },
-    /// delete the writable user cache, leaving system dirs alone
+    /// delete the writable user cache, or CMD's entries in it
     Purge {
         #[pound(flatten)]
         dirs: Dirs,
+        #[pound(value_name = "CMD")]
+        cmd:  Vec<String>,
+    },
+    /// re-resolve CMD into the user cache from the binary on PATH
+    Refresh {
+        #[pound(flatten)]
+        dirs:       Dirs,
+        /// --help resolve timeout in milliseconds
+        #[pound(long, value_name = "MS")]
+        timeout_ms: Option<u64>,
+        #[pound(value_name = "CMD", min_values = 1)]
+        cmd:        Vec<String>,
     },
     /// generate nushell completions for inshellah
     Completions,
@@ -161,11 +173,25 @@ fn main() {
                 },
             }
         },
-        Cli::Purge { dirs } => {
+        Cli::Purge { dirs, cmd } => {
             // only the writable user dir is purged, never the system overlays
             let mut resolved = dirs.resolve();
-            if let Err(err) = commands::purge::run(&resolved.swap_remove(0)) {
+            if let Err(err) = commands::cache::purge(&resolved.swap_remove(0), &cmd) {
                 eprintln!("purge failed: {err}");
+                process::exit(1);
+            }
+        },
+        Cli::Refresh {
+            dirs,
+            timeout_ms: timeout_override,
+            cmd,
+        } => {
+            let timeout_ms = timeout_override.unwrap_or_else(|| Config::from_env().timeout_ms);
+            let (user_dir, system_dirs) =
+                commands::complete::default_user_dir_and_system_dirs(dirs.resolve());
+            let mandirs = commands::complete::mandirs_for_system_dirs(&system_dirs);
+            if let Err(err) = commands::cache::refresh(&user_dir, &mandirs, &cmd, timeout_ms) {
+                eprintln!("refresh failed: {err}");
                 process::exit(1);
             }
         },

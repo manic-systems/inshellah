@@ -103,8 +103,12 @@ inshellah dump
 # view stored data for a command
 inshellah query docker
 
-# clear the on-the-fly user cache (.json/.nu files; system dirs untouched)
+# clear the on-the-fly user cache (system dirs untouched)
 inshellah purge
+
+# drop or rebuild one command's entries
+inshellah purge rg
+inshellah refresh rg
 
 # re-index from a prefix
 inshellah index /usr --dir ~/.cache/inshellah
