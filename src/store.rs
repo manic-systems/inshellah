@@ -72,6 +72,8 @@ pub fn ensure_dir(dir: &Path) -> io::Result<()> {
 }
 
 const ENCODED_FILENAME_PREFIX: &str = "v1%";
+pub const NUSHELL_NATIVE_COMMANDS_FILE: &str = "nushell-native-commands";
+const STALE_TEMP_AGE: Duration = Duration::from_hours(1);
 
 struct PercentEncoded<'text>(&'text str);
 
@@ -503,6 +505,99 @@ pub fn purge_command(dir: &Path, command: &str) -> io::Result<usize> {
     Ok(removed)
 }
 
+/// splits `.{name}.{pid}.{seq}.tmp` into the final name.
+fn temp_file_stem(filename: &str) -> Option<&str> {
+    let inner = filename.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (rest, seq) = inner.rsplit_once('.')?;
+    seq.parse::<u64>().ok()?;
+    let (stem, pid) = rest.rsplit_once('.')?;
+    pid.parse::<u64>().ok()?;
+    Some(stem)
+}
+
+fn older_than_stale_age(entry: &fs::DirEntry) -> io::Result<bool> {
+    match entry.metadata() {
+        Ok(meta) => {
+            Ok(meta
+                .modified()?
+                .elapsed()
+                .is_ok_and(|age| age > STALE_TEMP_AGE))
+        },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+/// `remove_stale_temp_files` for callers where a failed sweep must not fail the
+/// work around it.
+pub fn sweep_stale_temp_files(dir: &Path) {
+    if let Err(err) = remove_stale_temp_files(dir) {
+        eprintln!("note: {err}");
+    }
+}
+
+/// drops temp files left by killed writers, never real cache files.
+///
+/// the cache dir can sit on a filesystem shared across hosts, where a writer's
+/// pid means nothing here. `write_file` creates, writes and renames within one
+/// call, so a temp file older than `STALE_TEMP_AGE` has no live writer.
+///
+/// # Errors
+/// fails when `dir` exists but cannot be listed, or a stale file cannot be
+/// removed. every other stale file is still removed first.
+pub fn remove_stale_temp_files(dir: &Path) -> io::Result<()> {
+    let wrap = |err: io::Error| {
+        io::Error::new(
+            err.kind(),
+            format!("cannot clear temp files in {}, {err}", dir.display()),
+        )
+    };
+    let entries = match fs::read_dir(dir) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        listed => listed.map_err(wrap)?,
+    };
+    let mut failures = Vec::<String>::new();
+    for listed in entries {
+        let entry = match listed {
+            Ok(entry) => entry,
+            Err(err) => {
+                failures.push(err.to_string());
+                continue;
+            },
+        };
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Some(stem) = temp_file_stem(&name) else {
+            continue;
+        };
+        let written_by_store =
+            stem.starts_with(ENCODED_FILENAME_PREFIX) || stem == NUSHELL_NATIVE_COMMANDS_FILE;
+        if !written_by_store || entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        let removed = older_than_stale_age(&entry).and_then(|stale| {
+            if stale {
+                remove_if_present(&path)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(err) = removed {
+            failures.push(format!("{}, {err}", path.display()));
+        }
+    }
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "cannot clear temp files in {}, {}",
+        dir.display(),
+        failures.join(", ")
+    )))
+}
+
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
@@ -851,6 +946,22 @@ mod tests {
 
     use super::*;
 
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            let dir = unique_dir(tag);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.0));
+        }
+    }
+
     fn unique_dir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -866,6 +977,65 @@ mod tests {
         write_file(&path, "{\"ok\":true}").unwrap();
         assert_eq!(read_file(&path).as_deref(), Some("{\"ok\":true}"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stale_temp_files_go_only_once_older_than_the_stale_age() {
+        let scratch = ScratchDir::new("stale-temp");
+        let dir = &scratch.0;
+        let name = filename_of_command("demo");
+        let stale_json = dir.join(format!(".{name}.json.99999999.0.tmp"));
+        let stale_exe = dir.join(format!(".{name}.exe.99999999.1.tmp"));
+        let stale_native = dir.join(format!(".{NUSHELL_NATIVE_COMMANDS_FILE}.99999999.2.tmp"));
+        let fresh = dir.join(format!(".{name}.json.99999999.3.tmp"));
+        let foreign = dir.join(".editor-swap.99999999.0.tmp");
+        let real = dir.join(format!("{name}.json"));
+        let old = SystemTime::now() - STALE_TEMP_AGE - Duration::from_mins(1);
+        for path in [
+            &stale_json,
+            &stale_exe,
+            &stale_native,
+            &fresh,
+            &foreign,
+            &real,
+        ] {
+            fs::write(path, "partial").unwrap();
+        }
+        for path in [&stale_json, &stale_exe, &stale_native, &foreign, &real] {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+
+        remove_stale_temp_files(dir).unwrap();
+        assert!(!stale_json.exists());
+        assert!(!stale_exe.exists());
+        assert!(!stale_native.exists());
+        assert!(fresh.is_file());
+        assert!(foreign.is_file());
+        assert!(real.is_file());
+    }
+
+    #[test]
+    fn stale_temp_sweep_skips_directories_and_survives_per_file_failures() {
+        let scratch = ScratchDir::new("stale-temp-failures");
+        let dir = &scratch.0;
+        let name = filename_of_command("demo");
+        let impostor = dir.join(format!(".{name}.json.99999999.0.tmp"));
+        let stale = dir.join(format!(".{name}.json.99999999.1.tmp"));
+        fs::create_dir_all(&impostor).unwrap();
+        fs::write(&stale, "partial").unwrap();
+        let old = SystemTime::now() - STALE_TEMP_AGE - Duration::from_mins(1);
+        for path in [&stale, &impostor] {
+            fs::File::open(path).unwrap().set_modified(old).unwrap();
+        }
+
+        remove_stale_temp_files(dir).unwrap();
+        assert!(impostor.is_dir());
+        assert!(!stale.exists());
     }
 
     #[test]
