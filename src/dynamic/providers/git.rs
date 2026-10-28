@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2
 use crate::{
     complete::Candidate,
-    dynamic::{
-        Slot,
-        shared::{
-            DynCtx,
-            Words,
-            parse_tabular,
-            run,
-        },
+    dynamic::shared::{
+        DynCtx,
+        Words,
+        parse_tabular,
+        run,
     },
 };
 const GIT_TOP_VERBS: &[&str] = &[
@@ -54,7 +51,6 @@ const GIT_REF_VERBS: &[&str] = &[
     "cherry-pick",
     "revert",
     "tag",
-    "blame",
     "bisect",
 ];
 const GIT_BRANCH_VERBS: &[&str] = &["switch", "branch"];
@@ -125,16 +121,19 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
             git.extend([flag.to_owned(), value.to_owned()]);
         }
     }
-    match git_completion(words, ctx.slot)? {
+    let prefix = words.current();
+    match git_completion(words, ctx)? {
         GitCompletion::Static {
             values,
             description,
         } => Some(static_candidates(values, description)),
-        GitCompletion::Refs => git_refs(&git, ctx, words.current()),
-        GitCompletion::Branches => git_branches(&git, ctx, words.current()),
-        GitCompletion::Tags => git_tags(&git, ctx, words.current()),
+        GitCompletion::Refs => git_refs(&git, ctx, prefix),
+        GitCompletion::PushDestinations(remote) => git_push_destinations(&git, ctx, remote, prefix),
+        GitCompletion::RemoteBranches(remote) => git_remote_branches(&git, ctx, remote, prefix),
+        GitCompletion::Branches => git_branches(&git, ctx, prefix),
+        GitCompletion::Tags => git_tags(&git, ctx, prefix),
         GitCompletion::Remotes => git_remotes(&git, ctx),
-        GitCompletion::Stashes => git_stashes(&git, ctx, words.current()),
+        GitCompletion::Stashes => git_stashes(&git, ctx, prefix),
         GitCompletion::StatusPaths => git_status_paths(&git, ctx),
         GitCompletion::TrackedPaths => git_tracked_paths(&git, ctx),
         GitCompletion::Submodules => git_submodules(&git, ctx),
@@ -143,12 +142,14 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 #[derive(Clone, Copy)]
-enum GitCompletion {
+enum GitCompletion<'span> {
     Static {
         values:      &'static [&'static str],
         description: &'static str,
     },
     Refs,
+    PushDestinations(&'span str),
+    RemoteBranches(&'span str),
     Branches,
     Tags,
     Remotes,
@@ -166,15 +167,19 @@ fn static_candidates(values: &'static [&'static str], description: &'static str)
         .collect()
 }
 
-fn git_completion(words: &Words, slot: Slot) -> Option<GitCompletion> {
+fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitCompletion<'span>> {
     let sub = words.arg(0);
-    let prev = slot.value_flag().unwrap_or("");
+    let prev = ctx.slot.value_flag().unwrap_or("");
     let args_after_sub = words.arg_count().saturating_sub(1);
+    let boundary = words.past_dashes();
 
     if sub == "restore" && (prev == "--source" || prev == "-s") {
         return Some(GitCompletion::Refs);
     }
-    if !slot.positional() {
+    if sub == "push" && prev == "--repo" {
+        return Some(GitCompletion::Remotes);
+    }
+    if !words.at_operand(ctx) {
         return None;
     }
     if words.arg_count() == 0 {
@@ -203,8 +208,21 @@ fn git_completion(words: &Words, slot: Slot) -> Option<GitCompletion> {
     }
 
     match sub {
-        "fetch" | "push" | "pull" if args_after_sub == 0 => Some(GitCompletion::Remotes),
-        "fetch" | "push" | "pull" => Some(GitCompletion::Refs),
+        "fetch" if words.has(&["--all"]) => None,
+        "fetch" if words.has(&["-m", "--multiple"]) => Some(GitCompletion::Remotes),
+        "fetch" | "push" | "pull" if args_after_sub == 0 && words.value(&["--repo"]).is_none() => {
+            Some(GitCompletion::Remotes)
+        },
+        "push" if words.current().contains(':') => {
+            let remote = words.value(&["--repo"]).unwrap_or_else(|| words.arg(1));
+            Some(GitCompletion::PushDestinations(remote))
+        },
+        "fetch" | "pull" => {
+            let remote = words.value(&["--repo"]).unwrap_or_else(|| words.arg(1));
+            Some(GitCompletion::RemoteBranches(remote))
+        },
+        "push" => Some(GitCompletion::Refs),
+        "tag" if boundary => None,
         "tag" if words.has(&["-d", "--delete", "-v", "--verify"]) => Some(GitCompletion::Tags),
         "tag" if args_after_sub >= 1 => Some(GitCompletion::Refs),
         "tag" => Some(GitCompletion::Tags),
@@ -213,31 +231,39 @@ fn git_completion(words: &Words, slot: Slot) -> Option<GitCompletion> {
         "mv" => (args_after_sub == 0).then_some(GitCompletion::TrackedPaths),
         "checkout" if ["-b", "-B", "--orphan"].contains(&prev) => None,
         "switch" if ["-c", "-C", "--create", "--force-create", "--orphan"].contains(&prev) => None,
-        "switch" => Some(GitCompletion::Branches),
+        // a revision may precede the file, and files are offered alongside
+        "blame" => (args_after_sub == 0 && !boundary).then_some(GitCompletion::Refs),
         _ if GIT_BRANCH_VERBS.contains(&sub) => Some(GitCompletion::Branches),
-        _ if GIT_REF_VERBS.contains(&sub) => Some(GitCompletion::Refs),
+        _ if GIT_REF_VERBS.contains(&sub) => (!boundary).then_some(GitCompletion::Refs),
         _ => None,
     }
 }
 
-fn nested_verb_completion(sub: &str, words: &Words) -> Option<GitCompletion> {
+fn nested_verb_completion<'span>(sub: &str, words: &Words<'span>) -> Option<GitCompletion<'span>> {
     let verb = words.arg(1);
-    match sub {
-        "worktree" if ["remove", "move", "lock", "unlock", "repair"].contains(&verb) => {
-            Some(GitCompletion::Worktrees)
+    let index = words.arg_count().saturating_sub(2);
+    match (sub, verb, index) {
+        ("worktree", "remove" | "move" | "lock" | "unlock", 0) => Some(GitCompletion::Worktrees),
+        ("worktree", "add", 1..) => Some(GitCompletion::Refs),
+        ("remote", "set-head", 1) | ("remote", "set-branches", 1..) => {
+            Some(GitCompletion::RemoteBranches(words.arg(2)))
         },
-        "worktree" if verb == "add" && words.arg_count() >= 3 => Some(GitCompletion::Refs),
-        "remote" if GIT_REMOTE_VERBS.contains(&verb) && verb != "add" => {
-            Some(GitCompletion::Remotes)
-        },
-        "stash"
-            if ["show", "drop", "pop", "apply", "store"].contains(&verb)
-                || (verb == "branch" && words.arg_count() >= 3) =>
-        {
+        (
+            "remote",
+            "remove" | "rm" | "rename" | "set-head" | "set-branches" | "get-url" | "set-url"
+            | "show" | "prune",
+            0,
+        )
+        | ("remote", "update", _) => Some(GitCompletion::Remotes),
+        ("stash", "show" | "drop" | "pop" | "apply", 0) | ("stash", "branch", 1) => {
             Some(GitCompletion::Stashes)
         },
-        "submodule" if GIT_SUBMODULE_PATH_VERBS.contains(&verb) => Some(GitCompletion::Submodules),
-        "bisect" if ["bad", "good", "new", "old", "skip", "reset", "start"].contains(&verb) => {
+        ("submodule", ..) if GIT_SUBMODULE_PATH_VERBS.contains(&verb) => {
+            Some(GitCompletion::Submodules)
+        },
+        ("bisect", "bad" | "good" | "new" | "old" | "skip" | "reset" | "start", _)
+            if !words.past_dashes() =>
+        {
             Some(GitCompletion::Refs)
         },
         _ => None,
@@ -267,6 +293,45 @@ fn git_refs(git: &[String], ctx: &DynCtx, prefix: &str) -> Option<Vec<Candidate>
             _ => None,
         }
     }))
+}
+
+fn git_remote_branches(
+    git: &[String],
+    ctx: &DynCtx,
+    remote: &str,
+    prefix: &str,
+) -> Option<Vec<Candidate>> {
+    if remote.is_empty() {
+        return None;
+    }
+    let mut args = command(git, &["for-each-ref"]);
+    args.extend(ctx.limit_args("--count", prefix));
+    args.push("--format=%(refname:lstrip=3)%09%(contents:subject)".into());
+    args.push(format!("refs/remotes/{remote}"));
+    let out = run(&args, ctx)?;
+    let branches = parse_tabular(&out, |parts| {
+        match parts {
+            [name, subject, ..] if *name != "HEAD" => Some(Candidate::new(*name, *subject)),
+            _ => None,
+        }
+    });
+    (!branches.is_empty()).then_some(branches)
+}
+
+fn git_push_destinations(
+    git: &[String],
+    ctx: &DynCtx,
+    remote: &str,
+    prefix: &str,
+) -> Option<Vec<Candidate>> {
+    let (source, typed) = prefix.rsplit_once(':')?;
+    let branches = git_remote_branches(git, ctx, remote, typed)?;
+    Some(
+        branches
+            .into_iter()
+            .map(|branch| Candidate::new(format!("{source}:{}", branch.value), branch.description))
+            .collect(),
+    )
 }
 
 fn git_branches(git: &[String], ctx: &DynCtx, prefix: &str) -> Option<Vec<Candidate>> {
@@ -329,53 +394,88 @@ fn git_stashes(git: &[String], ctx: &DynCtx, prefix: &str) -> Option<Vec<Candida
     (!candidates.is_empty()).then_some(candidates)
 }
 
+fn repo_location(git: &[String], ctx: &DynCtx) -> Option<(String, String)> {
+    let out = run(
+        &command(git, &["rev-parse", "--show-toplevel", "--show-prefix"]),
+        ctx,
+    )?;
+    let mut lines = out.lines();
+    let top = lines.next()?.to_owned();
+    let prefix = lines.next().unwrap_or("").to_owned();
+    Some((top, prefix))
+}
+
+fn relative_to_cwd(path: &str, prefix: &str) -> String {
+    let cwd: Vec<&str> = prefix.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = path.split('/').collect();
+    let directories = &parts[..parts.len() - 1];
+    let common = cwd
+        .iter()
+        .zip(directories)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = "../".repeat(cwd.len() - common);
+    relative.push_str(&parts[common..].join("/"));
+    relative
+}
+
 fn git_status_paths(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let out = run(&command(git, &["status", "--porcelain", "-uall"]), ctx)?;
+    let prefix = repo_location(git, ctx)
+        .map(|(_, prefix)| prefix)
+        .unwrap_or_default();
+    let out = run(
+        &command(git, &["status", "--porcelain=v1", "-z", "-uall"]),
+        ctx,
+    )?;
     let mut candidates = Vec::new();
-    for line in out.lines() {
-        let Some(raw) = line.get(3..) else {
+    let mut entries = out.split('\0');
+    while let Some(entry) = entries.next() {
+        let Some(path) = entry.get(3..).filter(|path| !path.is_empty()) else {
             continue;
         };
-        let path = if let Some((_, after)) = raw.split_once(" -> ") {
-            after.to_owned()
-        } else {
-            raw.to_owned()
-        };
-        candidates.push(Candidate::new(path, "changed path"));
+        if entry.get(..2).is_some_and(|xy| xy.contains(['R', 'C'])) {
+            entries.next();
+        }
+        candidates.push(Candidate::new(
+            relative_to_cwd(path, &prefix),
+            "changed path",
+        ));
     }
     (!candidates.is_empty()).then_some(candidates)
 }
 
 fn git_tracked_paths(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let out = run(&command(git, &["ls-files"]), ctx)?;
+    let out = run(&command(git, &["ls-files", "-z"]), ctx)?;
     let mut candidates = Vec::new();
-    for line in out.lines() {
-        if line.is_empty() {
+    for path in out.split('\0') {
+        if path.is_empty() {
             continue;
         }
-        candidates.push(Candidate::new(line, "tracked file"));
+        candidates.push(Candidate::new(path, "tracked file"));
     }
     (!candidates.is_empty()).then_some(candidates)
 }
 
 fn git_submodules(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    let (top, prefix) = repo_location(git, ctx)?;
+    let gitmodules = format!("{top}/.gitmodules");
     let out = run(
         &command(git, &[
             "config",
             "--file",
-            ".gitmodules",
+            &gitmodules,
+            "--null",
             "--get-regexp",
             "^submodule\\..*\\.path$",
         ]),
         ctx,
     )?;
     let mut candidates = Vec::new();
-    for line in out.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
+    for record in out.split('\0') {
+        let Some((_, path)) = record.split_once('\n') else {
             continue;
-        }
-        candidates.push(Candidate::new(parts[1], "submodule"));
+        };
+        candidates.push(Candidate::new(relative_to_cwd(path, &prefix), "submodule"));
     }
     (!candidates.is_empty()).then_some(candidates)
 }

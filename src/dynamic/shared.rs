@@ -51,6 +51,7 @@ pub struct Words<'span> {
     leading:     usize,
     /// the last word before the cursor when it is a flag still owed a value.
     pending:     Option<&'span str>,
+    past_dashes: bool,
 }
 
 impl<'span> Words<'span> {
@@ -98,6 +99,7 @@ impl<'span> Words<'span> {
             leading: leading.unwrap_or(flags.len()),
             flags,
             pending,
+            past_dashes: after_dashes,
         }
     }
 
@@ -126,6 +128,11 @@ impl<'span> Words<'span> {
     /// whether the cursor word is a command operand rather than a flag's value.
     pub const fn at_operand(&self, ctx: &DynCtx<'_>) -> bool {
         self.pending.is_none() && ctx.slot.positional()
+    }
+
+    /// whether a bare `--` came before the cursor.
+    pub const fn past_dashes(&self) -> bool {
+        self.past_dashes
     }
 
     pub fn has(&self, names: &[&str]) -> bool {
