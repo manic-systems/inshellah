@@ -57,9 +57,23 @@ fn install_fakes(bin_dir: &Path) {
     fs::create_dir_all(bin_dir).expect("bin dir");
 
     write_executable(bin_dir, "nix", FAKE_NIX);
-    write_executable(bin_dir, "systemctl", FAKE_SYSTEMCTL);
+    for name in [
+        "systemctl",
+        "journalctl",
+        "coredumpctl",
+        "loginctl",
+        "machinectl",
+        "networkctl",
+    ] {
+        write_executable(bin_dir, name, FAKE_SYSTEMD);
+    }
     write_executable(bin_dir, "kubectl", FAKE_KUBECTL);
     write_executable(bin_dir, "cargo", FAKE_CARGO);
+    write_executable(bin_dir, "zig", FAKE_ZIG);
+    write_executable(bin_dir, "ps", FAKE_PS);
+    for name in ["ssh", "scp", "sftp", "kill", "pkill"] {
+        write_executable(bin_dir, name, "#!/bin/sh\nexit 0\n");
+    }
     write_executable(bin_dir, "git", FAKE_GIT);
     write_executable(bin_dir, "jj", FAKE_JJ);
 }
@@ -75,16 +89,52 @@ else
 fi
 "#;
 
-const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
-case "$*" in
-  *"g*"*)
-    printf 'greetd.service loaded active running Greeter\n'
+const FAKE_SYSTEMD: &str = r#"#!/bin/sh
+if [ -n "${INSHELLAH_SYSTEMD_ARGS_FILE:-}" ]; then
+  printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$INSHELLAH_SYSTEMD_ARGS_FILE"
+fi
+case "${0##*/}" in
+  systemctl)
+    case "$*" in
+      *"g*"*) printf 'greetd.service loaded active running Greeter\n' ;;
+      *) printf 'demo.service loaded active running Demo Unit\n' ;;
+    esac
     ;;
-  *)
-    printf 'demo.service loaded active running Demo Unit\n'
+  coredumpctl)
+    printf 'Thu 2025-01-01 00:00:00 UTC 4242 1000 1000 11 present demo-app\n'
+    ;;
+  loginctl)
+    case "$*" in
+      *list-users*) printf '1000 alice\n' ;;
+      *list-sessions*) printf 'c1 1000 alice seat0\n' ;;
+    esac
+    ;;
+  machinectl)
+    case "$*" in
+      *list-images*) printf 'demo-image raw\n' ;;
+      *) printf 'demo-machine container systemd\n' ;;
+    esac
+    ;;
+  networkctl)
+    printf '1 eth0 ether routable configured\n'
     ;;
 esac
 "#;
+
+const FAKE_ZIG: &str = r#"#!/bin/sh
+if [ -n "${ZIG_ARGS_FILE:-}" ]; then
+  printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$ZIG_ARGS_FILE"
+fi
+case " $* " in
+  *" --list-steps "*)
+    printf 'install (default) Copy build artifacts\n\ntest Run project tests\n'
+    ;;
+esac
+"#;
+
+const FAKE_PS: &str = r"#!/bin/sh
+printf ' 101 worker\n 202 database server\n'
+";
 
 const FAKE_KUBECTL: &str = r#"#!/bin/sh
 printf '%s\n' "$*" > "$KUBECTL_ARGS_FILE"
@@ -225,6 +275,11 @@ impl Harness {
         aux_files.insert("KUBECTL_ARGS_FILE".into(), root.join("kubectl-args.txt"));
         aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), root.join("git-args.txt"));
         aux_files.insert("INSHELLAH_JJ_ARGS_FILE".into(), root.join("jj-args.txt"));
+        aux_files.insert("ZIG_ARGS_FILE".into(), root.join("zig-args.txt"));
+        aux_files.insert(
+            "INSHELLAH_SYSTEMD_ARGS_FILE".into(),
+            root.join("systemd-args.txt"),
+        );
         Self {
             bin_dir,
             cache_dir,
@@ -348,6 +403,444 @@ fn systemctl_emits_units_only_for_unit_verbs() {
     assert_eq!(prefixed[0].value, "greetd.service");
 }
 
+#[test]
+fn systemctl_reload_restart_aliases_offer_units() {
+    for verb in [
+        "reload-or-restart",
+        "reload-or-try-restart",
+        "try-reload-or-restart",
+    ] {
+        let harness = Harness::new("dyn-systemctl-reload-aliases");
+        let (stdout, ..) = harness.run(&["systemctl", verb, ""], &[]);
+        assert!(parse_output(&stdout).is_some(), "verb={verb}");
+    }
+}
+
+#[test]
+fn systemctl_skips_option_values_before_verbs_and_forwards_scope() {
+    let harness = Harness::new("dyn-systemctl-option-state");
+    let (stdout, stderr, ok) = harness.run(
+        &["systemctl", "--host", "remote", "--user", "status", ""],
+        &[],
+    );
+    assert!(ok, "stderr={stderr}");
+    let cands = parse_output(&stdout).expect("units after global options");
+    assert_eq!(cands[0].value, "demo.service");
+    let args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+    assert!(
+        args.contains("args=--host remote --user list-units"),
+        "args={args}"
+    );
+
+    let (job_mode, ..) = harness.run(&["systemctl", "--job-mode", "fail", "start", ""], &[]);
+    assert!(parse_output(&job_mode).is_some(), "stdout={job_mode}");
+}
+
+#[test]
+fn systemctl_option_values_do_not_leak_unit_candidates() {
+    let harness = Harness::new("dyn-systemctl-value-slot");
+    let (stdout, ..) = harness.run(&["systemctl", "status", "--signal", ""], &[]);
+    assert_eq!(stdout.trim(), "null", "signal value must not receive units");
+}
+
+#[test]
+fn systemctl_isolate_accepts_one_unit() {
+    let harness = Harness::new("dyn-systemctl-isolate");
+    let (first, ..) = harness.run(&["systemctl", "isolate", ""], &[]);
+    assert!(parse_output(&first).is_some(), "stdout={first}");
+
+    let (second, ..) = harness.run(&["systemctl", "isolate", "demo.service", ""], &[]);
+    assert_eq!(second.trim(), "null", "isolate accepts one unit");
+}
+
+#[test]
+fn journalctl_unit_values_preserve_user_scope() {
+    let harness = Harness::new("dyn-journalctl-unit");
+    let (stdout, ..) = harness.run(&["journalctl", "--user-unit", ""], &[]);
+    let cands = parse_output(&stdout).expect("journal units");
+    assert_eq!(cands[0].value, "demo.service");
+    let args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+    assert!(args.contains("args=--user list-units"), "args={args}");
+
+    let (after_boundary, ..) = harness.run(&["journalctl", "--", "-u", ""], &[]);
+    assert_eq!(after_boundary.trim(), "null");
+}
+
+#[test]
+fn coredumpctl_tracks_filters_without_unit_values() {
+    let harness = Harness::new("dyn-coredumpctl-state");
+    let (filters_out, ..) = harness.run(&["coredumpctl", "--output", "short", "info", ""], &[]);
+    let filters = parse_output(&filters_out).expect("coredump filters");
+    assert_eq!(Harness::values(&filters), vec!["4242"]);
+
+    let (since, ..) = harness.run(&["coredumpctl", "info", "--since", ""], &[]);
+    assert_eq!(since.trim(), "null", "time value must fall through");
+
+    let (reverse, ..) = harness.run(&["coredumpctl", "-r", "info", ""], &[]);
+    assert!(
+        parse_output(&reverse).is_some(),
+        "boolean reverse must not consume the verb"
+    );
+}
+
+#[test]
+fn loginctl_tracks_user_and_session_positions_after_options() {
+    let harness = Harness::new("dyn-loginctl-state");
+    let (users_out, ..) = harness.run(&["loginctl", "--host", "remote", "show-user", ""], &[]);
+    let users = parse_output(&users_out).expect("users");
+    assert_eq!(Harness::values(&users), vec!["alice"]);
+    let args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+    assert!(
+        args.contains("args=--host remote list-users"),
+        "args={args}"
+    );
+
+    let (sessions_out, ..) = harness.run(&["loginctl", "show-session", ""], &[]);
+    let sessions = parse_output(&sessions_out).expect("sessions");
+    assert_eq!(Harness::values(&sessions), vec!["c1"]);
+
+    let (after_activate, ..) = harness.run(&["loginctl", "activate", "c1", ""], &[]);
+    assert_eq!(
+        after_activate.trim(),
+        "null",
+        "activate accepts one session"
+    );
+}
+
+#[test]
+fn machinectl_completes_only_the_machine_operand() {
+    let harness = Harness::new("dyn-machinectl-state");
+    let (machines_out, ..) = harness.run(&["machinectl", "--host", "remote", "shell", ""], &[]);
+    let machines = parse_output(&machines_out).expect("machines");
+    assert_eq!(Harness::values(&machines), vec!["demo-machine"]);
+    let args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+    assert!(args.contains("args=--host remote list"), "args={args}");
+
+    for spans in [
+        &["machinectl", "shell", "demo-machine", ""][..],
+        &["machinectl", "copy-to", "demo-machine", ""][..],
+    ] {
+        let (stdout, ..) = harness.run(spans, &[]);
+        assert_eq!(stdout.trim(), "null", "post-machine slot, {spans:?}");
+    }
+
+    let (repeated_out, ..) = harness.run(&["machinectl", "poweroff", "first", ""], &[]);
+    let repeated = parse_output(&repeated_out).expect("repeated machine target");
+    assert_eq!(Harness::values(&repeated), vec!["demo-machine"]);
+}
+
+#[test]
+fn machinectl_image_verbs_list_images_and_machine_verbs_list_machines() {
+    for verb in ["start", "enable", "disable", "remove", "clone", "rename"] {
+        let harness = Harness::new("dyn-machinectl-images");
+        let (stdout, ..) = harness.run(&["machinectl", verb, ""], &[]);
+        let cands = parse_output(&stdout).expect("images");
+        assert_eq!(Harness::values(&cands), vec!["demo-image"], "verb={verb}");
+        let args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+        assert!(
+            args.contains("args=list-images"),
+            "verb={verb}, args={args}"
+        );
+    }
+    for verb in ["status", "poweroff", "terminate"] {
+        let harness = Harness::new("dyn-machinectl-machines");
+        harness.run(&["machinectl", verb, ""], &[]);
+        let args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+        assert!(args.contains("args=list "), "verb={verb}, args={args}");
+    }
+}
+
+#[test]
+fn networkctl_completes_links_after_global_options() {
+    let harness = Harness::new("dyn-networkctl-state");
+    let (stdout, ..) = harness.run(&["networkctl", "--lines", "20", "status", ""], &[]);
+    let links = parse_output(&stdout).expect("links");
+    assert_eq!(Harness::values(&links), vec!["eth0"]);
+}
+
+#[test]
+fn explicit_systemctl_path_is_used_for_unit_queries() {
+    let harness = Harness::new("dyn-systemctl-path");
+    let systemctl = harness
+        .bin_dir
+        .join("systemctl")
+        .to_string_lossy()
+        .into_owned();
+    let (stdout, stderr, ok) = harness.run(&[&systemctl, "status", ""], &[]);
+    assert!(ok, "stderr={stderr}");
+    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
+    let args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+    assert!(args.contains(&format!("argv0={systemctl}")), "args={args}");
+}
+
+// === ssh/scp/sftp ===
+
+fn sorted_values(cands: &[Cand]) -> Vec<String> {
+    let mut values = Harness::values(cands);
+    values.sort();
+    values
+}
+
+fn ssh_home(harness: &Harness) -> PathBuf {
+    let home = harness.cache_dir.parent().unwrap().join("home");
+    fs::create_dir_all(home.join(".ssh")).expect("ssh dir");
+    home
+}
+
+fn ssh_home_with_inventory(harness: &Harness) -> String {
+    let home = ssh_home(harness);
+    let ssh = home.join(".ssh");
+    fs::write(
+        ssh.join("config"),
+        concat!(
+            "Host tt-example tt-devbox\n",
+            "  hOsT\ttt-mixedcase tt-spaced\n",
+            "Host *.wildcard question? !negated tt-literal # inline comment\n",
+            "HOST=tt-equals\n",
+        ),
+    )
+    .expect("ssh config");
+    fs::write(
+        ssh.join("known_hosts"),
+        concat!(
+            "tt-known.example ssh-ed25519 AAAA\n",
+            "@cert-authority tt-ca.example,*.tt-ca.example ssh-ed25519 AAAA\n",
+            "@revoked tt-revoked.example ssh-ed25519 AAAA\n",
+            "[tt-bracket.example]:2222 ssh-ed25519 AAAA\n",
+            "tt-plain.example,[tt-comma.example]:2200 ssh-ed25519 AAAA\n",
+            "|1|hashed ignored\n",
+        ),
+    )
+    .expect("known hosts");
+    home.to_string_lossy().into_owned()
+}
+
+#[test]
+fn ssh_hosts_are_limited_to_the_host_operand() {
+    let harness = Harness::new("dyn-ssh-position");
+    let home = ssh_home_with_inventory(&harness);
+    let (hosts_out, ..) = harness.run(&["ssh", "tt-"], &[("HOME", &home)]);
+    let hosts = parse_output(&hosts_out).expect("ssh hosts");
+    assert_eq!(sorted_values(&hosts), vec![
+        "tt-bracket.example",
+        "tt-ca.example",
+        "tt-comma.example",
+        "tt-devbox",
+        "tt-equals",
+        "tt-example",
+        "tt-known.example",
+        "tt-literal",
+        "tt-mixedcase",
+        "tt-plain.example",
+        "tt-spaced",
+    ]);
+
+    let (user_host_out, ..) = harness.run(&["ssh", "alice@tt-ex"], &[("HOME", &home)]);
+    let user_host = parse_output(&user_host_out).expect("user-qualified host");
+    assert_eq!(Harness::values(&user_host)[0], "alice@tt-example");
+
+    let (remote_command, ..) = harness.run(&["ssh", "tt-example", ""], &[("HOME", &home)]);
+    assert_eq!(
+        remote_command.trim(),
+        "null",
+        "remote command position must fall through"
+    );
+    let (port_value, ..) = harness.run(&["ssh", "-p", ""], &[("HOME", &home)]);
+    assert_eq!(port_value.trim(), "null", "port value is not a host");
+    let (tag_value, ..) = harness.run(&["ssh", "-P", ""], &[("HOME", &home)]);
+    assert_eq!(tag_value.trim(), "null", "tag value is not a host");
+    let (after_tag, ..) = harness.run(&["ssh", "-P", "profile", "tt-"], &[("HOME", &home)]);
+    assert!(parse_output(&after_tag).is_some());
+    let (jump, ..) = harness.run(&["ssh", "-J", "tt-"], &[("HOME", &home)]);
+    assert!(parse_output(&jump).is_some(), "jump host is a host");
+}
+
+#[test]
+fn ssh_hosts_follow_user_config_includes() {
+    let harness = Harness::new("dyn-ssh-includes");
+    let home = ssh_home(&harness);
+    let ssh = home.join(".ssh");
+    fs::create_dir_all(ssh.join("conf.d")).unwrap();
+    fs::write(
+        ssh.join("config"),
+        "Include conf.d/*.conf\nInclude loop\nInclude ~/.ssh/tilde\nHost tt-direct\n",
+    )
+    .unwrap();
+    fs::write(ssh.join("conf.d/a.conf"), "Host tt-included-a\n").unwrap();
+    fs::write(
+        ssh.join("conf.d/b.conf"),
+        "Host tt-included-b\nInclude ../config\n",
+    )
+    .unwrap();
+    fs::write(ssh.join("loop"), "Include loop\nHost tt-looped\n").unwrap();
+    fs::write(ssh.join("tilde"), "Host tt-tilded\n").unwrap();
+    fs::write(
+        ssh.join("known_hosts2"),
+        "tt-legacy.example ssh-ed25519 AAAA\n|1|x|y ssh-rsa AAAA\n",
+    )
+    .unwrap();
+
+    let home_dir = home.to_string_lossy().into_owned();
+    let (stdout, ..) = harness.run(&["ssh", "tt-"], &[("HOME", &home_dir)]);
+    let hosts = parse_output(&stdout).expect("hosts");
+    assert_eq!(sorted_values(&hosts), vec![
+        "tt-direct",
+        "tt-included-a",
+        "tt-included-b",
+        "tt-legacy.example",
+        "tt-looped",
+        "tt-tilded",
+    ]);
+}
+
+#[test]
+fn ssh_includes_honour_quoted_paths_and_skip_non_regular_files() {
+    let harness = Harness::new("dyn-ssh-include-edge");
+    let home = ssh_home(&harness);
+    let ssh = home.join(".ssh");
+    fs::create_dir_all(ssh.join("with space")).unwrap();
+    fs::write(
+        ssh.join("config"),
+        "Include \"with space/a.conf\" fifo\nHost tt-direct\n",
+    )
+    .unwrap();
+    fs::write(ssh.join("with space/a.conf"), "Host tt-spaced-include\n").unwrap();
+    let made = Command::new("mkfifo")
+        .arg(ssh.join("fifo"))
+        .status()
+        .expect("mkfifo");
+    assert!(made.success());
+
+    let home_dir = home.to_string_lossy().into_owned();
+    let (stdout, ..) = harness.run(&["ssh", "tt-"], &[("HOME", &home_dir)]);
+    let hosts = parse_output(&stdout).expect("hosts");
+    assert_eq!(sorted_values(&hosts), vec![
+        "tt-direct",
+        "tt-spaced-include"
+    ]);
+}
+
+#[test]
+fn scp_completes_hosts_with_a_trailing_colon_until_the_path_begins() {
+    let harness = Harness::new("dyn-scp-position");
+    let home = ssh_home_with_inventory(&harness);
+
+    let (host_out, ..) = harness.run(&["scp", "tt-ex"], &[("HOME", &home)]);
+    let host = parse_output(&host_out).expect("typed remote host");
+    assert_eq!(Harness::values(&host)[0], "tt-example:");
+
+    let (user_host_out, ..) = harness.run(&["scp", "bob@tt-ex"], &[("HOME", &home)]);
+    let user_host = parse_output(&user_host_out).expect("user-qualified host");
+    assert_eq!(Harness::values(&user_host)[0], "bob@tt-example:");
+
+    for spans in [
+        &["scp", "tt-example:"][..],
+        &["scp", "./tt-ex"][..],
+        &["scp", "-P", "tt-"][..],
+    ] {
+        let (stdout, ..) = harness.run(spans, &[("HOME", &home)]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
+    }
+}
+
+#[test]
+fn sftp_stops_host_completion_after_destination_or_inside_option_value() {
+    let harness = Harness::new("dyn-sftp-position");
+    let home = ssh_home_with_inventory(&harness);
+    let (hosts, ..) = harness.run(&["sftp", "tt-"], &[("HOME", &home)]);
+    assert!(parse_output(&hosts).is_some());
+
+    for spans in [
+        &["sftp", "tt-example", ""][..],
+        &["sftp", "-P", ""][..],
+        &["sftp", "-s", ""][..],
+    ] {
+        let (stdout, ..) = harness.run(spans, &[("HOME", &home)]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}");
+    }
+    let (after_subsystem, ..) =
+        harness.run(&["sftp", "-s", "/usr/lib/ssh/sftp-server", "tt-"], &[(
+            "HOME", &home,
+        )]);
+    assert!(parse_output(&after_subsystem).is_some());
+}
+
+#[test]
+fn ssh_clustered_short_flags_end_in_a_value_flag() {
+    let harness = Harness::new("dyn-ssh-clusters");
+    let home = ssh_home_with_inventory(&harness);
+    let (host, ..) = harness.run(&["ssh", "-fNL", "8080:h:80", "tt-"], &[("HOME", &home)]);
+    assert!(parse_output(&host).is_some(), "stdout={host}");
+
+    let (value, ..) = harness.run(&["ssh", "-fNL", ""], &[("HOME", &home)]);
+    assert_eq!(value.trim(), "null", "cluster value is not a host");
+
+    let (attached, ..) = harness.run(&["ssh", "-fNp22", "tt-"], &[("HOME", &home)]);
+    assert!(parse_output(&attached).is_some(), "stdout={attached}");
+}
+
+// === kill/pkill ===
+
+#[test]
+fn kill_completes_pid_operands_but_not_signal_values() {
+    let harness = Harness::new("dyn-kill-position");
+    let (pids_out, ..) = harness.run(&["kill", ""], &[]);
+    let pids = parse_output(&pids_out).expect("pids");
+    assert_eq!(Harness::values(&pids), vec!["101", "202"]);
+
+    let (signal, ..) = harness.run(&["kill", "--signal", ""], &[]);
+    assert_eq!(signal.trim(), "null", "signal value is not a PID");
+    let (after_signal, ..) = harness.run(&["kill", "--signal", "TERM", ""], &[]);
+    assert!(parse_output(&after_signal).is_some());
+
+    let (timeout_signal, ..) = harness.run(&["kill", "--timeout", "100", ""], &[]);
+    assert_eq!(timeout_signal.trim(), "null", "timeout signal is not a PID");
+    let (after_timeout, ..) = harness.run(&["kill", "--timeout", "100", "TERM", ""], &[]);
+    assert!(parse_output(&after_timeout).is_some());
+
+    let (attached_signal, ..) = harness.run(&["kill", "--timeout=100", ""], &[]);
+    assert_eq!(attached_signal.trim(), "null", "signal value is not a PID");
+    let (after_attached, ..) = harness.run(&["kill", "--timeout=100", "TERM", ""], &[]);
+    assert!(parse_output(&after_attached).is_some());
+}
+
+#[test]
+fn pkill_completes_one_pattern_but_not_user_or_signal_values() {
+    let harness = Harness::new("dyn-pkill-position");
+    let (processes_out, ..) = harness.run(&["pkill", ""], &[]);
+    let processes = parse_output(&processes_out).expect("process names");
+    assert_eq!(Harness::values(&processes), vec![
+        "worker",
+        "database server"
+    ]);
+
+    for spans in [
+        &["pkill", "-u", ""][..],
+        &["pkill", "--signal", ""][..],
+        &["pkill", "-p", ""][..],
+        &["pkill", "--pid", ""][..],
+        &["pkill", "-O", ""][..],
+        &["pkill", "-r", ""][..],
+        &["pkill", "worker", ""][..],
+    ] {
+        let (stdout, ..) = harness.run(spans, &[]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
+    }
+
+    for option_and_value in [
+        &["-p", "101"][..],
+        &["--pid", "101"][..],
+        &["-O", "60"][..],
+        &["-r", "RS"][..],
+    ] {
+        let mut spans = vec!["pkill"];
+        spans.extend_from_slice(option_and_value);
+        spans.push("");
+        let (stdout, ..) = harness.run(&spans, &[]);
+        assert!(parse_output(&stdout).is_some(), "spans={spans:?}");
+    }
+}
+
 // === kubectl ===
 
 #[test]
@@ -384,6 +877,75 @@ fn cargo_bin_completes_only_bin_targets() {
     let (stdout, ..) = harness.run(&["cargo", "run", "--bin", ""], &[]);
     let cands = parse_output(&stdout).expect("bin targets");
     assert_eq!(Harness::values(&cands), vec!["app-cli"]);
+}
+
+// === zig ===
+
+#[test]
+fn zig_build_steps_skip_blank_lines() {
+    let harness = Harness::new("dyn-zig-blank");
+    let (stdout, ..) = harness.run(&["zig", "build", ""], &[]);
+    let steps = parse_output(&stdout).expect("build steps");
+    assert_eq!(Harness::values(&steps), vec!["install", "test"]);
+}
+
+#[test]
+fn zig_build_steps_appear_only_at_step_operands() {
+    let harness = Harness::new("dyn-zig-position");
+    let (after_prefix, ..) = harness.run(&["zig", "build", "--prefix", "/tmp", ""], &[]);
+    assert!(parse_output(&after_prefix).is_some());
+    let (after_boundary, ..) = harness.run(&["zig", "build", "--", ""], &[]);
+    assert_eq!(after_boundary.trim(), "null");
+
+    for (option, value) in [
+        ("--prefix", "/tmp/prefix"),
+        ("-p", "/tmp/prefix"),
+        ("--debounce", "50"),
+        ("--debug-log", "compiler"),
+        ("--error-style", "verbose"),
+        ("--libc-runtimes", "runtimes.txt"),
+    ] {
+        let (active_value, ..) = harness.run(&["zig", "build", option, ""], &[]);
+        assert_eq!(active_value.trim(), "null", "option={option}");
+        let (after_value, ..) = harness.run(&["zig", "build", option, value, ""], &[]);
+        assert!(parse_output(&after_value).is_some(), "option={option}");
+    }
+
+    let (attached_jobs, ..) = harness.run(&["zig", "build", "-j4", ""], &[]);
+    assert!(
+        parse_output(&attached_jobs).is_some(),
+        "Zig's jobs option carries its value in -j<N>"
+    );
+}
+
+#[test]
+fn zig_step_discovery_forwards_build_scope_selectors() {
+    let harness = Harness::new("dyn-zig-scope");
+    let (stdout, ..) = harness.run(
+        &[
+            "zig",
+            "build",
+            "--build-file",
+            "custom.zig",
+            "--cache-dir",
+            ".cache",
+            "--global-cache-dir",
+            ".global-cache",
+            "--zig-lib-dir",
+            "zig-lib",
+            "",
+        ],
+        &[],
+    );
+    assert!(parse_output(&stdout).is_some());
+    let captured = harness.read_aux("ZIG_ARGS_FILE");
+    assert!(
+        captured.contains(
+            "args=build --build-file custom.zig --cache-dir .cache --global-cache-dir \
+             .global-cache --zig-lib-dir zig-lib --list-steps"
+        ),
+        "scope selectors were not forwarded: {captured}"
+    );
 }
 
 // === git ===

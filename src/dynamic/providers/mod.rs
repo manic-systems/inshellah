@@ -70,10 +70,36 @@ impl Provider for FunctionProvider {
 
     fn complete(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
         let words = Words::parse(spans, |flag| {
-            self.value_flags.contains(&flag) || ctx.value_flags.iter().any(|known| known == flag)
+            self.value_flags.contains(&flag)
+                || ctx.value_flags.iter().any(|known| known == flag)
+                || ends_in_value_flag(flag, short_value_flags(ctx.cmd_name))
         });
         (self.complete)(&words, ctx)
     }
+}
+
+/// short flags that take a value when they end a cluster like `-fNL`.
+fn short_value_flags(cmd: &str) -> &'static str {
+    match cmd {
+        "ssh" => "BbcDEeFIiJLlmOopPQRSWw",
+        "scp" => "cDFiJloPSX",
+        "sftp" => "BbcDEFIiJloPRSsX",
+        "journalctl" => "DFMSUcgopstu",
+        _ => "",
+    }
+}
+
+fn ends_in_value_flag(word: &str, value_flags: &str) -> bool {
+    let Some(cluster) = word
+        .strip_prefix('-')
+        .filter(|cluster| !cluster.starts_with('-'))
+    else {
+        return false;
+    };
+    cluster
+        .char_indices()
+        .find(|(_, flag)| value_flags.contains(*flag))
+        .is_some_and(|(at, flag)| at + flag.len_utf8() == cluster.len())
 }
 
 const PROVIDERS: &[FunctionProvider] = &[
@@ -126,6 +152,20 @@ const PROVIDERS: &[FunctionProvider] = &[
             "-u",
             "--unit",
             "--user-unit",
+            "--job-mode",
+            "-S",
+            "--since",
+            "-U",
+            "--until",
+            "-F",
+            "--field",
+            "-D",
+            "--directory",
+            "--file",
+            "-g",
+            "--grep",
+            "-c",
+            "--cursor",
         ],
         complete:    systemd::complete,
     },
@@ -206,7 +246,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         complete:    jj::complete,
     },
     FunctionProvider {
-        commands:    &["npm", "pnpm", "yarn", "make", "just", "cargo", "zig"],
+        commands:    &["npm", "pnpm", "yarn", "make", "just", "cargo"],
         kind:        Kind::Fallback,
         files:       Files::Replace,
         matching:    Matching::Value,
@@ -230,11 +270,75 @@ const PROVIDERS: &[FunctionProvider] = &[
         complete:    project::complete,
     },
     FunctionProvider {
+        commands:    &["zig"],
+        kind:        Kind::Fallback,
+        files:       Files::Replace,
+        matching:    Matching::Value,
+        value_flags: &[
+            "-p",
+            "--prefix",
+            "--prefix-lib-dir",
+            "--prefix-exe-dir",
+            "--prefix-include-dir",
+            "--build-file",
+            "--build-runner",
+            "--cache-dir",
+            "--global-cache-dir",
+            "--zig-lib-dir",
+            "--color",
+            "--debounce",
+            "--debug-log",
+            "--error-style",
+            "--host",
+            "--libc",
+            "--libc-runtimes",
+            "--maxrss",
+            "--multiline-errors",
+            "--search-prefix",
+            "--seed",
+            "--summary",
+            "--sysroot",
+            "--system",
+            "--test-timeout",
+        ],
+        complete:    project::complete,
+    },
+    FunctionProvider {
         commands:    &["kill", "pkill"],
         kind:        Kind::Fallback,
         files:       Files::Replace,
         matching:    Matching::ValueOrDescription,
-        value_flags: &[],
+        value_flags: &[
+            "-s",
+            "--signal",
+            "-q",
+            "--queue",
+            "--timeout",
+            "-u",
+            "--euid",
+            "-U",
+            "--uid",
+            "-g",
+            "--pgroup",
+            "-G",
+            "--group",
+            "-t",
+            "--terminal",
+            "-P",
+            "--parent",
+            "-p",
+            "--pid",
+            "-O",
+            "--older",
+            "-r",
+            "--runstates",
+            "-F",
+            "--pidfile",
+            "-c",
+            "--pidns",
+            "--ns",
+            "--nslist",
+        ],
         complete:    process::complete,
     },
 ];

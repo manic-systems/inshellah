@@ -8,10 +8,16 @@ use crate::{
     },
 };
 pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if !ctx.slot.positional() {
+    if !words.at_operand(ctx) {
         return None;
     }
     let by_pid = words.command() == "kill";
+    // procps kill --timeout takes a millisecond count and then a signal.
+    let awaiting_signal = by_pid && words.has(&["--timeout"]) && words.arg_count() == 0;
+    let pattern_given = !by_pid && words.arg_count() > 0;
+    if awaiting_signal || pattern_given {
+        return None;
+    }
     let out = run(
         &[
             "ps".into(),

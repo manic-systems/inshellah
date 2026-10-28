@@ -26,7 +26,7 @@ use crate::{
 pub(super) fn complete(words: &Words, ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match words.command() {
         "cargo" => cargo_completions(words, ctx),
-        _ if !ctx.slot.positional() => None,
+        _ if !words.at_operand(ctx) => None,
         "npm" | "pnpm" | "yarn" => npm_like_completions(words),
         "make" => make_completions(words),
         "just" => just_completions(words, ctx),
@@ -255,21 +255,34 @@ fn cargo_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
 }
 
 fn zig_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if words.arg(0) != "build" {
+    if words.arg(0) != "build"
+        || words.past_dashes()
+        || words.current().starts_with('-')
+        || !words.at_operand(ctx)
+    {
         return None;
     }
 
-    let mut args = vec![ctx.bin("zig"), "build".into(), "--list-steps".into()];
-    if let Some(file) = words.value(&["--build-file"]) {
-        args.extend(["--build-file".to_owned(), file.to_owned()]);
+    let mut args = vec![ctx.bin("zig"), "build".into()];
+    for flag in [
+        "--build-file",
+        "--build-runner",
+        "--cache-dir",
+        "--global-cache-dir",
+        "--zig-lib-dir",
+    ] {
+        if let Some(value) = words.value(&[flag]) {
+            args.extend([flag.to_owned(), value.to_owned()]);
+        }
     }
+    args.push("--list-steps".into());
     let out = run(&args, ctx)?;
 
     let mut candidates = Vec::new();
     for line in out.lines() {
         let trimmed = line.trim_start();
         let mut iter = trimmed.split_whitespace();
-        let name = iter.next()?;
+        let Some(name) = iter.next() else { continue };
         candidates.push(Candidate::new(name, iter.collect::<Vec<&str>>().join(" ")));
     }
 

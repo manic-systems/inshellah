@@ -47,6 +47,9 @@ pub struct Words<'span> {
     flags:       Vec<(&'span str, Option<&'span str>)>,
     /// how many of `flags` came before the first positional.
     leading:     usize,
+    /// the last word before the cursor when it is a flag still owed a value.
+    pending:     Option<&'span str>,
+    past_dashes: bool,
 }
 
 impl<'span> Words<'span> {
@@ -60,6 +63,7 @@ impl<'span> Words<'span> {
         let mut flags = Vec::new();
         let mut after_dashes = false;
         let mut leading = None;
+        let mut pending = None;
 
         while let Some(word) = words.next() {
             if word.is_empty() {
@@ -76,7 +80,9 @@ impl<'span> Words<'span> {
                 flags.push((flag, Some(value)));
             } else {
                 let value = if takes_value(word) {
-                    words.next()
+                    let value = words.next();
+                    pending = value.is_none().then_some(word);
+                    value
                 } else {
                     None
                 };
@@ -88,6 +94,8 @@ impl<'span> Words<'span> {
             positionals,
             leading: leading.unwrap_or(flags.len()),
             flags,
+            pending,
+            past_dashes: after_dashes,
         }
     }
 
@@ -111,6 +119,24 @@ impl<'span> Words<'span> {
     /// positionals typed before the cursor word.
     pub const fn arg_count(&self) -> usize {
         self.positionals.len()
+    }
+
+    /// whether the cursor word is a command operand rather than a flag's value.
+    pub const fn at_operand(&self, ctx: &DynCtx<'_>) -> bool {
+        self.pending.is_none() && ctx.slot.positional()
+    }
+
+    /// the flag whose value the cursor word is, from the cache or the provider.
+    pub fn value_slot<'words>(&'words self, ctx: &'words DynCtx<'_>) -> Option<&'words str> {
+        self.pending.or(match ctx.slot {
+            Slot::FlagValue(flag) => Some(flag),
+            Slot::Positional | Slot::MaybeFlagValue(_) => None,
+        })
+    }
+
+    /// whether a bare `--` came before the cursor.
+    pub const fn past_dashes(&self) -> bool {
+        self.past_dashes
     }
 
     pub fn has(&self, names: &[&str]) -> bool {
