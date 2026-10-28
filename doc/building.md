@@ -1,7 +1,8 @@
 # building and installing
 
-inshellah is a rust crate. it builds with stock cargo on any platform
-rust supports.
+inshellah is a rust crate. it builds with stock cargo on unix targets
+(including linux and macOS). its executable checks and subprocess handling
+rely on unix file modes and process APIs, so windows is not supported.
 
 ## with nix
 

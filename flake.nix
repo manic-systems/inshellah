@@ -106,6 +106,8 @@
             EOF
             cargo clippy --all-targets -- -D warnings
             cargo test --all-targets
+            RUSTDOCFLAGS="-D warnings -D rustdoc::broken-intra-doc-links" \
+              cargo doc --no-deps --document-private-items
             popd
           '';
           nushellCheckPhase = ''

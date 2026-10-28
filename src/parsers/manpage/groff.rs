@@ -229,7 +229,7 @@ const fn skip_to_byte(bytes: &[u8], len: usize, pos: &mut usize, delim: u8) {
 /// skip a groff reference in one of three sub-forms:
 ///   single char, e.g. \*X or \nX
 ///   ( + 2 chars, e.g. \*(XX or \n(XX
-///   [ to ], e.g. \*[name] or \n[name]
+///   \[ to \], e.g. \*\[name\] or \n\[name\]
 const fn skip_groff_reference(bytes: &[u8], len: usize, pos: &mut usize) {
     if *pos < len {
         if bytes[*pos] == b'(' {
