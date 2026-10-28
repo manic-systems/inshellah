@@ -172,7 +172,10 @@ fn static_candidates(values: &'static [&'static str], description: &'static str)
 
 fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitCompletion<'span>> {
     let sub = words.arg(0);
-    let prev = ctx.slot.value_flag().unwrap_or("");
+    let prev = words
+        .value_slot(ctx)
+        .or_else(|| ctx.slot.value_flag())
+        .unwrap_or("");
     let args_after_sub = words.arg_count().saturating_sub(1);
     let boundary = words.past_dashes();
 
@@ -181,6 +184,12 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
     }
     if sub == "push" && prev == "--repo" {
         return Some(GitCompletion::Remotes);
+    }
+    if sub == "checkout" && ["-b", "-B", "--orphan"].contains(&prev) {
+        return None;
+    }
+    if sub == "switch" && ["-c", "-C", "--create", "--force-create", "--orphan"].contains(&prev) {
+        return None;
     }
     if !words.at_operand(ctx) {
         return None;
@@ -232,8 +241,6 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         "add" | "restore" => Some(GitCompletion::StatusPaths),
         "rm" => Some(GitCompletion::TrackedPaths),
         "mv" => (args_after_sub == 0).then_some(GitCompletion::TrackedPaths),
-        "checkout" if ["-b", "-B", "--orphan"].contains(&prev) => None,
-        "switch" if ["-c", "-C", "--create", "--force-create", "--orphan"].contains(&prev) => None,
         // a revision may precede the file, and files are offered alongside
         "blame" => (args_after_sub == 0 && !boundary).then_some(GitCompletion::Refs),
         _ if GIT_BRANCH_VERBS.contains(&sub) => Some(GitCompletion::Branches),

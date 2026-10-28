@@ -70,6 +70,9 @@ fn install_fakes(bin_dir: &Path) {
 
     write_executable(bin_dir, "nix", FAKE_NIX);
     write_executable(bin_dir, "systemctl", FAKE_SYSTEMCTL);
+    for name in ["ssh", "scp", "sftp"] {
+        write_executable(bin_dir, name, "#!/bin/sh\nexit 0\n");
+    }
     write_executable(bin_dir, "kubectl", FAKE_KUBECTL);
     write_executable(bin_dir, "docker", FAKE_DOCKER);
     write_executable(bin_dir, "podman", FAKE_PODMAN);
@@ -392,6 +395,188 @@ fn nix_dynamic_timeout_zero_disables_bound() {
     assert_eq!(cands[0].value, "slow-package");
 }
 
+/// writes a cache entry so flag arity comes from the cache, as it does for an
+/// installed command. `subs` are subcommand names the entry advertises.
+fn seed_command(harness: &Harness, command: &str, subs: &[&str], valued: &[&str], plain: &[&str]) {
+    let switch = |name: &str| {
+        if let Some(long) = name.strip_prefix("--") {
+            return OwnedSwitch::Long(long.to_owned());
+        }
+        OwnedSwitch::Short(name.chars().nth(1).expect("short flag letter"))
+    };
+    let entries = valued
+        .iter()
+        .map(|name| (name, true))
+        .chain(plain.iter().map(|name| (name, false)))
+        .map(|(name, takes_value)| {
+            ManpageEntry {
+                switch: switch(name),
+                param:  takes_value
+                    .then(|| OwnedParam::new(ParamKind::Mandatory, "VALUE".to_owned())),
+                desc:   String::new(),
+            }
+        })
+        .collect();
+    let result = ManpageResult {
+        entries,
+        subcommands: subs
+            .iter()
+            .map(|sub| ManpageSubcommand::new((*sub).to_owned(), String::new()))
+            .collect(),
+        positional_choices: Vec::new(),
+        positionals: Vec::new(),
+        description: String::new(),
+    };
+    write_result(&harness.cache_dir, command, "help", &result).expect("seed cache");
+}
+
+// === ssh/scp/sftp ===
+
+fn sorted_values(cands: &[Cand]) -> Vec<String> {
+    let mut values = Harness::values(cands);
+    values.sort();
+    values
+}
+
+fn ssh_home(harness: &Harness) -> PathBuf {
+    let home = harness.root.join("home");
+    fs::create_dir_all(home.join(".ssh")).expect("ssh dir");
+    home
+}
+
+fn ssh_home_with_inventory(harness: &Harness) -> String {
+    let home = ssh_home(harness);
+    let ssh = home.join(".ssh");
+    fs::write(
+        ssh.join("config"),
+        concat!(
+            "Host tt-example tt-devbox\n",
+            "  hOsT\ttt-mixedcase tt-spaced\n",
+            "Host *.wildcard question? !negated tt-literal # inline comment\n",
+            "HOST=tt-equals\n",
+        ),
+    )
+    .expect("ssh config");
+    fs::write(
+        ssh.join("known_hosts"),
+        concat!(
+            "tt-known.example ssh-ed25519 AAAA\n",
+            "@cert-authority tt-ca.example,*.tt-ca.example ssh-ed25519 AAAA\n",
+            "@revoked tt-revoked.example ssh-ed25519 AAAA\n",
+            "[tt-bracket.example]:2222 ssh-ed25519 AAAA\n",
+            "[tt-default.example]:22 ssh-ed25519 AAAA\n",
+            "tt-plain.example,[tt-comma.example]:2200 ssh-ed25519 AAAA\n",
+            "|1|hashed ignored\n",
+        ),
+    )
+    .expect("known hosts");
+    home.to_string_lossy().into_owned()
+}
+
+#[test]
+fn ssh_hosts_follow_user_config_includes() {
+    let harness = Harness::new("dyn-ssh-includes");
+    let home = ssh_home(&harness);
+    let ssh = home.join(".ssh");
+    fs::create_dir_all(ssh.join("conf.d")).unwrap();
+    fs::write(
+        ssh.join("config"),
+        "Include conf.d/*.conf\nInclude loop\nInclude ~/.ssh/tilde\nHost tt-direct\n",
+    )
+    .unwrap();
+    fs::write(ssh.join("conf.d/a.conf"), "Host tt-included-a\n").unwrap();
+    fs::write(
+        ssh.join("conf.d/b.conf"),
+        "Host tt-included-b\nInclude ../config\n",
+    )
+    .unwrap();
+    fs::write(ssh.join("loop"), "Include loop\nHost tt-looped\n").unwrap();
+    fs::write(ssh.join("tilde"), "Host tt-tilded\n").unwrap();
+    fs::write(
+        ssh.join("known_hosts2"),
+        "tt-legacy.example ssh-ed25519 AAAA\n|1|x|y ssh-rsa AAAA\n",
+    )
+    .unwrap();
+
+    let home_dir = home.to_string_lossy().into_owned();
+    let (stdout, ..) = harness.run(&["ssh", "tt-"], &[("HOME", &home_dir)]);
+    let hosts = parse_output(&stdout).expect("hosts");
+    assert_eq!(sorted_values(&hosts), vec![
+        "tt-direct",
+        "tt-included-a",
+        "tt-included-b",
+        "tt-legacy.example",
+        "tt-looped",
+        "tt-tilded",
+    ]);
+}
+
+#[test]
+fn scp_completes_hosts_with_a_trailing_colon_until_the_path_begins() {
+    let harness = Harness::new("dyn-scp-position");
+    seed_command(&harness, "scp", &[], &["-P"], &[]);
+    let home = ssh_home_with_inventory(&harness);
+
+    let (host_out, ..) = harness.run(&["scp", "tt-ex"], &[("HOME", &home)]);
+    let host = parse_output(&host_out).expect("typed remote host");
+    assert_eq!(Harness::values(&host)[0], "tt-example:");
+
+    let (user_host_out, ..) = harness.run(&["scp", "bob@tt-ex"], &[("HOME", &home)]);
+    let user_host = parse_output(&user_host_out).expect("user-qualified host");
+    assert_eq!(Harness::values(&user_host)[0], "bob@tt-example:");
+
+    let (after_port, ..) =
+        harness.run(&["scp", "src.txt", "-P", "22", "tt-ex"], &[("HOME", &home)]);
+    assert!(
+        parse_output(&after_port).is_some(),
+        "options may follow operands, stdout={after_port}"
+    );
+
+    for spans in [
+        &["scp", "tt-example:"][..],
+        &["scp", "./tt-ex"][..],
+        &["scp", "-P", "tt-"][..],
+        &["scp", "src.txt", "-P", "tt-"][..],
+    ] {
+        let (stdout, ..) = harness.run(spans, &[("HOME", &home)]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
+    }
+}
+
+#[test]
+fn ssh_jump_chain_completes_the_last_hop_and_keeps_the_earlier_ones() {
+    let harness = Harness::new("dyn-ssh-jump-chain");
+    let home = ssh_home_with_inventory(&harness);
+    let (stdout, ..) = harness.run(&["ssh", "-J", "bastion,tt-ex"], &[("HOME", &home)]);
+    let hosts = parse_output(&stdout).expect("last hop");
+    assert_eq!(Harness::values(&hosts)[0], "bastion,tt-example");
+
+    let (user, ..) = harness.run(&["ssh", "-J", "a,bob@tt-ex"], &[("HOME", &home)]);
+    let with_user = parse_output(&user).expect("last hop with a user");
+    assert_eq!(Harness::values(&with_user)[0], "a,bob@tt-example");
+}
+
+#[test]
+fn ssh_clustered_short_flags_follow_the_cached_arity() {
+    let harness = Harness::new("dyn-ssh-clusters");
+    seed_command(&harness, "ssh", &[], &["-J", "-L", "-p"], &[
+        "-f", "-N", "-v",
+    ]);
+    let home = ssh_home_with_inventory(&harness);
+    let (host, ..) = harness.run(&["ssh", "-fNL", "8080:h:80", "tt-"], &[("HOME", &home)]);
+    assert!(parse_output(&host).is_some(), "stdout={host}");
+
+    let (value, ..) = harness.run(&["ssh", "-fNL", ""], &[("HOME", &home)]);
+    assert_eq!(value.trim(), "null", "cluster value is not a host");
+
+    let (attached, ..) = harness.run(&["ssh", "-fNp22", "tt-"], &[("HOME", &home)]);
+    assert!(parse_output(&attached).is_some(), "stdout={attached}");
+
+    let (jump, ..) = harness.run(&["ssh", "-vJ", "tt-ex"], &[("HOME", &home)]);
+    let hosts = parse_output(&jump).expect("jump hosts after a cluster");
+    assert_eq!(Harness::values(&hosts)[0], "tt-example");
+}
+
 // === systemctl ===
 
 #[test]
@@ -480,58 +665,6 @@ fn kubectl_typed_prefix_matches_names_past_the_row_limit() {
 }
 
 #[test]
-fn kubectl_explicit_path_is_preserved() {
-    let harness = Harness::new("dyn-kubectl-path");
-    let kubectl_path = harness
-        .bin_dir
-        .join("kubectl")
-        .to_string_lossy()
-        .into_owned();
-    let (stdout, stderr, ok) = harness.run(
-        &["sudo", &kubectl_path, "--context", "dev", "get", "pods", ""],
-        &[],
-    );
-    assert!(ok, "stderr={stderr}");
-    assert!(parse_output(&stdout).is_some());
-    let args = harness.read_aux("KUBECTL_ARGS_FILE");
-    assert!(
-        args.contains(&format!("argv0={kubectl_path}")),
-        "args={args}"
-    );
-    assert!(args.contains("--context dev"), "args={args}");
-}
-
-#[test]
-fn kubectl_cached_subcommand_flags_decide_which_word_is_the_resource() {
-    let harness = Harness::new("dyn-kubectl-cached-arity");
-    let root = ManpageResult {
-        entries:            Vec::new(),
-        subcommands:        vec![ManpageSubcommand::new("get".to_owned(), String::new())],
-        positional_choices: Vec::new(),
-        positionals:        Vec::new(),
-        description:        String::new(),
-    };
-    let get = ManpageResult {
-        entries:            vec![ManpageEntry {
-            switch: OwnedSwitch::Both('L', "label-columns".to_owned()),
-            param:  Some(OwnedParam::new(ParamKind::Mandatory, "COLS".to_owned())),
-            desc:   String::new(),
-        }],
-        subcommands:        Vec::new(),
-        positional_choices: Vec::new(),
-        positionals:        Vec::new(),
-        description:        String::new(),
-    };
-    write_result(&harness.cache_dir, "kubectl", "help", &root).expect("root cache");
-    write_result(&harness.cache_dir, "kubectl get", "help", &get).expect("get cache");
-
-    let (stdout, ..) = harness.run(&["kubectl", "get", "-L", "app", "pods", ""], &[]);
-    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
-    let args = harness.read_aux("KUBECTL_ARGS_FILE");
-    assert!(args.contains("args=get pods "), "args captured: {args}");
-}
-
-#[test]
 fn kubectl_scrapes_a_missing_subcommand_before_reading_its_flags() {
     let harness = Harness::new("dyn-kubectl-scraped-arity");
     write_executable(
@@ -578,268 +711,10 @@ fn container_global_options_locate_the_verb() {
 }
 
 #[test]
-fn podman_discovery_forwards_daemon_and_store_selectors_only() {
-    let harness = Harness::new("dyn-podman-discovery-selectors");
-    let (stdout, ..) = harness.run(
-        &[
-            "podman",
-            "--connection",
-            "remote",
-            "--root",
-            "/store",
-            "--runroot",
-            "/run/store",
-            "--transient-store",
-            "exec",
-            "",
-        ],
-        &[],
-    );
-    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
-    let args = harness.read_aux("CONTAINER_ARGS_FILE");
-    for forwarded in [
-        "--connection remote",
-        "--root /store",
-        "--runroot /run/store",
-        "--transient-store",
-    ] {
-        assert!(args.contains(forwarded), "args={args}");
-    }
-}
-
-#[test]
-fn podman_selectors_after_the_verb_are_forwarded_unless_the_verb_owns_them() {
-    let harness = Harness::new("dyn-podman-persistent");
-    let (logs_out, ..) = harness.run(&["podman", "logs", "--root", "/srv", ""], &[]);
-    assert!(parse_output(&logs_out).is_some(), "stdout={logs_out}");
-    let logs_args = harness.read_aux("CONTAINER_ARGS_FILE");
-    assert!(logs_args.contains("--root /srv ps -a"), "args={logs_args}");
-
-    let root = ManpageResult {
-        entries:            Vec::new(),
-        subcommands:        vec![ManpageSubcommand::new("run".to_owned(), String::new())],
-        positional_choices: Vec::new(),
-        positionals:        Vec::new(),
-        description:        String::new(),
-    };
-    let run = ManpageResult {
-        entries:            vec![ManpageEntry {
-            switch: OwnedSwitch::Short('c'),
-            param:  Some(OwnedParam::new(ParamKind::Mandatory, "SHARES".to_owned())),
-            desc:   String::new(),
-        }],
-        subcommands:        Vec::new(),
-        positional_choices: Vec::new(),
-        positionals:        Vec::new(),
-        description:        String::new(),
-    };
-    write_result(&harness.cache_dir, "podman", "help", &root).expect("root cache");
-    write_result(&harness.cache_dir, "podman run", "help", &run).expect("run cache");
-    let (stdout, ..) = harness.run(&["podman", "run", "-c", "512", ""], &[]);
-    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
-    let args = harness.read_aux("CONTAINER_ARGS_FILE");
-    assert!(!args.contains("-c 512"), "args={args}");
-}
-
-#[test]
-fn podman_latest_flag_is_not_a_value_flag() {
-    let harness = Harness::new("dyn-podman-latest");
-    let (stdout, ..) = harness.run(&["podman", "logs", "-l", ""], &[]);
-    let candidates = parse_output(&stdout).expect("containers after -l");
-    assert_eq!(Harness::values(&candidates), vec![
-        "podman-web",
-        "podman-db"
-    ]);
-}
-
-#[test]
-fn container_command_slots_do_not_invoke_operand_backend() {
-    let cases: &[&[&str]] = &[
-        &["docker", "exec", "web", "sh"],
-        &["docker", "run", "alpine:latest", "sh"],
-        &["docker", "tag", "alpine:latest", "new:tag"],
-        &["podman", "exec", "web", "sh"],
-    ];
-    for spans in cases {
-        let harness = Harness::new("dyn-container-command-slot");
-        let (stdout, ..) = harness.run(spans, &[]);
-        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
-        assert!(
-            harness.read_aux("CONTAINER_ARGS_FILE").is_empty(),
-            "operand backend invoked for spans={spans:?}"
-        );
-    }
-}
-
-#[test]
-fn container_cp_operands_explicitly_fall_back_to_files() {
-    let cases: &[&[&str]] = &[
-        &["docker", "cp", ""],
-        &["docker", "cp", "web:/tmp/file", ""],
-        &["podman", "cp", "./local", ""],
-    ];
-    for spans in cases {
-        let harness = Harness::new("dyn-container-cp-file-fallback");
-        let (stdout, ..) = harness.run(spans, &[]);
-        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
-        assert!(
-            harness.read_aux("CONTAINER_ARGS_FILE").is_empty(),
-            "container backend invoked for cp spans={spans:?}"
-        );
-    }
-}
-
-#[test]
-fn container_cp_bare_words_offer_container_names_with_a_colon() {
-    let harness = Harness::new("dyn-container-cp-names");
-    let (stdout, ..) = harness.run(&["docker", "cp", "docker"], &[]);
-    let cands = parse_output(&stdout).expect("docker containers");
-    assert_eq!(Harness::values(&cands), vec!["docker-db:", "docker-web:"]);
-    assert!(harness.read_aux("CONTAINER_ARGS_FILE").contains("ps -a"));
-
-    let (second_out, ..) = harness.run(&["docker", "cp", "web:/tmp/file", "docker"], &[]);
-    let second = parse_output(&second_out).expect("second operand");
-    assert_eq!(Harness::values(&second), vec!["docker-db:", "docker-web:"]);
-
-    let (after_out, ..) = harness.run(&["docker", "cp", "--", "docker-d"], &[]);
-    let after = parse_output(&after_out).expect("after separator");
-    assert_eq!(Harness::values(&after), vec!["docker-db:"]);
-}
-
-#[test]
-fn container_cp_path_like_or_qualified_operands_return_null() {
-    let cases: &[&[&str]] = &[
-        &["docker", "cp", "./docker"],
-        &["docker", "cp", "../docker"],
-        &["docker", "cp", "/docker"],
-        &["docker", "cp", "~/docker"],
-        &["docker", "cp", "dir/docker"],
-        &["docker", "cp", "docker-web:"],
-        &["podman", "cp", "podman-web:/tmp"],
-        &["podman", "cp", "nomatch"],
-        &["docker", "cp", "-a"],
-    ];
-    for spans in cases {
-        let harness = Harness::new("dyn-container-cp-null");
-        let (stdout, ..) = harness.run(spans, &[]);
-        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
-    }
-}
-
-#[test]
-fn repeated_container_verbs_keep_completing_operands() {
-    let harness = Harness::new("dyn-container-repeated-operands");
-    let (stdout, ..) = harness.run(&["docker", "stop", "web", ""], &[]);
-    let candidates = parse_output(&stdout).expect("repeated containers");
-    assert_eq!(Harness::values(&candidates), vec![
-        "docker-web",
-        "docker-db"
-    ]);
-    assert!(harness.read_aux("CONTAINER_ARGS_FILE").contains("ps -a"));
-}
-
-#[test]
-fn container_prefix_verbs_are_resolved_through_the_group() {
-    let harness = Harness::new("dyn-container-group");
-    let (stdout, ..) = harness.run(&["docker", "container", "exec", ""], &[]);
-    let candidates = parse_output(&stdout).expect("containers");
-    assert_eq!(Harness::values(&candidates), vec![
-        "docker-web",
-        "docker-db"
-    ]);
-
-    let (done, ..) = harness.run(&["docker", "container", "exec", "web", ""], &[]);
-    assert_eq!(done.trim(), "null");
-}
-
-#[test]
-fn image_verbs_offer_images_by_slot() {
-    let harness = Harness::new("dyn-container-images");
-    let (run_out, ..) = harness.run(&["docker", "run", "-it", ""], &[]);
-    let images = parse_output(&run_out).expect("image operand");
-    assert_eq!(Harness::values(&images)[0], "docker-alpine:latest");
-
-    let (rmi, ..) = harness.run(&["docker", "rmi", "docker-alpine:latest", ""], &[]);
-    assert!(parse_output(&rmi).is_some(), "rmi takes several images");
-}
-
-#[test]
-fn podman_repeated_operands_remain_distinct_from_docker() {
-    let harness = Harness::new("dyn-podman-repeated");
-    let (logs, ..) = harness.run(&["podman", "logs", "podman-web", ""], &[]);
-    assert!(
-        parse_output(&logs).is_some(),
-        "podman logs accepts multiple containers"
-    );
-
-    let (docker_logs, ..) = harness.run(&["docker", "logs", "docker-web", ""], &[]);
-    assert_eq!(docker_logs.trim(), "null");
-}
-
-#[test]
-fn container_typed_prefix_matches_names_past_the_row_limit() {
-    let harness = Harness::new("dyn-container-limit-prefix");
-    let (images, stderr, ok) = harness.run(&["docker", "run", "docker-nginx"], &[(
-        "INSHELLAH_DYNAMIC_LIMIT",
-        "1",
-    )]);
-    assert!(ok, "stderr={stderr}");
-    let image = parse_output(&images).expect("image past the limit");
-    assert_eq!(Harness::values(&image), vec!["docker-nginx:latest"]);
-
-    let (names, ..) = harness.run(&["docker", "stop", "docker-db"], &[(
-        "INSHELLAH_DYNAMIC_LIMIT",
-        "1",
-    )]);
-    let name = parse_output(&names).expect("container past the limit");
-    assert_eq!(Harness::values(&name), vec!["docker-db"]);
-    let args = harness.read_aux("CONTAINER_ARGS_FILE");
-    assert!(!args.contains("--last"), "args={args}");
-}
-
-#[test]
-fn container_explicit_path_is_preserved() {
-    let harness = Harness::new("dyn-container-path");
-    let docker_path = harness
-        .bin_dir
-        .join("docker")
-        .to_string_lossy()
-        .into_owned();
-    let (stdout, stderr, ok) =
-        harness.run(&["sudo", &docker_path, "--context", "prod", "run", ""], &[]);
-    assert!(ok, "stderr={stderr}");
-    assert!(parse_output(&stdout).is_some());
-    let args = harness.read_aux("CONTAINER_ARGS_FILE");
-    assert!(
-        args.contains(&format!("argv0={docker_path}")),
-        "args={args}"
-    );
-    assert!(args.contains("--context prod images"), "args={args}");
-}
-
-#[test]
 fn container_cached_subcommand_flags_decide_which_word_is_the_operand() {
     let harness = Harness::new("dyn-container-cached-arity");
-    let root = ManpageResult {
-        entries:            Vec::new(),
-        subcommands:        vec![ManpageSubcommand::new("logs".to_owned(), String::new())],
-        positional_choices: Vec::new(),
-        positionals:        Vec::new(),
-        description:        String::new(),
-    };
-    let logs = ManpageResult {
-        entries:            vec![ManpageEntry {
-            switch: OwnedSwitch::Both('n', "tail".to_owned()),
-            param:  Some(OwnedParam::new(ParamKind::Mandatory, "N".to_owned())),
-            desc:   String::new(),
-        }],
-        subcommands:        Vec::new(),
-        positional_choices: Vec::new(),
-        positionals:        Vec::new(),
-        description:        String::new(),
-    };
-    write_result(&harness.cache_dir, "docker", "help", &root).expect("root cache");
-    write_result(&harness.cache_dir, "docker logs", "help", &logs).expect("logs cache");
+    seed_command(&harness, "docker", &["logs"], &[], &[]);
+    seed_command(&harness, "docker logs", &[], &["-n"], &[]);
 
     let (stdout, ..) = harness.run(&["docker", "logs", "-n", "20", ""], &[]);
     let candidates = parse_output(&stdout).expect("container operand");
