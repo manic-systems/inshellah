@@ -35,8 +35,8 @@ pub fn run(args: &Args) -> io::Result<()> {
     cmd_merge(
         &args.profile,
         &sources,
-        &args.scrape.ignorelist(),
-        &args.scrape.help_only_list(),
+        &args.scrape.ignorelist()?,
+        &args.scrape.help_only_list()?,
         &args.dir,
         args.scrape.timeout_ms,
         args.scrape.workers,

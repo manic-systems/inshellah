@@ -20,10 +20,15 @@ pub struct Dirs {
 
 impl Dirs {
     pub fn resolve(self) -> Vec<PathBuf> {
-        if self.paths.is_empty() {
+        let paths: Vec<PathBuf> = self
+            .paths
+            .into_iter()
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect();
+        if paths.is_empty() {
             vec![default_store_path()]
         } else {
-            self.paths
+            paths
         }
     }
 }

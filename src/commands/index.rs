@@ -55,19 +55,27 @@ pub struct Scrape {
 }
 
 impl Scrape {
-    pub fn ignorelist(&self) -> HashSet<String> {
-        self.ignore
-            .as_deref()
-            .map(load_ignorelist)
-            .unwrap_or_default()
+    pub fn ignorelist(&self) -> io::Result<HashSet<String>> {
+        load_command_list(self.ignore.as_deref(), "--ignore")
     }
 
-    pub fn help_only_list(&self) -> HashSet<String> {
-        self.help_only
-            .as_deref()
-            .map(load_ignorelist)
-            .unwrap_or_default()
+    pub fn help_only_list(&self) -> io::Result<HashSet<String>> {
+        load_command_list(self.help_only.as_deref(), "--help-only")
     }
+}
+
+fn load_command_list(path: Option<&Path>, option: &str) -> io::Result<HashSet<String>> {
+    path.map_or_else(
+        || Ok(HashSet::new()),
+        |list| {
+            load_ignorelist(list).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("cannot read {option} file {}, {err}", list.display()),
+                )
+            })
+        },
+    )
 }
 
 #[expect(
@@ -93,8 +101,8 @@ pub fn run(args: Args) -> io::Result<()> {
     cmd_index(
         &bindirs,
         &mandirs,
-        &args.scrape.ignorelist(),
-        &args.scrape.help_only_list(),
+        &args.scrape.ignorelist()?,
+        &args.scrape.help_only_list()?,
         &args.dir,
         args.scrape.timeout_ms,
         args.scrape.workers,

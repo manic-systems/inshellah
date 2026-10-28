@@ -141,8 +141,18 @@ fn main() {
                 process::exit(1);
             }
         },
-        Cli::Manpage { file } => commands::manpage::run(&file),
-        Cli::ManpageDir { dir } => commands::manpage_dir::run(&dir),
+        Cli::Manpage { file } => {
+            if let Err(err) = commands::manpage::run(&file) {
+                eprintln!("manpage failed: {err}");
+                process::exit(1);
+            }
+        },
+        Cli::ManpageDir { dir } => {
+            if let Err(err) = commands::manpage_dir::run(&dir) {
+                eprintln!("manpage-dir failed: {err}");
+                process::exit(1);
+            }
+        },
         Cli::Complete {
             dirs,
             timeout_ms: timeout_override,

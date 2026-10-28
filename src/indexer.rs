@@ -183,17 +183,16 @@ pub fn list_manpages(mandirs: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-pub fn load_ignorelist(path: &Path) -> HashSet<String> {
-    let mut out = HashSet::new();
-    if let Ok(contents) = fs::read_to_string(path) {
-        for raw in contents.lines() {
-            let line = raw.trim();
-            if !line.is_empty() && !line.starts_with('#') {
-                out.insert(line.to_owned());
-            }
-        }
-    }
-    out
+/// # Errors
+/// fails when the list file cannot be read.
+pub fn load_ignorelist(path: &Path) -> io::Result<HashSet<String>> {
+    let contents = fs::read_to_string(path)?;
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect())
 }
 
 const NUSHELL_NATIVE_COMMANDS_FILE: &str = "nushell-native-commands";
