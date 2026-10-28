@@ -144,6 +144,7 @@
           # tokenizer instead of self-skipping when nu is absent.
           rust = mkShellCheck "inshellah-rust-check" (rustInputs ++ [ pkgs.nushell ]) rustCheckPhase;
           nushell = mkShellCheck "inshellah-nushell-check" [ pkgs.nushell ] nushellCheckPhase;
+          module-indexing = import ./nix/tests/module-indexing.nix { inherit pkgs; };
           fmt =
             pkgs.runCommand "inshellah-fmt-check"
               {
