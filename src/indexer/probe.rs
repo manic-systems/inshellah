@@ -5,7 +5,10 @@ use std::{
     borrow::Cow,
     collections::HashSet,
     fs,
-    io::Read as _,
+    io::{
+        self,
+        Read as _,
+    },
     path::{
         Path,
         PathBuf,
@@ -21,7 +24,11 @@ use crate::{
         help::help_parser,
         manpage::ManpageResult,
     },
-    subprocess::run_cmd,
+    subprocess::{
+        Run,
+        run_cmd,
+        run_cmd_ended,
+    },
 };
 
 fn is_script(path: &Path) -> bool {
@@ -219,26 +226,34 @@ pub(super) fn classify_binary(_bindir: &Path, full: &Path) -> Classify {
 
 // skips the positional `help` variant: unlikely to differ, extra spawn
 // dominates.
-fn try_help_until(bin: &Path, timeout_ms: u64, deadline: Instant) -> Option<String> {
+fn try_help_until(
+    bin: &Path,
+    timeout_ms: u64,
+    deadline: Instant,
+) -> Result<Option<String>, io::Error> {
     let bin_s = bin.to_string_lossy().to_string();
     for variant in [&["--help"][..], &["-h"][..]] {
         let attempt_ms = timeout_ms.min(remaining_ms(deadline));
         if attempt_ms == 0 {
-            return None;
+            return Ok(None);
         }
         let mut args = vec![bin_s.clone()];
         args.extend(variant.iter().map(ToString::to_string));
         let started = Instant::now();
-        if let Some(out) = run_cmd(&args, attempt_ms) {
+        let run = run_cmd_ended(&args, attempt_ms);
+        if let Run::Unspawned(err) = run {
+            return Err(err);
+        }
+        if let Some(out) = run.printed() {
             let cleaned = strip_ansi(&out);
             if !cleaned.trim().is_empty() {
-                return Some(cleaned.to_string());
+                return Ok(Some(cleaned.to_string()));
             }
         } else if timed_out(started, attempt_ms) {
-            return None;
+            return Ok(None);
         }
     }
-    None
+    Ok(None)
 }
 
 // a hung `--help` hangs on `-h` too.
@@ -246,12 +261,18 @@ fn timed_out(started: Instant, timeout_ms: u64) -> bool {
     started.elapsed() >= Duration::from_millis(timeout_ms)
 }
 
-pub fn try_help(bin: &Path, timeout_ms: u64) -> Option<String> {
+/// # Errors
+/// fails when `bin` cannot be started at all, as opposed to printing nothing.
+pub fn try_help_spawned(bin: &Path, timeout_ms: u64) -> Result<Option<String>, io::Error> {
     try_help_until(
         bin,
         timeout_ms,
         Instant::now() + Duration::from_millis(timeout_ms),
     )
+}
+
+pub fn try_help(bin: &Path, timeout_ms: u64) -> Option<String> {
+    try_help_spawned(bin, timeout_ms).ok().flatten()
 }
 
 fn is_nushell_source(text: &str) -> bool {
@@ -282,7 +303,7 @@ fn extract_matching_words(text: &str, needles: &[&str]) -> Vec<String> {
 
 pub(super) fn try_native_completion(bin: &Path, timeout_ms: u64) -> Option<String> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let help_text = try_help_until(bin, timeout_ms, deadline)?;
+    let help_text = try_help_until(bin, timeout_ms, deadline).ok().flatten()?;
     let candidates = extract_matching_words(&help_text, &["complet"]);
     let bin_s = bin.to_string_lossy().to_string();
     for sub in &candidates {
