@@ -68,6 +68,8 @@ fn install_fakes(bin_dir: &Path) {
         write_executable(bin_dir, name, FAKE_SYSTEMD);
     }
     write_executable(bin_dir, "kubectl", FAKE_KUBECTL);
+    write_executable(bin_dir, "docker", FAKE_DOCKER);
+    write_executable(bin_dir, "podman", FAKE_PODMAN);
     write_executable(bin_dir, "cargo", FAKE_CARGO);
     write_executable(bin_dir, "zig", FAKE_ZIG);
     write_executable(bin_dir, "ps", FAKE_PS);
@@ -137,12 +139,44 @@ printf ' 101 worker\n 202 database server\n'
 ";
 
 const FAKE_KUBECTL: &str = r#"#!/bin/sh
-printf '%s\n' "$*" > "$KUBECTL_ARGS_FILE"
-if [ "${1:-}" = get ] && [ "${2:-}" = deployment ]; then
-  printf 'deploy-a\n'
-elif [ "${1:-}" = get ]; then
-  printf 'pod-a\n'
-fi
+case "$*" in
+  *--no-headers*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$KUBECTL_ARGS_FILE"
+    if echo " $* " | grep -q ' get deployment '; then
+      printf 'deploy-a\n'
+    elif echo " $* " | grep -q ' --all-namespaces '; then
+      printf 'prod pod-a\ndev pod-b\n'
+    elif echo " $* " | grep -q ' get '; then
+      printf 'pod-a\npod-b\n'
+    fi
+    ;;
+esac
+"#;
+
+const FAKE_DOCKER: &str = r#"#!/bin/sh
+case " $* " in
+  *" ps "*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$CONTAINER_ARGS_FILE"
+    printf 'docker-web\tnginx:latest\ndocker-db\tpostgres:latest\n'
+    ;;
+  *" images "*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$CONTAINER_ARGS_FILE"
+    printf 'docker-alpine:latest\t5MB\ndocker-nginx:latest\t20MB\n'
+    ;;
+esac
+"#;
+
+const FAKE_PODMAN: &str = r#"#!/bin/sh
+case " $* " in
+  *" ps "*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$CONTAINER_ARGS_FILE"
+    printf 'podman-web\tquay.io/web:latest\npodman-db\tquay.io/db:latest\n'
+    ;;
+  *" images "*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$CONTAINER_ARGS_FILE"
+    printf 'podman-alpine:latest\t6MB\npodman-busybox:latest\t2MB\n'
+    ;;
+esac
 "#;
 
 const FAKE_CARGO: &str = r#"#!/bin/sh
@@ -273,6 +307,10 @@ impl Harness {
         fs::create_dir_all(&cache_dir).expect("cache dir");
         let mut aux_files = BTreeMap::new();
         aux_files.insert("KUBECTL_ARGS_FILE".into(), root.join("kubectl-args.txt"));
+        aux_files.insert(
+            "CONTAINER_ARGS_FILE".into(),
+            root.join("container-args.txt"),
+        );
         aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), root.join("git-args.txt"));
         aux_files.insert("INSHELLAH_JJ_ARGS_FILE".into(), root.join("jj-args.txt"));
         aux_files.insert("ZIG_ARGS_FILE".into(), root.join("zig-args.txt"));
@@ -859,6 +897,222 @@ fn kubectl_rollout_uses_resource_kind() {
     let (stdout, ..) = harness.run(&["kubectl", "rollout", "status", "deployment", ""], &[]);
     let cands = parse_output(&stdout).expect("rollout target");
     assert_eq!(cands[0].description, "deployment");
+}
+
+#[test]
+fn kubectl_logs_follow_flag_does_not_swallow_the_namespace() {
+    let harness = Harness::new("dyn-kubectl-logs-follow");
+    let (stdout, ..) = harness.run(&["kubectl", "logs", "-f", "-n", "prod", ""], &[]);
+    let cands = parse_output(&stdout).expect("pods");
+    assert_eq!(cands[0].value, "pod-a");
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(args.contains("-n prod"), "args captured: {args}");
+}
+
+#[test]
+fn kubectl_global_options_before_verb_preserve_scope() {
+    let harness = Harness::new("dyn-kubectl-global-options");
+    let (stdout, ..) = harness.run(
+        &[
+            "kubectl",
+            "--context",
+            "dev",
+            "-n",
+            "prod",
+            "get",
+            "pods",
+            "",
+        ],
+        &[],
+    );
+    let cands = parse_output(&stdout).expect("pods after global options");
+    assert_eq!(Harness::values(&cands), vec!["pod-a", "pod-b"]);
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(args.contains("-n prod"), "args captured: {args}");
+    assert!(args.contains("--context dev"), "args captured: {args}");
+}
+
+#[test]
+fn kubectl_cp_offers_pod_names_with_a_colon_from_the_effective_namespace() {
+    let harness = Harness::new("dyn-kubectl-cp");
+    let (stdout, ..) = harness.run(&["kubectl", "cp", "-n", "prod", "-c", "side", "pod"], &[]);
+    let cands = parse_output(&stdout).expect("pods");
+    assert_eq!(Harness::values(&cands), vec!["pod-a:", "pod-b:"]);
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(args.contains("-n prod"), "args captured: {args}");
+
+    let (filtered_out, ..) = harness.run(&["kubectl", "cp", "--namespace=dev", "pod-b"], &[]);
+    let filtered = parse_output(&filtered_out).expect("filtered pods");
+    assert_eq!(Harness::values(&filtered), vec!["pod-b:"]);
+    assert!(harness.read_aux("KUBECTL_ARGS_FILE").contains("-n dev"));
+}
+
+#[test]
+fn kubectl_cp_path_like_operands_fall_back_to_files() {
+    let cases: &[&[&str]] = &[
+        &["kubectl", "cp", ""],
+        &["kubectl", "cp", "./pod"],
+        &["kubectl", "cp", "~/pod"],
+        &["kubectl", "cp", "prod/pod"],
+        &["kubectl", "cp", "pod-a:"],
+        &["kubectl", "cp", "pod-a:/tmp"],
+        &["kubectl", "cp", "-c", "side"],
+        &["kubectl", "cp", "nomatch"],
+    ];
+    for spans in cases {
+        let harness = Harness::new("dyn-kubectl-cp-files");
+        let (stdout, ..) = harness.run(spans, &[]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
+    }
+}
+
+#[test]
+fn kubectl_wrong_slots_do_not_invoke_name_backend() {
+    let cases: &[&[&str]] = &[
+        &["kubectl", "get", "pods", "-n", "prod"],
+        &["kubectl", "get", "pod/pod-a", ""],
+        &["kubectl", "exec", "pod-a", "--", "sh"],
+        &["kubectl", "exec", "--", ""],
+        &["kubectl", "logs", "pod-a", "-c", "sidecar"],
+        &["kubectl", "port-forward", "pod-a", "8080"],
+        &["kubectl", "rollout", "status", "deployment", "deploy-a", ""],
+    ];
+    for spans in cases {
+        let harness = Harness::new("dyn-kubectl-wrong-slot");
+        let (stdout, ..) = harness.run(spans, &[]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
+        assert!(
+            harness.read_aux("KUBECTL_ARGS_FILE").is_empty(),
+            "name backend invoked for spans={spans:?}"
+        );
+    }
+}
+
+#[test]
+fn kubectl_inherited_options_and_repeated_get_names_keep_their_slots() {
+    let harness = Harness::new("dyn-kubectl-inherited-options");
+    let (stdout, ..) = harness.run(
+        &["kubectl", "get", "--context", "dev", "pods", "pod-a", ""],
+        &[],
+    );
+    let candidates = parse_output(&stdout).expect("repeated pod names");
+    assert_eq!(Harness::values(&candidates), vec!["pod-a", "pod-b"]);
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(args.contains("--context dev"), "args captured: {args}");
+
+    let (active_value, ..) = harness.run(&["kubectl", "get", "pods", "--kubeconfig", "dev"], &[]);
+    assert_eq!(active_value.trim(), "null", "option value is not a pod");
+    assert!(harness.read_aux("KUBECTL_ARGS_FILE").is_empty());
+}
+
+#[test]
+fn kubectl_namespace_scan_skips_other_option_values() {
+    let harness = Harness::new("dyn-kubectl-namespace-skip");
+    let (stdout, ..) = harness.run(
+        &["kubectl", "get", "pods", "--template", "-n", "prod", ""],
+        &[],
+    );
+    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(!args.contains(" -n "), "args captured: {args}");
+}
+
+#[test]
+fn kubectl_multi_name_verbs_keep_completing_names() {
+    for verb in ["describe", "edit", "scale", "label", "annotate"] {
+        let harness = Harness::new("dyn-kubectl-multi-name");
+        let (stdout, ..) = harness.run(&["kubectl", verb, "pods", "pod-a", ""], &[]);
+        let candidates = parse_output(&stdout).expect(verb);
+        assert_eq!(Harness::values(&candidates), vec!["pod-a", "pod-b"]);
+    }
+}
+
+#[test]
+fn kubectl_global_value_options_do_not_become_operands() {
+    let cases: &[&[&str]] = &[
+        &["kubectl", "get", "-v", "6", "pods", ""],
+        &[
+            "kubectl",
+            "get",
+            "--proxy-url",
+            "http://proxy:3128",
+            "pods",
+            "",
+        ],
+        &["kubectl", "get", "--as-user-extra", "scope=a", "pods", ""],
+        &["kubectl", "delete", "--cascade", "pods", ""],
+    ];
+    for spans in cases {
+        let harness = Harness::new("dyn-kubectl-global-values");
+        let (stdout, ..) = harness.run(spans, &[]);
+        let candidates = parse_output(&stdout).expect("pod names");
+        assert_eq!(
+            Harness::values(&candidates),
+            vec!["pod-a", "pod-b"],
+            "spans={spans:?}"
+        );
+    }
+
+    let harness = Harness::new("dyn-kubectl-forward-proxy");
+    harness.run(
+        &[
+            "kubectl",
+            "get",
+            "--proxy-url",
+            "http://proxy:3128",
+            "pods",
+            "",
+        ],
+        &[],
+    );
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(
+        args.contains("--proxy-url http://proxy:3128"),
+        "args={args}"
+    );
+}
+
+#[test]
+fn kubectl_scope_supports_short_equals_and_boolean_assignments() {
+    let harness = Harness::new("dyn-kubectl-scope-spellings");
+    let (namespace, ..) = harness.run(&["kubectl", "get", "pods", "-n=prod", ""], &[]);
+    assert!(parse_output(&namespace).is_some());
+    assert!(
+        harness.read_aux("KUBECTL_ARGS_FILE").contains("-n prod"),
+        "short namespace assignment was not forwarded"
+    );
+
+    let (all, ..) = harness.run(&["kubectl", "get", "pods", "--all-namespaces=true", ""], &[
+    ]);
+    let scoped = parse_output(&all).expect("all-namespace pods");
+    assert_eq!(Harness::values(&scoped), vec!["pod-a", "pod-b"]);
+    assert_eq!(Harness::descriptions(&scoped), vec![
+        "pods in prod",
+        "pods in dev"
+    ]);
+}
+
+#[test]
+fn kubectl_rows_are_bounded_and_explicit_path_is_preserved() {
+    let harness = Harness::new("dyn-kubectl-limit-path");
+    let kubectl_path = harness
+        .bin_dir
+        .join("kubectl")
+        .to_string_lossy()
+        .into_owned();
+    let (stdout, stderr, ok) = harness.run(
+        &["sudo", &kubectl_path, "--context", "dev", "get", "pods", ""],
+        &[("INSHELLAH_DYNAMIC_LIMIT", "1")],
+    );
+    assert!(ok, "stderr={stderr}");
+    let candidates = parse_output(&stdout).expect("bounded pods");
+    assert_eq!(candidates.len(), 1);
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(
+        args.contains(&format!("argv0={kubectl_path}")),
+        "args={args}"
+    );
+    assert!(args.contains("--context dev"), "args={args}");
 }
 
 // === cargo ===

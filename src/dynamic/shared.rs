@@ -75,7 +75,7 @@ impl<'span> Words<'span> {
             } else if word == "--" {
                 after_dashes = true;
             } else if let Some((flag, value)) = word.split_once('=')
-                && flag.starts_with("--")
+                && (flag.starts_with("--") || flag.len() == 2)
             {
                 flags.push((flag, Some(value)));
             } else {
