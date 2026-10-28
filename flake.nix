@@ -50,15 +50,7 @@
       checks = forAllSystems (
         pkgs:
         let
-          checkSrc = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            filter =
-              path: type:
-              let
-                base = baseNameOf path;
-              in
-              !(type == "directory" && (base == ".git" || base == "target"));
-          };
+          checkSrc = import ./nix/src.nix pkgs.lib;
           cargoDeps = pkgs.rustPlatform.importCargoLock { lockFile = ./Cargo.lock; };
           rustInputs = with pkgs; [
             cargo
@@ -144,9 +136,10 @@
           # tokenizer instead of self-skipping when nu is absent.
           rust = mkShellCheck "inshellah-rust-check" (rustInputs ++ [ pkgs.nushell ]) rustCheckPhase;
           nushell = mkShellCheck "inshellah-nushell-check" [ pkgs.nushell ] nushellCheckPhase;
+          package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         in
         {
-          inherit rust nushell;
+          inherit rust nushell package;
           module-indexing = import ./nix/tests/module-indexing.nix { inherit pkgs; };
           module-cross = import ./nix/tests/module-cross.nix { inherit pkgs; };
           fmt =
@@ -169,7 +162,7 @@
                 find . -name '*.nix' -exec nixfmt --check {} +
                 touch $out
               '';
-          default = pkgs.linkFarm "inshellah-check" { inherit rust nushell; };
+          default = pkgs.linkFarm "inshellah-check" { inherit rust nushell package; };
         }
       );
 
