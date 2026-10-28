@@ -4,10 +4,7 @@
 pub mod probe;
 
 use std::{
-    cell::{
-        Cell,
-        RefCell,
-    },
+    cell::Cell,
     collections::{
         HashMap,
         HashSet,
@@ -90,7 +87,10 @@ use crate::{
         write_native,
         write_result,
     },
-    subprocess::run_cmd,
+    subprocess::{
+        check_scrape_cwd,
+        run_cmd,
+    },
 };
 
 const COMMAND_SECTIONS: &[u8] = &[1, 8];
@@ -188,30 +188,47 @@ pub fn list_manpages(mandirs: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-pub fn load_ignorelist(path: &Path) -> HashSet<String> {
-    let mut out = HashSet::new();
-    if let Ok(contents) = fs::read_to_string(path) {
-        for raw in contents.lines() {
-            let line = raw.trim();
-            if !line.is_empty() && !line.starts_with('#') {
-                out.insert(line.to_owned());
-            }
-        }
-    }
-    out
+/// # Errors
+/// fails when the list file cannot be read.
+pub fn load_ignorelist(path: &Path) -> io::Result<HashSet<String>> {
+    let contents = fs::read_to_string(path)?;
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect())
 }
 
 // one call that fails the whole index, and cross builds run `nu` under qemu.
 const NUSHELL_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
 
+/// a prefix without a bin dir is valid, as with man-only packages.
+///
+/// # Errors
+///
+/// fails when `bin` exists but cannot be listed.
+pub fn read_bin_dir(bin: &Path) -> io::Result<Option<fs::ReadDir>> {
+    match fs::read_dir(bin) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => {
+            Err(io::Error::new(
+                err.kind(),
+                format!("cannot read bin dir {}, {err}", bin.display()),
+            ))
+        },
+    }
+}
+
 fn list_binaries(
     bindirs: &[PathBuf],
     nushell_commands: &HashSet<String>,
-) -> Vec<(String, PathBuf)> {
+) -> io::Result<Vec<(String, PathBuf)>> {
     let mut all: Vec<(String, PathBuf)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for bd in bindirs {
-        let Ok(entries) = fs::read_dir(bd) else {
+        let Some(entries) = read_bin_dir(bd)? else {
             continue;
         };
         for entry in entries.flatten() {
@@ -231,7 +248,7 @@ fn list_binaries(
         }
     }
     all.sort_by(|left, right| left.0.cmp(&right.0));
-    all
+    Ok(all)
 }
 
 fn discover_nushell_native_commands() -> io::Result<HashSet<String>> {
@@ -468,7 +485,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
         }),
         timed_out:    Cell::new(false),
         echoed:       Cell::new(false),
-        unspawned:    RefCell::new(None),
+        unspawned:    Cell::new(None),
     };
 
     // classify only at top level
@@ -477,10 +494,13 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
     }
 
     let outcome = resolve_one(&probe, &job.base_cmd, &job.sub_args);
-    if let Some(err) = probe.unspawned.take()
-        && is_root
-    {
-        note_unexecutable(&job.base_cmd, &job.bin_path, &err);
+    if probe.unspawned.take().is_some() && is_root {
+        note_unexecutable(&job.base_cmd, &job.bin_path);
+        if let Some(identity) = ExeIdentity::of(&job.bin_path)
+            && let Err(err) = write_exe(&ctx.cache_dir, &job.base_cmd, &identity)
+        {
+            ctx.record_write(job.base_cmd.clone(), Err(err));
+        }
         ctx.unexecutable
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -548,11 +568,12 @@ pub fn cmd_index<S>(
 where
     S: BuildHasher,
 {
+    check_scrape_cwd()?;
     ensure_dir(dir)?;
     sweep_stale_temp_files(dir);
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
-    let binaries = list_binaries(bindirs, &nushell_commands);
+    let binaries = list_binaries(bindirs, &nushell_commands)?;
     let profile = ProfileBinaries::new(&binaries, ignorelist);
     let scraped = ScrapeCtx::new(dir, mandirs, help_only, timeout_ms)
         .scrape(profile.paths.iter(), num_workers)?;
@@ -583,16 +604,7 @@ fn validate_merge_inputs(profile_dir: &Path) -> io::Result<()> {
             format!("profile {} is not a directory", profile_dir.display()),
         ));
     }
-    let bin = profile_dir.join("bin");
-    match fs::read_dir(&bin) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => {
-            Err(io::Error::new(
-                err.kind(),
-                format!("cannot read profile bin {}, {err}", bin.display()),
-            ))
-        },
-        _ => Ok(()),
-    }
+    read_bin_dir(&profile_dir.join("bin")).map(drop)
 }
 
 fn resolve_merge_sources(sources: &[(PathBuf, PathBuf)]) -> io::Result<Vec<(PathBuf, &Path)>> {
@@ -619,6 +631,14 @@ struct Candidate<'src> {
     root:  String,
 }
 
+fn owning_index_of_root<'src>(
+    profile: &ProfileBinaries,
+    root: &str,
+    sources: &[(PathBuf, &'src Path)],
+) -> Option<&'src Path> {
+    owning_index(profile.paths.get(root)?, sources)
+}
+
 /// the index of the first package the symlink chain from `start` enters.
 ///
 /// canonicalizing would jump to the end of the chain, past a wrapper package
@@ -640,37 +660,10 @@ fn owning_index<'src>(start: &Path, sources: &[(PathBuf, &'src Path)]) -> Option
     None
 }
 
-/// each command's files come from the package owning the profile's binary for
-/// its root, else from the first source that has them.
-///
 /// # Errors
 ///
-/// fails when an input cannot be read, the cache dir, `nu` discovery, a copy,
-/// or a cache write fails.
-pub fn cmd_merge<S>(
-    profile_dir: &Path,
-    sources: &[(PathBuf, PathBuf)],
-    ignorelist: &HashSet<String, S>,
-    help_only: &HashSet<String, S>,
-    dir: &Path,
-    timeout_ms: u64,
-    num_workers: usize,
-) -> io::Result<()>
-where
-    S: BuildHasher,
-{
-    validate_merge_inputs(profile_dir)?;
-    let resolved_sources = resolve_merge_sources(sources)?;
-    ensure_dir(dir)?;
-    sweep_stale_temp_files(dir);
-    let nushell_commands = discover_nushell_native_commands()?;
-    write_nushell_native_commands(dir, &nushell_commands)?;
-    let binaries = list_binaries(&[profile_dir.join("bin")], &nushell_commands);
-    let profile = ProfileBinaries::new(&binaries, ignorelist);
-    let mandirs = [profile_dir.join("share/man")];
-
-    let owner_of = |root: &str| owning_index(profile.paths.get(root)?, &resolved_sources);
-
+/// fails when a source index cannot be listed.
+fn collect_candidates(sources: &[(PathBuf, PathBuf)]) -> io::Result<Vec<Candidate<'_>>> {
     let mut candidates = Vec::<Candidate>::new();
     let mut seen = HashSet::<&PathBuf>::new();
 
@@ -707,6 +700,42 @@ where
             });
         }
     }
+    Ok(candidates)
+}
+
+/// each command's files come from the package owning the profile's binary for
+/// its root, else from the first source that has them.
+///
+/// # Errors
+///
+/// fails when an input cannot be read, the cache dir, `nu` discovery, a copy,
+/// or a cache write fails.
+pub fn cmd_merge<S>(
+    profile_dir: &Path,
+    sources: &[(PathBuf, PathBuf)],
+    ignorelist: &HashSet<String, S>,
+    help_only: &HashSet<String, S>,
+    dir: &Path,
+    timeout_ms: u64,
+    num_workers: usize,
+) -> io::Result<()>
+where
+    S: BuildHasher,
+{
+    check_scrape_cwd()?;
+    validate_merge_inputs(profile_dir)?;
+    let resolved_sources = resolve_merge_sources(sources)?;
+    ensure_dir(dir)?;
+    sweep_stale_temp_files(dir);
+    let nushell_commands = discover_nushell_native_commands()?;
+    write_nushell_native_commands(dir, &nushell_commands)?;
+    let binaries = list_binaries(&[profile_dir.join("bin")], &nushell_commands)?;
+    let profile = ProfileBinaries::new(&binaries, ignorelist);
+    let mandirs = [profile_dir.join("share/man")];
+
+    let mut owners = HashMap::<&str, Option<&Path>>::new();
+
+    let candidates = collect_candidates(sources)?;
 
     let mut claimed = HashMap::<&str, &Path>::new();
     let mut rooted = HashSet::<(&Path, &str)>::new();
@@ -719,7 +748,10 @@ where
     let mut owned = Vec::<&Candidate>::new();
     for candidate in &candidates {
         let root = candidate.root.as_str();
-        let chosen = owner_of(root)
+        let owned_by = *owners
+            .entry(root)
+            .or_insert_with(|| owning_index_of_root(&profile, root, &resolved_sources));
+        let chosen = owned_by
             .filter(|owner| rooted.contains(&(*owner, root)))
             .or_else(|| claimed.get(root).copied());
         if chosen == Some(candidate.index.as_path()) {
@@ -913,6 +945,19 @@ impl ProfileBinaries {
     }
 }
 
+/// a root that failed to spawn during the scrape would fail again here.
+fn help_target(
+    binary_paths: &HashMap<String, PathBuf>,
+    unexecutable: &HashSet<String>,
+    name: &str,
+) -> Option<(PathBuf, Vec<String>)> {
+    let (base_cmd, sub_args) = split_command_for_binary(name)?;
+    if unexecutable.contains(base_cmd) {
+        return None;
+    }
+    Some((binary_paths.get(base_cmd)?.clone(), sub_args))
+}
+
 struct ManpagePass<'pass, S> {
     dir:              &'pass Path,
     mandirs:          &'pass [PathBuf],
@@ -957,10 +1002,7 @@ where
         // serial and in sort order so dedupe and overwrites match a sequential
         // pass.
         let mut plan = WritePlan::default();
-        let help_for = |name: &str| {
-            let (base_cmd, sub_args) = split_command_for_binary(name)?;
-            Some((binary_paths.get(base_cmd)?.clone(), sub_args))
-        };
+        let help_for = |name: &str| help_target(binary_paths, unexecutable, name);
 
         for (manpage_path, processed) in manpages.iter().zip(processed_pages) {
             let Some((name, result, sub_sections)) = processed else {
@@ -996,29 +1038,23 @@ where
                 }
                 continue;
             }
-            if help_only_contains_command_or_ancestor(help_only, &name) {
-                continue;
-            }
-            if nushell_commands.contains(&name) {
-                continue;
-            }
             indexed.insert(name.clone());
             plan.push(PlannedWrite {
                 help: help_for(&name),
-                noted: unexecutable.contains(&name),
                 stubs: sub_sections.is_empty(),
                 name,
                 result,
                 duplicates: Vec::new(),
             });
             for (sub_cmd, sub_result) in sub_sections {
-                if indexed.contains(&sub_cmd) {
+                if indexed.contains(&sub_cmd)
+                    || help_only_contains_command_or_ancestor(help_only, &sub_cmd)
+                {
                     continue;
                 }
                 indexed.insert(sub_cmd.clone());
                 plan.push(PlannedWrite {
                     help:       help_for(&sub_cmd),
-                    noted:      false,
                     stubs:      false,
                     name:       sub_cmd,
                     result:     sub_result,
@@ -1106,9 +1142,10 @@ fn run_help(path: &Path, sub_args: &[String], timeout_ms: u64) -> io::Result<Opt
     }
 }
 
-fn note_unexecutable(cmd: &str, bin: &Path, err: &io::Error) {
+fn note_unexecutable(cmd: &str, bin: &Path) {
     eprintln!(
-        "note: cannot execute {cmd} at {}, its --help was not read, {err}",
+        "note: {cmd} at {} could not be started, for example for a missing interpreter or a \
+         foreign platform, its --help was not read",
         bin.display()
     );
 }
@@ -1388,7 +1425,6 @@ struct PlannedWrite {
     name:       String,
     result:     ManpageResult,
     help:       Option<(PathBuf, Vec<String>)>,
-    noted:      bool,
     stubs:      bool,
     duplicates: Vec<ManpageResult>,
 }
@@ -1422,8 +1458,8 @@ impl PlannedWrite {
                 {
                     source = String::from("manpage+help");
                 },
-                Err(err) if sub_args.is_empty() && !self.noted => {
-                    note_unexecutable(&self.name, path, &err);
+                Err(_) if sub_args.is_empty() => {
+                    note_unexecutable(&self.name, path);
                 },
                 Ok(_) | Err(_) => {},
             }
@@ -1484,7 +1520,7 @@ struct RealProbe<'probe> {
     root_help:    Cell<Option<u64>>,
     timed_out:    Cell<bool>,
     echoed:       Cell<bool>,
-    unspawned:    RefCell<Option<io::Error>>,
+    unspawned:    Cell<Option<io::Error>>,
 }
 
 impl RealProbe<'_> {
@@ -1506,7 +1542,7 @@ impl RealProbe<'_> {
                 return None;
             },
             Err(err) => {
-                *self.unspawned.borrow_mut() = Some(err);
+                self.unspawned.set(Some(err));
                 return None;
             },
         };
@@ -1606,7 +1642,7 @@ pub fn resolve_command_path_and_cache(
         root_help: Cell::new(None),
         timed_out: Cell::new(false),
         echoed: Cell::new(false),
-        unspawned: RefCell::new(None),
+        unspawned: Cell::new(None),
     };
     let full = resolver::full_cmd(base_cmd, sub_args);
     let with_exe = |written: io::Result<()>| -> io::Result<()> {
@@ -1724,6 +1760,20 @@ mod tests {
             "cargo build"
         ));
         assert!(!help_only_contains_command_or_ancestor(&commands, "github"));
+    }
+
+    #[test]
+    fn help_is_not_rerun_for_roots_that_failed_to_spawn() {
+        let paths = HashMap::from([
+            ("good".to_owned(), PathBuf::from("/bin/good")),
+            ("bad".to_owned(), PathBuf::from("/bin/bad")),
+        ]);
+        let unexecutable = HashSet::from(["bad".to_owned()]);
+
+        assert!(help_target(&paths, &unexecutable, "good").is_some());
+        assert!(help_target(&paths, &unexecutable, "good sub").is_some());
+        assert!(help_target(&paths, &unexecutable, "bad").is_none());
+        assert!(help_target(&paths, &unexecutable, "bad sub").is_none());
     }
 
     #[test]

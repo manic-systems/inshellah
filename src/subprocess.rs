@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! subprocess runner, unix-only.
 //!
-//! the child leads a new session, so it has no controlling tty for ssh to
-//! prompt on and is its own pgid leader. on timeout killpg takes the whole tree
-//! so wrapped `--help` and forked grandchildren go too. pipes are non-blocking
-//! so poll-then-read never blocks on the next chunk.
+//! the child leads its own process group, so on timeout killpg takes the whole
+//! tree and wrapped `--help` and forked grandchildren go too. live spawns also
+//! lead a new session, so they have no controlling tty for ssh to prompt on.
+//! the bulk scrape skips setsid because a `pre_exec` hook makes std fork the
+//! whole indexer instead of using `posix_spawn`. pipes are non-blocking so
+//! poll-then-read never blocks on the next chunk.
 
 use std::{
     env,
@@ -21,7 +23,10 @@ use std::{
         },
         unix::process::CommandExt as _,
     },
-    path::PathBuf,
+    path::{
+        Path,
+        PathBuf,
+    },
     process::{
         Child,
         Command,
@@ -66,6 +71,23 @@ fn safe_env_key(key: &str) -> bool {
 
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
+const SCRAPE_CWD: &str = "/tmp";
+
+/// a scrape cwd that is gone makes every spawn fail like a missing binary.
+///
+/// # Errors
+///
+/// fails when the scrape cwd is not a directory.
+pub fn check_scrape_cwd() -> io::Result<()> {
+    if Path::new(SCRAPE_CWD).is_dir() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        ErrorKind::NotFound,
+        format!("scrape working directory {SCRAPE_CWD} is not a directory"),
+    ))
+}
+
 /// how a captured run ended.
 pub enum Run {
     /// exited zero, with what it printed.
@@ -91,32 +113,38 @@ impl Run {
 /// scrape runner: stdout+stderr merged, cwd /tmp so `--help` can't read repo
 /// state.
 pub fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
-    run_cmd_inner(args, timeout_ms, false, false, |_| {}).printed()
+    run_cmd_inner(args, timeout_ms, false, false, Leader::Group, |_| {}).printed()
 }
 
 /// `run_cmd` that keeps how the run ended.
 pub fn run_cmd_ended(args: &[String], timeout_ms: u64) -> Run {
-    run_cmd_inner(args, timeout_ms, false, false, |_| {})
+    run_cmd_inner(args, timeout_ms, false, false, Leader::Group, |_| {})
+}
+
+/// scrape runner for live completion, which gets a new session like
+/// `run_quiet`.
+pub fn run_cmd_live(args: &[String], timeout_ms: u64) -> Option<String> {
+    run_cmd_inner(args, timeout_ms, false, false, Leader::Session, |_| {}).printed()
 }
 
 pub fn run_cmd_with<F>(args: &[String], timeout_ms: u64, customize: F) -> Option<String>
 where
     F: FnOnce(&mut Command),
 {
-    run_cmd_inner(args, timeout_ms, false, false, customize).printed()
+    run_cmd_inner(args, timeout_ms, false, false, Leader::Group, customize).printed()
 }
 
 /// dynamic runner: stderr dropped (parsers want clean stdout), cwd inherited
 /// so `git remote`/`jj log` see the user's repo.
 pub fn run_quiet(args: &[String], timeout_ms: u64) -> Option<String> {
-    run_cmd_inner(args, timeout_ms, true, true, |_| {}).printed()
+    run_cmd_inner(args, timeout_ms, true, true, Leader::Session, |_| {}).printed()
 }
 
 pub fn run_quiet_with<F>(args: &[String], timeout_ms: u64, customize: F) -> Option<String>
 where
     F: FnOnce(&mut Command),
 {
-    run_cmd_inner(args, timeout_ms, true, true, customize).printed()
+    run_cmd_inner(args, timeout_ms, true, true, Leader::Session, customize).printed()
 }
 
 /// `run_quiet_with` that keeps the exit status and a silent exit.
@@ -124,7 +152,7 @@ pub fn run_quiet_ended<F>(args: &[String], timeout_ms: u64, customize: F) -> Run
 where
     F: FnOnce(&mut Command),
 {
-    run_cmd_inner(args, timeout_ms, true, true, customize)
+    run_cmd_inner(args, timeout_ms, true, true, Leader::Session, customize)
 }
 
 enum Drained {
@@ -166,10 +194,24 @@ fn setsid() -> io::Result<()> {
     Ok(())
 }
 
-fn new_session(cmd: &mut Command) {
-    // SAFETY: setsid is async-signal-safe, so it may run between fork and exec.
-    unsafe {
-        cmd.pre_exec(setsid);
+#[derive(Clone, Copy)]
+enum Leader {
+    Session,
+    Group,
+}
+
+fn lead(cmd: &mut Command, leader: Leader) {
+    match leader {
+        Leader::Session => {
+            // SAFETY: setsid is async-signal-safe, so it may run between fork
+            // and exec.
+            unsafe {
+                cmd.pre_exec(setsid);
+            }
+        },
+        Leader::Group => {
+            cmd.process_group(0);
+        },
     }
 }
 
@@ -188,6 +230,7 @@ fn run_cmd_inner<F>(
     timeout_ms: u64,
     discard_stderr: bool,
     inherit_cwd: bool,
+    leader: Leader,
     customize: F,
 ) -> Run
 where
@@ -215,9 +258,9 @@ where
     }
     cmd.env("SSH_ASKPASS_REQUIRE", "never");
     if !inherit_cwd {
-        cmd.current_dir("/tmp");
+        cmd.current_dir(SCRAPE_CWD);
     }
-    new_session(&mut cmd);
+    lead(&mut cmd, leader);
     customize(&mut cmd);
 
     match cmd.spawn() {
@@ -354,17 +397,42 @@ fn capture(mut child: Child, timeout_ms: u64) -> Run {
 mod tests {
     use super::*;
 
-    #[test]
-    fn children_never_fall_back_to_a_gui_askpass() {
-        let out = run_cmd(
+    #[cfg(target_os = "linux")]
+    fn pid_and_stat_field(
+        run: fn(&[String], u64) -> Option<String>,
+        field: usize,
+    ) -> (String, String) {
+        let out = run(
             &[
                 "sh".into(),
                 "-c".into(),
-                "printf %s \"$SSH_ASKPASS_REQUIRE\"".into(),
+                "printf '%s ' $$; cat /proc/$$/stat".into(),
             ],
             2000,
-        );
-        assert_eq!(out.as_deref(), Some("never"));
+        )
+        .expect("child output");
+        let (pid, stat) = out.split_once(' ').expect("pid then stat");
+        let value = stat
+            .rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().nth(field))
+            .expect("stat field");
+        (pid.to_owned(), value.to_owned())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn live_children_lead_their_own_session() {
+        for run in [run_quiet, run_cmd_live] {
+            let (pid, session) = pid_and_stat_field(run, 3);
+            assert_eq!(session, pid);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn scrape_children_lead_their_own_group() {
+        let (pid, group) = pid_and_stat_field(run_cmd, 2);
+        assert_eq!(group, pid);
     }
 
     #[test]

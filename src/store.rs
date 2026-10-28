@@ -539,8 +539,10 @@ pub fn sweep_stale_temp_files(dir: &Path) {
 /// drops temp files left by killed writers, never real cache files.
 ///
 /// the cache dir can sit on a filesystem shared across hosts, where a writer's
-/// pid means nothing here. `write_file` creates, writes and renames within one
-/// call, so a temp file older than `STALE_TEMP_AGE` has no live writer.
+/// pid means nothing here, so only age is judged. `write_file` creates, writes
+/// and renames within one call, so a temp file older than `STALE_TEMP_AGE` has
+/// no live writer unless a server stamps mtimes from a clock more than that
+/// far behind ours.
 ///
 /// # Errors
 /// fails when `dir` exists but cannot be listed, or a stale file cannot be
@@ -940,6 +942,7 @@ pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::{
+        os::unix::fs::PermissionsExt as _,
         slice,
         time::UNIX_EPOCH,
     };
@@ -1020,8 +1023,8 @@ mod tests {
     }
 
     #[test]
-    fn stale_temp_sweep_skips_directories_and_survives_per_file_failures() {
-        let scratch = ScratchDir::new("stale-temp-failures");
+    fn stale_temp_sweep_skips_directories_named_like_temp_files() {
+        let scratch = ScratchDir::new("stale-temp-dirs");
         let dir = &scratch.0;
         let name = filename_of_command("demo");
         let impostor = dir.join(format!(".{name}.json.99999999.0.tmp"));
@@ -1036,6 +1039,47 @@ mod tests {
         remove_stale_temp_files(dir).unwrap();
         assert!(impostor.is_dir());
         assert!(!stale.exists());
+    }
+
+    struct ReadOnlyDir<'dir>(&'dir Path);
+
+    impl Drop for ReadOnlyDir<'_> {
+        fn drop(&mut self) {
+            drop(fs::set_permissions(
+                self.0,
+                fs::Permissions::from_mode(0o755),
+            ));
+        }
+    }
+
+    #[test]
+    fn stale_temp_sweep_names_every_file_it_cannot_remove() {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let scratch = ScratchDir::new("stale-temp-unremovable");
+        let dir = &scratch.0;
+        let name = filename_of_command("demo");
+        let stale = [1, 2].map(|seq| dir.join(format!(".{name}.json.99999999.{seq}.tmp")));
+        let old = SystemTime::now() - STALE_TEMP_AGE - Duration::from_mins(1);
+        for path in &stale {
+            fs::write(path, "partial").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let _restore = ReadOnlyDir(dir);
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = remove_stale_temp_files(dir).unwrap_err().to_string();
+        for path in &stale {
+            assert!(err.contains(&path.display().to_string()), "error = {err}");
+            assert!(path.exists());
+        }
     }
 
     #[test]

@@ -298,7 +298,7 @@ pub fn run(args: &[String], ctx: &DynCtx) -> Option<String> {
 /// scrape runner (cwd /tmp) for providers reading tool output, not repo state.
 /// adb's `devices`/`pm list` must not inherit the user's cwd.
 pub fn run_scrape(args: &[String], ctx: &DynCtx) -> Option<String> {
-    subprocess::run_cmd(args, ctx.ms_left())
+    subprocess::run_cmd_live(args, ctx.ms_left())
 }
 
 pub fn run_with<F>(args: &[String], ctx: &DynCtx, customize: F) -> Option<String>

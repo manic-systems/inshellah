@@ -25,6 +25,7 @@ use inshellah::{
 use super::complete::mandirs_with_bin_prefix;
 
 pub fn purge(user_dir: &Path, cmds: &[String]) -> io::Result<()> {
+    sweep_stale_temp_files(user_dir);
     if cmds.is_empty() {
         let removed = purge_dir(user_dir)?;
         println!(

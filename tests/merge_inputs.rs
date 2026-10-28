@@ -23,6 +23,7 @@ use inshellah::{
     parsers::manpage::ManpageResult,
     store::{
         filename_of_command,
+        read_exe,
         write_result,
     },
 };
@@ -198,6 +199,28 @@ fn merge_with_unreadable_inputs_fails_and_keeps_the_live_index() {
 }
 
 #[test]
+fn merge_names_a_missing_sources_file() {
+    let fixture = Fixture::new("inshellah-merge-missing-sources");
+    let missing = fixture.root.join("no-such-sources");
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("merge")
+        .arg(&fixture.profile)
+        .arg("--dir")
+        .arg(&fixture.cache)
+        .arg("--sources")
+        .arg(&missing)
+        .env("PATH", &fixture.tools)
+        .output()
+        .expect("run merge");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr = {stderr}");
+    assert!(
+        stderr.contains(&missing.display().to_string()),
+        "stderr = {stderr}"
+    );
+}
+
+#[test]
 fn merge_picks_the_first_package_the_link_chain_enters() {
     let fixture = Fixture::new("inshellah-merge-wrapper-owner");
     let package_b = fixture.package("package-b");
@@ -243,5 +266,48 @@ fn merge_keeps_the_package_entry_when_the_profile_binary_cannot_execute() {
         "cache = {merged}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("cannot execute demo"), "stderr = {stderr}");
+    assert!(stderr.contains("could not be started"), "stderr = {stderr}");
+    assert!(
+        read_exe(&fixture.cache, "demo").is_some(),
+        "the unrunnable binary still gets its identity recorded"
+    );
+}
+
+#[test]
+fn merge_rescrapes_wrappers_when_given_relative_paths() {
+    let fixture = Fixture::new("inshellah-merge-relative");
+    let package = fixture.root.join("package");
+    write_script(
+        &package.join("bin"),
+        "demo",
+        "#!/bin/sh\nprintf 'Usage: demo [OPTIONS]\\n\\nOptions:\\n  -v, --verbose  be loud\\n'\n",
+    );
+    symlink(package.join("bin/demo"), fixture.profile.join("bin/demo")).expect("profile link");
+    let man1 = fixture.profile.join("share/man/man1");
+    fs::create_dir_all(&man1).expect("man dir");
+    fs::write(
+        man1.join("demo.1"),
+        ".TH DEMO 1\n.SH NAME\ndemo \\- a demo\n.SH OPTIONS\n.TP\n\\fB\\-\\-flag\\fR\na flag\n",
+    )
+    .expect("manpage");
+    write_result(
+        &fixture.root.join("source-index"),
+        "demo",
+        "help",
+        &described("from the package index"),
+    )
+    .expect("source index");
+
+    let output = fixture.merge(Path::new("profile"), "package source-index\n");
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("could not be started"),
+        "stderr = {stderr}"
+    );
+    let merged = fixture.merged().expect("merged cache");
+    assert!(
+        !merged.contains("from the package index"),
+        "cache = {merged}"
+    );
 }

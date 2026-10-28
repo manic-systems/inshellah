@@ -119,6 +119,17 @@ enum Cli {
     Completions,
 }
 
+#[expect(
+    clippy::exit,
+    reason = "an invalid --dir is a usage error, reported without a subcommand prefix"
+)]
+fn resolve_dirs(dirs: Dirs) -> Vec<PathBuf> {
+    dirs.resolve().unwrap_or_else(|err| {
+        eprintln!("error: {err}");
+        process::exit(1);
+    })
+}
+
 fn main() {
     // rust ignores SIGPIPE, so a broken-pipe write becomes a BrokenPipe error
     // that `println!` panics on. restore the default so piping into `head`
@@ -141,8 +152,18 @@ fn main() {
                 process::exit(1);
             }
         },
-        Cli::Manpage { file } => commands::manpage::run(&file),
-        Cli::ManpageDir { dir } => commands::manpage_dir::run(&dir),
+        Cli::Manpage { file } => {
+            if let Err(err) = commands::manpage::run(&file) {
+                eprintln!("manpage failed: {err}");
+                process::exit(1);
+            }
+        },
+        Cli::ManpageDir { dir } => {
+            if let Err(err) = commands::manpage_dir::run(&dir) {
+                eprintln!("manpage-dir failed: {err}");
+                process::exit(1);
+            }
+        },
         Cli::Complete {
             dirs,
             timeout_ms: timeout_override,
@@ -151,7 +172,7 @@ fn main() {
             let cfg = Config::from_env();
             let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
             let (user_dir, system_dirs) =
-                commands::complete::default_user_dir_and_system_dirs(dirs.resolve());
+                commands::complete::default_user_dir_and_system_dirs(dirs.resolve_lenient());
             let mandirs = commands::complete::mandirs_for_system_dirs(&system_dirs);
             if let Err(err) =
                 commands::complete::run(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
@@ -168,7 +189,7 @@ fn main() {
             let cfg = Config::from_env();
             let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
             let (user_dir, system_dirs) =
-                commands::complete::default_user_dir_and_system_dirs(dirs.resolve());
+                commands::complete::default_user_dir_and_system_dirs(dirs.resolve_lenient());
             let mandirs = commands::complete::mandirs_for_system_dirs(&system_dirs);
             if let Err(err) =
                 commands::explain::run(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
@@ -178,12 +199,12 @@ fn main() {
             }
         },
         Cli::Query { dirs, cmd } => {
-            if let Err(err) = commands::query::run(&cmd.join(" "), &dirs.resolve()) {
+            if let Err(err) = commands::query::run(&cmd.join(" "), &resolve_dirs(dirs)) {
                 eprintln!("{err}");
                 process::exit(1);
             }
         },
-        Cli::Dump { dirs } => commands::dump::run(&dirs.resolve()),
+        Cli::Dump { dirs } => commands::dump::run(&resolve_dirs(dirs)),
         Cli::Diff {
             scan,
             dir,
@@ -191,19 +212,18 @@ fn main() {
             cmd,
         } => {
             let timeout_ms = timeout_override.unwrap_or_else(|| Config::from_env().timeout_ms);
-            match scan {
-                Some(prefix) => commands::diff::run_scan(&prefix, timeout_ms),
-                None => {
-                    if let Err(err) = commands::diff::run(&cmd, &dir, timeout_ms) {
-                        eprintln!("error: {err}");
-                        process::exit(1);
-                    }
-                },
+            let result = scan.map_or_else(
+                || commands::diff::run(&cmd, &dir, timeout_ms),
+                |prefix| commands::diff::run_scan(&prefix, timeout_ms),
+            );
+            if let Err(err) = result {
+                eprintln!("error: {err}");
+                process::exit(1);
             }
         },
         Cli::Purge { dirs, cmd } => {
             // only the writable user dir is purged, never the system overlays
-            let mut resolved = dirs.resolve();
+            let mut resolved = resolve_dirs(dirs);
             if let Err(err) = commands::cache::purge(&resolved.swap_remove(0), &cmd) {
                 eprintln!("purge failed: {err}");
                 process::exit(1);
@@ -216,7 +236,7 @@ fn main() {
         } => {
             let timeout_ms = timeout_override.unwrap_or_else(|| Config::from_env().timeout_ms);
             let (user_dir, system_dirs) =
-                commands::complete::default_user_dir_and_system_dirs(dirs.resolve());
+                commands::complete::default_user_dir_and_system_dirs(resolve_dirs(dirs));
             let mandirs = commands::complete::mandirs_for_system_dirs(&system_dirs);
             if let Err(err) = commands::cache::refresh(&user_dir, &mandirs, &cmd, timeout_ms) {
                 eprintln!("refresh failed: {err}");
