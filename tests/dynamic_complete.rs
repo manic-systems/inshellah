@@ -71,6 +71,8 @@ fn install_fakes(bin_dir: &Path) {
     write_executable(bin_dir, "nix", FAKE_NIX);
     write_executable(bin_dir, "systemctl", FAKE_SYSTEMCTL);
     write_executable(bin_dir, "kubectl", FAKE_KUBECTL);
+    write_executable(bin_dir, "docker", FAKE_DOCKER);
+    write_executable(bin_dir, "podman", FAKE_PODMAN);
     write_executable(bin_dir, "cargo", FAKE_CARGO);
     write_executable(bin_dir, "git", FAKE_GIT);
     write_executable(bin_dir, "jj", FAKE_JJ);
@@ -111,6 +113,32 @@ case "$*" in
     elif echo " $* " | grep -q ' get '; then
       printf 'pod-a\npod-b\n'
     fi
+    ;;
+esac
+"#;
+
+const FAKE_DOCKER: &str = r#"#!/bin/sh
+case " $* " in
+  *" ps "*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$CONTAINER_ARGS_FILE"
+    printf 'docker-web\tnginx:latest\ndocker-db\tpostgres:latest\n'
+    ;;
+  *" images "*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$CONTAINER_ARGS_FILE"
+    printf 'docker-alpine:latest\t5MB\ndocker-nginx:latest\t20MB\n'
+    ;;
+esac
+"#;
+
+const FAKE_PODMAN: &str = r#"#!/bin/sh
+case " $* " in
+  *" ps "*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$CONTAINER_ARGS_FILE"
+    printf 'podman-web\tquay.io/web:latest\npodman-db\tquay.io/db:latest\n'
+    ;;
+  *" images "*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$CONTAINER_ARGS_FILE"
+    printf 'podman-alpine:latest\t6MB\npodman-busybox:latest\t2MB\n'
     ;;
 esac
 "#;
@@ -254,6 +282,10 @@ impl Harness {
         fs::create_dir_all(&cache_dir).expect("cache dir");
         let mut aux_files = BTreeMap::new();
         aux_files.insert("KUBECTL_ARGS_FILE".into(), root.join("kubectl-args.txt"));
+        aux_files.insert(
+            "CONTAINER_ARGS_FILE".into(),
+            root.join("container-args.txt"),
+        );
         aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), root.join("git-args.txt"));
         aux_files.insert("INSHELLAH_JJ_ARGS_FILE".into(), root.join("jj-args.txt"));
         Self {
@@ -518,6 +550,300 @@ esac
     assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
     let args = harness.read_aux("KUBECTL_ARGS_FILE");
     assert!(args.contains("args=get pods "), "args captured: {args}");
+}
+
+// === docker / podman ===
+
+#[test]
+fn container_global_options_locate_the_verb() {
+    let harness = Harness::new("dyn-container-global-options");
+    let (stdout, ..) = harness.run(&["docker", "--context", "prod", "exec", ""], &[]);
+    let candidates = parse_output(&stdout).expect("containers");
+    assert_eq!(Harness::values(&candidates), vec![
+        "docker-web",
+        "docker-db"
+    ]);
+    let args = harness.read_aux("CONTAINER_ARGS_FILE");
+    assert!(args.contains("--context prod ps -a"), "args={args}");
+    assert!(args.contains("--last 200"), "args={args}");
+
+    let (remote_out, ..) = harness.run(&["podman", "--connection", "remote", "exec", ""], &[]);
+    let remote = parse_output(&remote_out).expect("remote containers");
+    assert_eq!(Harness::values(&remote), vec!["podman-web", "podman-db"]);
+    let remote_args = harness.read_aux("CONTAINER_ARGS_FILE");
+    assert!(
+        remote_args.contains("--connection remote ps -a"),
+        "args={remote_args}"
+    );
+}
+
+#[test]
+fn podman_discovery_forwards_daemon_and_store_selectors_only() {
+    let harness = Harness::new("dyn-podman-discovery-selectors");
+    let (stdout, ..) = harness.run(
+        &[
+            "podman",
+            "--connection",
+            "remote",
+            "--root",
+            "/store",
+            "--runroot",
+            "/run/store",
+            "--transient-store",
+            "exec",
+            "",
+        ],
+        &[],
+    );
+    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
+    let args = harness.read_aux("CONTAINER_ARGS_FILE");
+    for forwarded in [
+        "--connection remote",
+        "--root /store",
+        "--runroot /run/store",
+        "--transient-store",
+    ] {
+        assert!(args.contains(forwarded), "args={args}");
+    }
+}
+
+#[test]
+fn podman_selectors_after_the_verb_are_forwarded_unless_the_verb_owns_them() {
+    let harness = Harness::new("dyn-podman-persistent");
+    let (logs_out, ..) = harness.run(&["podman", "logs", "--root", "/srv", ""], &[]);
+    assert!(parse_output(&logs_out).is_some(), "stdout={logs_out}");
+    let logs_args = harness.read_aux("CONTAINER_ARGS_FILE");
+    assert!(logs_args.contains("--root /srv ps -a"), "args={logs_args}");
+
+    let root = ManpageResult {
+        entries:            Vec::new(),
+        subcommands:        vec![ManpageSubcommand::new("run".to_owned(), String::new())],
+        positional_choices: Vec::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
+    };
+    let run = ManpageResult {
+        entries:            vec![ManpageEntry {
+            switch: OwnedSwitch::Short('c'),
+            param:  Some(OwnedParam::new(ParamKind::Mandatory, "SHARES".to_owned())),
+            desc:   String::new(),
+        }],
+        subcommands:        Vec::new(),
+        positional_choices: Vec::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
+    };
+    write_result(&harness.cache_dir, "podman", "help", &root).expect("root cache");
+    write_result(&harness.cache_dir, "podman run", "help", &run).expect("run cache");
+    let (stdout, ..) = harness.run(&["podman", "run", "-c", "512", ""], &[]);
+    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
+    let args = harness.read_aux("CONTAINER_ARGS_FILE");
+    assert!(!args.contains("-c 512"), "args={args}");
+}
+
+#[test]
+fn podman_latest_flag_is_not_a_value_flag() {
+    let harness = Harness::new("dyn-podman-latest");
+    let (stdout, ..) = harness.run(&["podman", "logs", "-l", ""], &[]);
+    let candidates = parse_output(&stdout).expect("containers after -l");
+    assert_eq!(Harness::values(&candidates), vec![
+        "podman-web",
+        "podman-db"
+    ]);
+}
+
+#[test]
+fn container_command_slots_do_not_invoke_operand_backend() {
+    let cases: &[&[&str]] = &[
+        &["docker", "exec", "web", "sh"],
+        &["docker", "run", "alpine:latest", "sh"],
+        &["docker", "tag", "alpine:latest", "new:tag"],
+        &["podman", "exec", "web", "sh"],
+    ];
+    for spans in cases {
+        let harness = Harness::new("dyn-container-command-slot");
+        let (stdout, ..) = harness.run(spans, &[]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
+        assert!(
+            harness.read_aux("CONTAINER_ARGS_FILE").is_empty(),
+            "operand backend invoked for spans={spans:?}"
+        );
+    }
+}
+
+#[test]
+fn container_cp_operands_explicitly_fall_back_to_files() {
+    let cases: &[&[&str]] = &[
+        &["docker", "cp", ""],
+        &["docker", "cp", "web:/tmp/file", ""],
+        &["podman", "cp", "./local", ""],
+    ];
+    for spans in cases {
+        let harness = Harness::new("dyn-container-cp-file-fallback");
+        let (stdout, ..) = harness.run(spans, &[]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
+        assert!(
+            harness.read_aux("CONTAINER_ARGS_FILE").is_empty(),
+            "container backend invoked for cp spans={spans:?}"
+        );
+    }
+}
+
+#[test]
+fn container_cp_bare_words_offer_container_names_with_a_colon() {
+    let harness = Harness::new("dyn-container-cp-names");
+    let (stdout, ..) = harness.run(&["docker", "cp", "docker"], &[]);
+    let cands = parse_output(&stdout).expect("docker containers");
+    assert_eq!(Harness::values(&cands), vec!["docker-db:", "docker-web:"]);
+    assert!(harness.read_aux("CONTAINER_ARGS_FILE").contains("ps -a"));
+
+    let (second_out, ..) = harness.run(&["docker", "cp", "web:/tmp/file", "docker"], &[]);
+    let second = parse_output(&second_out).expect("second operand");
+    assert_eq!(Harness::values(&second), vec!["docker-db:", "docker-web:"]);
+
+    let (after_out, ..) = harness.run(&["docker", "cp", "--", "docker-d"], &[]);
+    let after = parse_output(&after_out).expect("after separator");
+    assert_eq!(Harness::values(&after), vec!["docker-db:"]);
+}
+
+#[test]
+fn container_cp_path_like_or_qualified_operands_return_null() {
+    let cases: &[&[&str]] = &[
+        &["docker", "cp", "./docker"],
+        &["docker", "cp", "../docker"],
+        &["docker", "cp", "/docker"],
+        &["docker", "cp", "~/docker"],
+        &["docker", "cp", "dir/docker"],
+        &["docker", "cp", "docker-web:"],
+        &["podman", "cp", "podman-web:/tmp"],
+        &["podman", "cp", "nomatch"],
+        &["docker", "cp", "-a"],
+    ];
+    for spans in cases {
+        let harness = Harness::new("dyn-container-cp-null");
+        let (stdout, ..) = harness.run(spans, &[]);
+        assert_eq!(stdout.trim(), "null", "spans={spans:?}, stdout={stdout}");
+    }
+}
+
+#[test]
+fn repeated_container_verbs_keep_completing_operands() {
+    let harness = Harness::new("dyn-container-repeated-operands");
+    let (stdout, ..) = harness.run(&["docker", "stop", "web", ""], &[]);
+    let candidates = parse_output(&stdout).expect("repeated containers");
+    assert_eq!(Harness::values(&candidates), vec![
+        "docker-web",
+        "docker-db"
+    ]);
+    assert!(harness.read_aux("CONTAINER_ARGS_FILE").contains("ps -a"));
+}
+
+#[test]
+fn container_prefix_verbs_are_resolved_through_the_group() {
+    let harness = Harness::new("dyn-container-group");
+    let (stdout, ..) = harness.run(&["docker", "container", "exec", ""], &[]);
+    let candidates = parse_output(&stdout).expect("containers");
+    assert_eq!(Harness::values(&candidates), vec![
+        "docker-web",
+        "docker-db"
+    ]);
+
+    let (done, ..) = harness.run(&["docker", "container", "exec", "web", ""], &[]);
+    assert_eq!(done.trim(), "null");
+}
+
+#[test]
+fn image_verbs_offer_images_by_slot() {
+    let harness = Harness::new("dyn-container-images");
+    let (run_out, ..) = harness.run(&["docker", "run", "-it", ""], &[]);
+    let images = parse_output(&run_out).expect("image operand");
+    assert_eq!(Harness::values(&images)[0], "docker-alpine:latest");
+
+    let (rmi, ..) = harness.run(&["docker", "rmi", "docker-alpine:latest", ""], &[]);
+    assert!(parse_output(&rmi).is_some(), "rmi takes several images");
+}
+
+#[test]
+fn podman_repeated_operands_remain_distinct_from_docker() {
+    let harness = Harness::new("dyn-podman-repeated");
+    let (logs, ..) = harness.run(&["podman", "logs", "podman-web", ""], &[]);
+    assert!(
+        parse_output(&logs).is_some(),
+        "podman logs accepts multiple containers"
+    );
+
+    let (docker_logs, ..) = harness.run(&["docker", "logs", "docker-web", ""], &[]);
+    assert_eq!(docker_logs.trim(), "null");
+}
+
+#[test]
+fn container_typed_prefix_matches_names_past_the_row_limit() {
+    let harness = Harness::new("dyn-container-limit-prefix");
+    let (images, stderr, ok) = harness.run(&["docker", "run", "docker-nginx"], &[(
+        "INSHELLAH_DYNAMIC_LIMIT",
+        "1",
+    )]);
+    assert!(ok, "stderr={stderr}");
+    let image = parse_output(&images).expect("image past the limit");
+    assert_eq!(Harness::values(&image), vec!["docker-nginx:latest"]);
+
+    let (names, ..) = harness.run(&["docker", "stop", "docker-db"], &[(
+        "INSHELLAH_DYNAMIC_LIMIT",
+        "1",
+    )]);
+    let name = parse_output(&names).expect("container past the limit");
+    assert_eq!(Harness::values(&name), vec!["docker-db"]);
+    let args = harness.read_aux("CONTAINER_ARGS_FILE");
+    assert!(!args.contains("--last"), "args={args}");
+}
+
+#[test]
+fn container_explicit_path_is_preserved() {
+    let harness = Harness::new("dyn-container-path");
+    let docker_path = harness
+        .bin_dir
+        .join("docker")
+        .to_string_lossy()
+        .into_owned();
+    let (stdout, stderr, ok) =
+        harness.run(&["sudo", &docker_path, "--context", "prod", "run", ""], &[]);
+    assert!(ok, "stderr={stderr}");
+    assert!(parse_output(&stdout).is_some());
+    let args = harness.read_aux("CONTAINER_ARGS_FILE");
+    assert!(
+        args.contains(&format!("argv0={docker_path}")),
+        "args={args}"
+    );
+    assert!(args.contains("--context prod images"), "args={args}");
+}
+
+#[test]
+fn container_cached_subcommand_flags_decide_which_word_is_the_operand() {
+    let harness = Harness::new("dyn-container-cached-arity");
+    let root = ManpageResult {
+        entries:            Vec::new(),
+        subcommands:        vec![ManpageSubcommand::new("logs".to_owned(), String::new())],
+        positional_choices: Vec::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
+    };
+    let logs = ManpageResult {
+        entries:            vec![ManpageEntry {
+            switch: OwnedSwitch::Both('n', "tail".to_owned()),
+            param:  Some(OwnedParam::new(ParamKind::Mandatory, "N".to_owned())),
+            desc:   String::new(),
+        }],
+        subcommands:        Vec::new(),
+        positional_choices: Vec::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
+    };
+    write_result(&harness.cache_dir, "docker", "help", &root).expect("root cache");
+    write_result(&harness.cache_dir, "docker logs", "help", &logs).expect("logs cache");
+
+    let (stdout, ..) = harness.run(&["docker", "logs", "-n", "20", ""], &[]);
+    let candidates = parse_output(&stdout).expect("container operand");
+    assert_eq!(Harness::values(&candidates)[0], "docker-web");
 }
 
 // === cargo ===
