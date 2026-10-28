@@ -152,6 +152,12 @@ impl<'span> Words<'span> {
         self.global_flag(names).map(|(_, value)| value)
     }
 
+    pub fn global_has(&self, names: &[&str]) -> bool {
+        self.flags[..self.leading]
+            .iter()
+            .any(|(flag, _)| names.contains(flag))
+    }
+
     /// the last-typed alias in `names` before the subcommand, with its value.
     pub fn global_flag(&self, names: &[&str]) -> Option<(&'span str, &'span str)> {
         flag_in(&self.flags[..self.leading], names)
