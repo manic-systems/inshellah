@@ -6,7 +6,7 @@
 rustPlatform.buildRustPackage {
   pname = "inshellah";
   version = (lib.importTOML ../Cargo.toml).package.version;
-  src = lib.cleanSource ../.;
+  src = import ./src.nix lib;
   cargoLock.lockFile = ../Cargo.lock;
   nativeCheckInputs = [ nushell ];
   meta = {
