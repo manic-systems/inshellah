@@ -503,6 +503,47 @@ pub fn purge_command(dir: &Path, command: &str) -> io::Result<usize> {
     Ok(removed)
 }
 
+fn process_is_alive(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks that the pid exists, it delivers nothing.
+    let signalled = unsafe { libc::kill(pid, 0) };
+    signalled == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// splits `.{name}.{pid}.{seq}.tmp` into the final name and the writer's pid.
+fn temp_file_owner(filename: &str) -> Option<(&str, libc::pid_t)> {
+    let inner = filename.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (rest, seq) = inner.rsplit_once('.')?;
+    seq.parse::<u64>().ok()?;
+    let (stem, pid) = rest.rsplit_once('.')?;
+    Some((stem, pid.parse().ok()?))
+}
+
+/// drops temp files left by killed writers, never real cache files.
+///
+/// live writers share the directory without a lock, so a temp file only goes
+/// once the pid in its name is gone.
+///
+/// # Errors
+/// fails when `dir` cannot be read.
+pub fn remove_stale_temp_files(dir: &Path) -> io::Result<usize> {
+    let mut removed = 0;
+    for entry in fs::read_dir(dir)?.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Some((stem, pid)) = temp_file_owner(&name) else {
+            continue;
+        };
+        if stem.starts_with(ENCODED_FILENAME_PREFIX)
+            && !process_is_alive(pid)
+            && remove_if_present(&entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
@@ -867,6 +908,29 @@ mod tests {
         let path = dir.join("nested/git_add.json");
         write_file(&path, "{\"ok\":true}").unwrap();
         assert_eq!(read_file(&path).as_deref(), Some("{\"ok\":true}"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stale_temp_files_go_only_when_the_writer_is_dead() {
+        let dir = unique_dir("stale-temp");
+        fs::create_dir_all(&dir).unwrap();
+        let name = filename_of_command("demo");
+        let stale_json = dir.join(format!(".{name}.json.99999999.0.tmp"));
+        let stale_exe = dir.join(format!(".{name}.exe.99999999.1.tmp"));
+        let live = dir.join(format!(".{name}.json.{}.0.tmp", process::id()));
+        let foreign = dir.join(".editor-swap.99999999.0.tmp");
+        let real = dir.join(format!("{name}.json"));
+        for path in [&stale_json, &stale_exe, &live, &foreign, &real] {
+            fs::write(path, "partial").unwrap();
+        }
+
+        assert_eq!(remove_stale_temp_files(&dir).unwrap(), 2);
+        assert!(!stale_json.exists());
+        assert!(!stale_exe.exists());
+        assert!(live.is_file());
+        assert!(foreign.is_file());
+        assert!(real.is_file());
         fs::remove_dir_all(&dir).unwrap();
     }
 

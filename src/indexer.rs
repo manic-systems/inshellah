@@ -79,6 +79,7 @@ use crate::{
         json_strings,
         read_result,
         record_miss,
+        remove_stale_temp_files,
         write_exe,
         write_file,
         write_native,
@@ -527,6 +528,7 @@ where
     S: BuildHasher,
 {
     ensure_dir(dir)?;
+    remove_stale_temp_files(dir)?;
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
     let binaries = list_binaries(bindirs, &nushell_commands);
@@ -606,6 +608,7 @@ where
     validate_merge_inputs(profile_dir)?;
     let resolved_sources = resolve_merge_sources(sources)?;
     ensure_dir(dir)?;
+    remove_stale_temp_files(dir)?;
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
     let binaries = list_binaries(&[profile_dir.join("bin")], &nushell_commands);
