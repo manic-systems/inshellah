@@ -79,7 +79,7 @@ fn base_args(words: &Words, ctx: &DynCtx) -> Vec<String> {
     // podman globals are cobra persistent flags, so one typed after the verb
     // still selects the backend unless the verb defines that flag itself.
     let persistent = |flag: &str| {
-        words.command() == "podman" && !ctx.value_flags.iter().any(|local| local == flag)
+        words.command() == "podman" && !ctx.flags.value.iter().any(|local| local == flag)
     };
     let mut args = vec![ctx.bin(words.command())];
     for flag in SELECTOR_FLAGS {

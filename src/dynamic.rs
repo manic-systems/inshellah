@@ -25,6 +25,18 @@ use shared::{
     filter_candidates,
 };
 
+/// what the static cache knows about the flags of the root command and of the
+/// resolved subcommand.
+#[derive(Clone, Copy, Default)]
+pub struct CachedFlags<'span> {
+    pub global_value: &'span [String],
+    pub value:        &'span [String],
+    /// every short switch of the root command, whether it takes a value or not.
+    pub global_short: &'span [String],
+    /// every short switch of the resolved subcommand.
+    pub short:        &'span [String],
+}
+
 /// whether nushell's file completion joins a provider's candidates.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Files {
@@ -127,8 +139,7 @@ pub fn dynamic_value_completions(
         cmd_name,
         explicit_cmd_path,
         slot: Slot::from_spans(&spans),
-        global_value_flags: &[],
-        value_flags: &[],
+        flags: CachedFlags::default(),
     };
     providers::value_completions(&spans, &ctx)
 }
@@ -144,8 +155,7 @@ pub fn dynamic_complete_with_path(
         spans,
         explicit_cmd_path,
         Slot::from_spans(spans),
-        &[],
-        &[],
+        CachedFlags::default(),
         None,
         cfg,
     )
@@ -163,8 +173,7 @@ pub fn dynamic_complete_candidates_with_path(
     spans: &[String],
     explicit_cmd_path: Option<&Path>,
     slot: Slot<'_>,
-    global_value_flags: &[String],
-    value_flags: &[String],
+    flags: CachedFlags<'_>,
     protocol: Option<Protocol>,
     cfg: &Config,
 ) -> Reply {
@@ -182,8 +191,7 @@ pub fn dynamic_complete_candidates_with_path(
         cmd_name: &spans[0],
         explicit_cmd_path,
         slot,
-        global_value_flags,
-        value_flags,
+        flags,
     };
     let reply = match (providers::dispatch(spans, &ctx), protocol) {
         (Some(answer), _) => Reply::Answered(answer),
@@ -297,7 +305,7 @@ mod tests {
             "prod".into(),
             String::new(),
         ];
-        let scope = kubectl_scope(&Words::parse(&spans, |flag, _| flag == "-n"));
+        let scope = kubectl_scope(&Words::parse(&spans, |flag, _| flag == "-n", |_, _| false));
         assert!(!scope.all);
         assert_eq!(scope.args, vec!["-n".to_owned(), "prod".to_owned()]);
     }
@@ -311,7 +319,7 @@ mod tests {
             "-A".into(),
             String::new(),
         ];
-        let scope = kubectl_scope(&Words::parse(&spans, |_, _| false));
+        let scope = kubectl_scope(&Words::parse(&spans, |_, _| false, |_, _| false));
         assert!(scope.all);
     }
 
@@ -322,7 +330,11 @@ mod tests {
     #[test]
     fn leading_only_flags_take_no_value_after_the_subcommand() {
         let spans = spans_of(&["git", "-c", "a=b", "log", "-c", "main", ""]);
-        let words = Words::parse(&spans, |flag, leading| flag == "-c" && leading);
+        let words = Words::parse(
+            &spans,
+            |flag, leading| flag == "-c" && leading,
+            |_, _| false,
+        );
         assert_eq!(words.arg_count(), 2);
         assert_eq!(words.arg(1), "main");
     }
@@ -330,10 +342,11 @@ mod tests {
     #[test]
     fn a_cluster_takes_a_value_only_when_its_value_letter_is_last() {
         let takes_l = |flag: &str, _| flag == "-L";
+        let switches = |flag: &str, _| flag == "-f" || flag == "-N";
         let trailing = spans_of(&["ssh", "-fNL", "8080:db:80", "host", ""]);
-        assert_eq!(Words::parse(&trailing, takes_l).arg(0), "host");
+        assert_eq!(Words::parse(&trailing, takes_l, switches).arg(0), "host");
         let attached = spans_of(&["ssh", "-L8080:db:80", "host", ""]);
-        assert_eq!(Words::parse(&attached, takes_l).arg(0), "host");
+        assert_eq!(Words::parse(&attached, takes_l, switches).arg(0), "host");
     }
 
     #[test]

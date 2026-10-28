@@ -31,6 +31,7 @@ use inshellah::{
     config::Config,
     dynamic::{
         Answer,
+        CachedFlags,
         Files,
         Reply,
         Slot,
@@ -269,8 +270,7 @@ pub fn decide(
                 ArgSlot::AfterDoubleDash => Slot::Positional,
                 ArgSlot::Free => Slot::from_spans(&spans),
             },
-            &value_flags(lookup(&dirs, &cmd_name).as_ref()),
-            &subcommand_value_flags(found.as_ref()),
+            FlagLists::of(lookup(&dirs, &cmd_name).as_ref(), found.as_ref()).cached(),
             trace.protocol,
             cfg,
         )
@@ -599,8 +599,48 @@ fn value_flags(result: Option<&ManpageResult>) -> Vec<String> {
         .collect()
 }
 
-fn subcommand_value_flags(found: Option<&Node>) -> Vec<String> {
-    value_flags(found.filter(|node| node.depth > 1).map(|node| &node.result))
+struct FlagLists {
+    global_value: Vec<String>,
+    value:        Vec<String>,
+    global_short: Vec<String>,
+    short:        Vec<String>,
+}
+
+impl FlagLists {
+    fn of(root: Option<&ManpageResult>, found: Option<&Node>) -> Self {
+        let sub = found.filter(|node| node.depth > 1).map(|node| &node.result);
+        Self {
+            global_value: value_flags(root),
+            value:        value_flags(sub),
+            global_short: short_flags(root),
+            short:        short_flags(sub),
+        }
+    }
+
+    fn cached(&self) -> CachedFlags<'_> {
+        CachedFlags {
+            global_value: &self.global_value,
+            value:        &self.value,
+            global_short: &self.global_short,
+            short:        &self.short,
+        }
+    }
+}
+
+/// every short switch of the command, so a cluster of them can be split.
+fn short_flags(result: Option<&ManpageResult>) -> Vec<String> {
+    result
+        .into_iter()
+        .flat_map(|found| &found.entries)
+        .filter_map(|entry| {
+            match &entry.switch {
+                OwnedSwitch::Short(short) | OwnedSwitch::Both(short, _) => {
+                    Some(format!("-{short}"))
+                },
+                OwnedSwitch::Long(_) => None,
+            }
+        })
+        .collect()
 }
 
 fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {

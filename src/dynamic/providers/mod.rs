@@ -78,11 +78,17 @@ impl Provider for FunctionProvider {
     }
 
     fn complete(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
-        let words = Words::parse(spans, |flag, leading| {
-            let known = |flags: &[String]| flags.iter().any(|known| known == flag);
-            let global = self.value_flags.contains(&flag) || known(ctx.global_value_flags);
-            known(ctx.value_flags) || (global && (leading || self.globals == Globals::Anywhere))
-        });
+        let known = |flag: &str, flags: &[String]| flags.iter().any(|known| known == flag);
+        let global_scope = |leading: bool| leading || self.globals == Globals::Anywhere;
+        let takes_value = |flag: &str, leading: bool| {
+            let global = self.value_flags.contains(&flag) || known(flag, ctx.flags.global_value);
+            (known(flag, ctx.flags.value) && !leading) || (global && global_scope(leading))
+        };
+        let is_switch = |flag: &str, leading: bool| {
+            (known(flag, ctx.flags.short) && !leading)
+                || (known(flag, ctx.flags.global_short) && global_scope(leading))
+        };
+        let words = Words::parse(spans, takes_value, is_switch);
         (self.complete)(&words, ctx)
     }
 }
@@ -148,7 +154,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         kind:        Kind::Fallback,
         files:       Files::Replace,
         matching:    Matching::Value,
-        value_flags: &[],
+        value_flags: &["-J", "-F"],
         globals:     Globals::Leading,
         complete:    ssh::complete,
     },
@@ -157,8 +163,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         kind:        Kind::Fallback,
         files:       Files::Alongside,
         matching:    Matching::Value,
-        value_flags: &[],
-        globals:     Globals::Leading,
+        value_flags: &["-J", "-F"],
+        globals:     Globals::Anywhere,
         complete:    ssh::complete,
     },
     FunctionProvider {

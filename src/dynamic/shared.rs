@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 use std::{
+    borrow::Cow,
     env,
     fs,
     path::{
@@ -16,7 +17,10 @@ use crate::complete::{
     fuzzy_score,
 };
 use crate::{
-    dynamic::Slot,
+    dynamic::{
+        CachedFlags,
+        Slot,
+    },
     subprocess::{
         self,
         Run,
@@ -31,35 +35,38 @@ pub enum Matching {
 
 #[derive(Clone, Copy)]
 pub struct DynCtx<'span> {
-    pub deadline:           Option<Instant>,
-    pub limit:              usize,
-    pub cmd_name:           &'span str,
-    pub explicit_cmd_path:  Option<&'span Path>,
-    pub slot:               Slot<'span>,
-    /// flags the static cache knows take a value at the root command.
-    pub global_value_flags: &'span [String],
-    /// flags the static cache knows take a value at the resolved subcommand.
-    pub value_flags:        &'span [String],
+    pub deadline:          Option<Instant>,
+    pub limit:             usize,
+    pub cmd_name:          &'span str,
+    pub explicit_cmd_path: Option<&'span Path>,
+    pub slot:              Slot<'span>,
+    pub flags:             CachedFlags<'span>,
 }
 
 /// the words before the cursor, split into positionals and flags.
 pub struct Words<'span> {
     spans:       &'span [String],
     positionals: Vec<&'span str>,
-    flags:       Vec<(&'span str, Option<&'span str>)>,
+    flags:       Vec<(Cow<'span, str>, Option<&'span str>)>,
     /// how many of `flags` came before the first positional.
     leading:     usize,
     /// the last word before the cursor when it is a flag still owed a value.
-    pending:     Option<&'span str>,
+    pending:     Option<Cow<'span, str>>,
     past_dashes: bool,
 }
 
 impl<'span> Words<'span> {
     /// `takes_value(flag, leading)` says whether `flag` consumes the next word,
-    /// where `leading` is true before the first positional.
-    pub fn parse<TakesValue>(spans: &'span [String], takes_value: TakesValue) -> Self
+    /// where `leading` is true before the first positional. `is_switch` says
+    /// whether a short flag is known at all, which lets a cluster be split.
+    pub fn parse<TakesValue, IsSwitch>(
+        spans: &'span [String],
+        takes_value: TakesValue,
+        is_switch: IsSwitch,
+    ) -> Self
     where
         TakesValue: Fn(&str, bool) -> bool,
+        IsSwitch: Fn(&str, bool) -> bool,
     {
         let before = spans.split_last().map_or(&[][..], |(_, before)| before);
         let mut words = before.iter().skip(1).map(String::as_str);
@@ -81,16 +88,25 @@ impl<'span> Words<'span> {
             } else if let Some((flag, value)) = word.split_once('=')
                 && (flag.starts_with("--") || flag.len() == 2)
             {
-                flags.push((flag, Some(value)));
+                flags.push((Cow::Borrowed(flag), Some(value)));
+            } else if takes_value(word, leading.is_none()) {
+                let value = words.next();
+                pending = value.is_none().then_some(Cow::Borrowed(word));
+                flags.push((Cow::Borrowed(word), value));
+            } else if let Some(cluster) =
+                split_cluster(word, leading.is_none(), &takes_value, &is_switch)
+            {
+                for letter in cluster.switches.chars() {
+                    flags.push((Cow::Owned(format!("-{letter}")), None));
+                }
+                if let Some(taker) = cluster.taker {
+                    let flag: Cow<str> = Cow::Owned(format!("-{}", taker.letter));
+                    let value = taker.attached.or_else(|| words.next());
+                    pending = value.is_none().then(|| flag.clone());
+                    flags.push((flag, value));
+                }
             } else {
-                let value = if consumes_next(word, leading.is_none(), &takes_value) {
-                    let value = words.next();
-                    pending = value.is_none().then_some(word);
-                    value
-                } else {
-                    None
-                };
-                flags.push((word, value));
+                flags.push((Cow::Borrowed(word), None));
             }
         }
         Self {
@@ -130,22 +146,30 @@ impl<'span> Words<'span> {
         self.pending.is_none() && ctx.slot.positional()
     }
 
+    /// the flag whose value the cursor word is, from the cache or the provider.
+    pub fn value_slot<'words>(&'words self, ctx: &'words DynCtx<'_>) -> Option<&'words str> {
+        self.pending.as_deref().or(match ctx.slot {
+            Slot::FlagValue(flag) => Some(flag),
+            Slot::Positional | Slot::MaybeFlagValue(_) => None,
+        })
+    }
+
     /// whether a bare `--` came before the cursor.
     pub const fn past_dashes(&self) -> bool {
         self.past_dashes
     }
 
     pub fn has(&self, names: &[&str]) -> bool {
-        self.flags.iter().any(|(flag, _)| names.contains(flag))
+        self.flags.iter().any(|(flag, _)| names.contains(&&**flag))
     }
 
     pub fn value(&self, names: &[&str]) -> Option<&'span str> {
-        flag_in(&self.flags, names).map(|(_, value)| value)
+        flag_in(&self.flags, names)
     }
 
     /// value of a flag typed before the subcommand, so still the global flag.
     pub fn global_value(&self, names: &[&str]) -> Option<&'span str> {
-        self.global_flag(names).map(|(_, value)| value)
+        flag_in(&self.flags[..self.leading], names)
     }
 
     /// every value of a flag typed before the subcommand, in order.
@@ -160,46 +184,71 @@ impl<'span> Words<'span> {
     pub fn global_has(&self, names: &[&str]) -> bool {
         self.flags[..self.leading]
             .iter()
-            .any(|(flag, _)| names.contains(flag))
-    }
-
-    /// the last-typed alias in `names` before the subcommand, with its value.
-    pub fn global_flag(&self, names: &[&str]) -> Option<(&'span str, &'span str)> {
-        flag_in(&self.flags[..self.leading], names)
+            .any(|(flag, _)| names.contains(&&**flag))
     }
 }
 
-/// a short cluster like `-fNL` takes the next word when its first
-/// value-taking letter is its last, since getopt hands that letter the rest.
-fn consumes_next<TakesValue>(word: &str, leading: bool, takes_value: &TakesValue) -> bool
+/// a short cluster like `-fNL` is a run of known switches, optionally ending
+/// in a value-taking letter that gets the rest of the word, or the next word
+/// when it ends the cluster.
+struct Cluster<'span> {
+    switches: &'span str,
+    taker:    Option<ClusterTaker<'span>>,
+}
+
+struct ClusterTaker<'span> {
+    letter:   char,
+    attached: Option<&'span str>,
+}
+
+/// a word is only a cluster when every letter up to its value letter is a
+/// known short switch, so `-Dstrip` stays one opaque flag.
+fn split_cluster<'span, TakesValue, IsSwitch>(
+    word: &'span str,
+    leading: bool,
+    takes_value: &TakesValue,
+    is_switch: &IsSwitch,
+) -> Option<Cluster<'span>>
 where
     TakesValue: Fn(&str, bool) -> bool,
+    IsSwitch: Fn(&str, bool) -> bool,
 {
-    if takes_value(word, leading) {
-        return true;
-    }
-    let Some(cluster) = word
+    let cluster = word
         .strip_prefix('-')
-        .filter(|cluster| cluster.len() > 1 && !cluster.starts_with('-'))
-    else {
-        return false;
-    };
-    cluster
-        .char_indices()
-        .find(|(_, letter)| takes_value(&format!("-{letter}"), leading))
-        .is_some_and(|(at, letter)| at + letter.len_utf8() == cluster.len())
+        .filter(|cluster| cluster.len() > 1 && !cluster.starts_with('-'))?;
+    for (at, letter) in cluster.char_indices() {
+        let flag = format!("-{letter}");
+        if takes_value(&flag, leading) {
+            let (switches, from_letter) = cluster.split_at(at);
+            let rest = from_letter.strip_prefix(letter)?;
+            return Some(Cluster {
+                switches,
+                taker: Some(ClusterTaker {
+                    letter,
+                    attached: (!rest.is_empty()).then_some(rest),
+                }),
+            });
+        }
+        if !is_switch(&flag, leading) {
+            return None;
+        }
+    }
+    Some(Cluster {
+        switches: cluster,
+        taker:    None,
+    })
 }
 
 fn flag_in<'span>(
-    flags: &[(&'span str, Option<&'span str>)],
+    flags: &[(Cow<'span, str>, Option<&'span str>)],
     names: &[&str],
-) -> Option<(&'span str, &'span str)> {
+) -> Option<&'span str> {
     flags
         .iter()
         .rev()
-        .find(|(flag, _)| names.contains(flag))
-        .and_then(|(flag, value)| Some((*flag, (*value)?)))
-        .filter(|(_, value)| !value.is_empty())
+        .find(|(flag, _)| names.contains(&&**flag))
+        .and_then(|(_, value)| *value)
+        .filter(|value| !value.is_empty())
 }
 
 impl DynCtx<'_> {
