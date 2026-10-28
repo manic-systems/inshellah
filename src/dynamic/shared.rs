@@ -148,6 +148,21 @@ impl<'span> Words<'span> {
         self.global_flag(names).map(|(_, value)| value)
     }
 
+    /// every value of a flag typed before the subcommand, in order.
+    pub fn global_values(&self, names: &[&str]) -> Vec<&'span str> {
+        self.flags[..self.leading]
+            .iter()
+            .filter(|(flag, _)| names.contains(&&**flag))
+            .filter_map(|(_, value)| value.filter(|text| !text.is_empty()))
+            .collect()
+    }
+
+    pub fn global_has(&self, names: &[&str]) -> bool {
+        self.flags[..self.leading]
+            .iter()
+            .any(|(flag, _)| names.contains(flag))
+    }
+
     /// the last-typed alias in `names` before the subcommand, with its value.
     pub fn global_flag(&self, names: &[&str]) -> Option<(&'span str, &'span str)> {
         flag_in(&self.flags[..self.leading], names)

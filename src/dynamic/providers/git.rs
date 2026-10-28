@@ -116,7 +116,10 @@ const GIT_WORKTREE_VERBS: &[&str] = &[
 
 pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let mut git = vec![ctx.bin("git")];
-    for flag in ["-C", "--git-dir", "--work-tree"] {
+    for dir in words.global_values(&["-C"]) {
+        git.extend(["-C".to_owned(), dir.to_owned()]);
+    }
+    for flag in ["--git-dir", "--work-tree"] {
         if let Some(value) = words.global_value(&[flag]) {
             git.extend([flag.to_owned(), value.to_owned()]);
         }
