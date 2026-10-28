@@ -110,17 +110,17 @@ in
     };
 
     timeoutMs = lib.mkOption {
-      type = lib.types.nullOr lib.types.int;
+      type = lib.types.nullOr lib.types.ints.unsigned;
       default = null;
       example = 200;
       description = ''
         per-subprocess timeout in milliseconds. when null the binary's
-        compiled-in default is used (currently 200ms).
+        compiled-in default is used (currently 1200ms).
       '';
     };
 
     dynamicTimeoutMs = lib.mkOption {
-      type = lib.types.int;
+      type = lib.types.ints.unsigned;
       default = 5000;
       example = 2000;
       description = ''
@@ -131,7 +131,7 @@ in
     };
 
     dynamicLimit = lib.mkOption {
-      type = lib.types.int;
+      type = lib.types.ints.unsigned;
       default = 200;
       example = 100;
       description = ''
@@ -167,7 +167,7 @@ in
     };
 
     maxCompletions = lib.mkOption {
-      type = lib.types.int;
+      type = lib.types.ints.unsigned;
       default = 0;
       example = 100;
       description = ''
@@ -179,7 +179,7 @@ in
     };
 
     cacheTtlSecs = lib.mkOption {
-      type = lib.types.int;
+      type = lib.types.ints.unsigned;
       default = 604800;
       example = 86400;
       description = ''
@@ -189,7 +189,7 @@ in
     };
 
     completeTimeoutMs = lib.mkOption {
-      type = lib.types.nullOr lib.types.int;
+      type = lib.types.nullOr lib.types.ints.unsigned;
       default = null;
       example = 400;
       description = ''
@@ -197,17 +197,17 @@ in
         resolution the completer performs for uncached commands. distinct
         from `timeoutMs` (build-time indexing) and `dynamicTimeoutMs` (the
         nushell shim's live providers). null uses the binary's compiled
-        default (currently 200ms). exported as INSHELLAH_TIMEOUT_MS.
+        default (currently 1200ms). exported as INSHELLAH_TIMEOUT_MS.
       '';
     };
 
     workers = lib.mkOption {
-      type = lib.types.nullOr lib.types.int;
+      type = lib.types.nullOr lib.types.ints.positive;
       default = null;
       example = 8;
       description = ''
-        worker thread count for the parallel scrape pool. when null,
-        `std::thread::available_parallelism` is used.
+        positive worker thread count for the parallel scrape pool. when
+        null, `std::thread::available_parallelism` is used.
       '';
     };
 
@@ -385,7 +385,7 @@ in
       ''
         mkdir -p ${destDir}
 
-        if [ -d "$out/bin" ]; then
+        if [ -d "$out/bin" ] || ${lib.boolToString (cfg.extraScrapePackages != [ ])}; then
           PATH="${cfg.nushellPackage}/bin:$PATH" \
             ${inshellah} merge "$out" --dir ${destDir} --sources ${sourcesFile}${flags}
         fi
