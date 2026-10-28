@@ -78,11 +78,13 @@ use crate::{
     },
     store::{
         ExeIdentity,
+        NUSHELL_NATIVE_COMMANDS_FILE,
         command_of_filename,
         ensure_dir,
         json_strings,
         read_result,
         record_miss,
+        sweep_stale_temp_files,
         write_exe,
         write_file,
         write_native,
@@ -198,8 +200,6 @@ pub fn load_ignorelist(path: &Path) -> HashSet<String> {
     }
     out
 }
-
-const NUSHELL_NATIVE_COMMANDS_FILE: &str = "nushell-native-commands";
 
 // one call that fails the whole index, and cross builds run `nu` under qemu.
 const NUSHELL_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
@@ -549,6 +549,7 @@ where
     S: BuildHasher,
 {
     ensure_dir(dir)?;
+    sweep_stale_temp_files(dir);
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
     let binaries = list_binaries(bindirs, &nushell_commands);
@@ -661,6 +662,7 @@ where
     validate_merge_inputs(profile_dir)?;
     let resolved_sources = resolve_merge_sources(sources)?;
     ensure_dir(dir)?;
+    sweep_stale_temp_files(dir);
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
     let binaries = list_binaries(&[profile_dir.join("bin")], &nushell_commands);

@@ -18,6 +18,7 @@ use inshellah::{
     store::{
         purge_command,
         purge_dir,
+        sweep_stale_temp_files,
     },
 };
 
@@ -45,6 +46,7 @@ pub fn refresh(
     cmds: &[String],
     timeout_ms: u64,
 ) -> io::Result<()> {
+    sweep_stale_temp_files(user_dir);
     for cmd in cmds {
         let bin = find_in_path(cmd).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("{cmd}: not in PATH"))
