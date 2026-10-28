@@ -226,11 +226,7 @@ pub(super) fn classify_binary(_bindir: &Path, full: &Path) -> Classify {
 
 // skips the positional `help` variant: unlikely to differ, extra spawn
 // dominates.
-fn try_help_until(
-    bin: &Path,
-    timeout_ms: u64,
-    deadline: Instant,
-) -> Result<Option<String>, io::Error> {
+fn try_help_until(bin: &Path, timeout_ms: u64, deadline: Instant) -> io::Result<Option<String>> {
     let bin_s = bin.to_string_lossy().to_string();
     for variant in [&["--help"][..], &["-h"][..]] {
         let attempt_ms = timeout_ms.min(remaining_ms(deadline));
@@ -263,7 +259,7 @@ fn timed_out(started: Instant, timeout_ms: u64) -> bool {
 
 /// # Errors
 /// fails when `bin` cannot be started at all, as opposed to printing nothing.
-pub fn try_help_spawned(bin: &Path, timeout_ms: u64) -> Result<Option<String>, io::Error> {
+pub fn try_help_spawned(bin: &Path, timeout_ms: u64) -> io::Result<Option<String>> {
     try_help_until(
         bin,
         timeout_ms,

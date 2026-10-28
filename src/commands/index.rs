@@ -10,6 +10,7 @@ use std::{
         PathBuf,
     },
     process,
+    slice,
     thread::available_parallelism,
 };
 
@@ -22,6 +23,12 @@ use inshellah::{
     store::default_store_path,
 };
 use pound::Parse;
+
+use super::common::{
+    absolutize,
+    reject_empty,
+    validate_prefix,
+};
 
 #[derive(Parse, Debug)]
 pub struct Args {
@@ -55,19 +62,27 @@ pub struct Scrape {
 }
 
 impl Scrape {
-    pub fn ignorelist(&self) -> HashSet<String> {
-        self.ignore
-            .as_deref()
-            .map(load_ignorelist)
-            .unwrap_or_default()
+    pub fn ignorelist(&self) -> io::Result<HashSet<String>> {
+        load_command_list(self.ignore.as_deref(), "--ignore")
     }
 
-    pub fn help_only_list(&self) -> HashSet<String> {
-        self.help_only
-            .as_deref()
-            .map(load_ignorelist)
-            .unwrap_or_default()
+    pub fn help_only_list(&self) -> io::Result<HashSet<String>> {
+        load_command_list(self.help_only.as_deref(), "--help-only")
     }
+}
+
+fn load_command_list(path: Option<&Path>, option: &str) -> io::Result<HashSet<String>> {
+    path.map_or_else(
+        || Ok(HashSet::new()),
+        |list| {
+            load_ignorelist(list).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("cannot read {option} file {}, {err}", list.display()),
+                )
+            })
+        },
+    )
 }
 
 #[expect(
@@ -75,16 +90,25 @@ impl Scrape {
     reason = "a missing PREFIX is a usage error, reported without the `index failed` prefix"
 )]
 pub fn run(args: Args) -> io::Result<()> {
-    let prefixes: Vec<PathBuf> = args
+    let typed: Vec<PathBuf> = args
         .prefixes
         .into_iter()
         .chain(args.extra_prefixes)
         .collect();
-    if prefixes.is_empty() {
+    if typed.is_empty() {
         eprintln!("error: index requires at least one PREFIX");
         process::exit(1);
     }
 
+    reject_empty(&typed, "PREFIX or --prefix")?;
+    let prefixes = typed
+        .iter()
+        .map(|prefix| absolutize(prefix))
+        .collect::<io::Result<Vec<_>>>()?;
+    for prefix in &prefixes {
+        validate_prefix(prefix)?;
+    }
+    reject_empty(slice::from_ref(&args.dir), "--dir")?;
     let bindirs: Vec<PathBuf> = prefixes.iter().map(|prefix| prefix.join("bin")).collect();
     let mandirs: Vec<PathBuf> = prefixes
         .iter()
@@ -93,8 +117,8 @@ pub fn run(args: Args) -> io::Result<()> {
     cmd_index(
         &bindirs,
         &mandirs,
-        &args.scrape.ignorelist(),
-        &args.scrape.help_only_list(),
+        &args.scrape.ignorelist()?,
+        &args.scrape.help_only_list()?,
         &args.dir,
         args.scrape.timeout_ms,
         args.scrape.workers,

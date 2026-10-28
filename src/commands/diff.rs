@@ -30,6 +30,11 @@ use inshellah::{
     },
 };
 
+use super::common::{
+    reject_empty,
+    validate_prefix,
+};
+
 fn mandirs_for_bin(bin: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(prefix) = bin.parent().and_then(Path::parent) {
@@ -72,6 +77,7 @@ fn diff_sets(label: &str, man: &[String], help: &[String]) {
 }
 
 pub fn run(cmd_args: &[String], extra_mandirs: &[PathBuf], timeout_ms: u64) -> io::Result<()> {
+    reject_empty(extra_mandirs, "--dir")?;
     let (base, sub_args) = cmd_args.split_first().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "diff requires a CMD argument")
     })?;
@@ -159,7 +165,9 @@ fn looks_like_unenumerated_group(result: &ManpageResult) -> bool {
         })
 }
 
-pub fn run_scan(prefix: &Path, timeout_ms: u64) {
+pub fn run_scan(prefix: &Path, timeout_ms: u64) -> io::Result<()> {
+    reject_empty(&[prefix.to_path_buf()], "--scan")?;
+    validate_prefix(prefix)?;
     let mandirs = vec![prefix.join("share/man")];
     let mut suspects = 0_u32;
     let mut help_recoverable = 0_u32;
@@ -227,6 +235,7 @@ pub fn run_scan(prefix: &Path, timeout_ms: u64) {
         "scanned: {suspects} group suspects, {sibling_covered} body-parser gaps, \
          {help_recoverable} help-only"
     );
+    Ok(())
 }
 
 #[cfg(test)]
