@@ -118,6 +118,13 @@ pub struct ManpageResult {
 }
 
 impl ManpageResult {
+    pub const fn has_structured_content(&self) -> bool {
+        !self.entries.is_empty()
+            || !self.subcommands.is_empty()
+            || !self.positional_choices.is_empty()
+            || !self.positionals.is_empty()
+    }
+
     /// canonicalise so the cache holds one shape. runs once at the end of every
     /// parse path.
     pub fn normalize(&mut self) {
@@ -584,6 +591,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_content_covers_every_completion_channel() {
+        assert!(!ManpageResult::default().has_structured_content());
+
+        let with_choice = ManpageResult {
+            positional_choices: vec![ManpageSubcommand::new("json".into(), String::new())],
+            ..ManpageResult::default()
+        };
+        assert!(with_choice.has_structured_content());
+
+        let with_positional = ManpageResult {
+            positionals: vec![("file".into(), Positional {
+                optional: false,
+                variadic: false,
+            })],
+            ..ManpageResult::default()
+        };
+        assert!(with_positional.has_structured_content());
+    }
 
     #[test]
     fn clamp_leaves_short_descriptions_untouched() {

@@ -102,10 +102,6 @@ fn self_listed(result: &ManpageResult, sub_args: &[String]) -> bool {
     })
 }
 
-const fn parse_is_empty(result: &ManpageResult) -> bool {
-    result.entries.is_empty() && result.subcommands.is_empty() && result.positionals.is_empty()
-}
-
 /// resolve one node in source priority: native (top level only), else manpage
 /// as primary (+help supplement, +recovered group children), else `--help`.
 ///
@@ -132,7 +128,7 @@ pub fn resolve_node(
 
     if let Some(contents) = probe.manpage(&hyphenated) {
         let mut result = parse_manpage(&contents);
-        if !result.entries.is_empty() || !result.subcommands.is_empty() {
+        if result.has_structured_content() {
             strip_subcmd_prefix(&mut result, &hyphenated);
             let supplemented = probe.supplement_from_help(&mut result, sub_args);
             let regrouped = if looks_like_unenumerated_group(&result)
@@ -161,7 +157,7 @@ pub fn resolve_node(
         return Outcome::Empty;
     };
     let result = parse_help(&text);
-    if parse_is_empty(&result) || self_listed(&result, sub_args) {
+    if !result.has_structured_content() || self_listed(&result, sub_args) {
         return Outcome::Empty;
     }
     let children = child_tokens(&result.subcommands);
