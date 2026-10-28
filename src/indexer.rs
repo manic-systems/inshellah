@@ -549,12 +549,48 @@ where
     Ok(())
 }
 
+fn validate_merge_inputs(profile_dir: &Path) -> io::Result<()> {
+    if !profile_dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("profile {} is not a directory", profile_dir.display()),
+        ));
+    }
+    let bin = profile_dir.join("bin");
+    match fs::read_dir(&bin) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => {
+            Err(io::Error::new(
+                err.kind(),
+                format!("cannot read profile bin {}, {err}", bin.display()),
+            ))
+        },
+        _ => Ok(()),
+    }
+}
+
+fn resolve_merge_sources(sources: &[(PathBuf, PathBuf)]) -> io::Result<Vec<(PathBuf, &Path)>> {
+    sources
+        .iter()
+        .map(|(package, index)| {
+            fs::canonicalize(package)
+                .map(|resolved| (resolved, index.as_path()))
+                .map_err(|err| {
+                    io::Error::new(
+                        err.kind(),
+                        format!("cannot resolve source package {}, {err}", package.display()),
+                    )
+                })
+        })
+        .collect()
+}
+
 /// each command's files come from the package owning the profile's binary for
 /// its root, else from the first source that has them.
 ///
 /// # Errors
 ///
-/// fails when the cache dir, `nu` discovery, a copy, or a cache write fails.
+/// fails when an input cannot be read, the cache dir, `nu` discovery, a copy,
+/// or a cache write fails.
 pub fn cmd_merge<S>(
     profile_dir: &Path,
     sources: &[(PathBuf, PathBuf)],
@@ -567,6 +603,8 @@ pub fn cmd_merge<S>(
 where
     S: BuildHasher,
 {
+    validate_merge_inputs(profile_dir)?;
+    let resolved_sources = resolve_merge_sources(sources)?;
     ensure_dir(dir)?;
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
@@ -575,27 +613,28 @@ where
     let mandirs = [profile_dir.join("share/man")];
 
     let owner_of = |root: &str| -> Option<&Path> {
-        let target = fs::read_link(profile.paths.get(root)?).ok()?;
-        sources
+        let target = fs::canonicalize(profile.paths.get(root)?).ok()?;
+        resolved_sources
             .iter()
             .find(|(package, _)| target.starts_with(package))
-            .map(|(_, index)| index.as_path())
+            .map(|(_, index)| *index)
     };
 
-    let mut claimed = HashMap::<String, PathBuf>::new();
-    let mut owned = Vec::<(PathBuf, String, String)>::new();
-
+    let mut candidates = Vec::<(&PathBuf, PathBuf, String, String)>::new();
     let mut seen = HashSet::<&PathBuf>::new();
 
     for (_, index) in sources {
         if !seen.insert(index) {
             continue;
         }
-        let Ok(entries) = fs::read_dir(index) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries = fs::read_dir(index).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("cannot read source index {}, {err}", index.display()),
+            )
+        })?;
+        for entry in entries {
+            let path = entry?.path();
             let (Some(stem), Some(ext)) = (
                 path.file_stem().and_then(OsStr::to_str),
                 path.extension().and_then(OsStr::to_str),
@@ -609,18 +648,23 @@ where
                 continue;
             };
             let root = cmd.split(' ').next().unwrap_or_default().to_owned();
-            let owning_index = owner_of(&root).map_or_else(
-                || {
-                    claimed
-                        .entry(root.clone())
-                        .or_insert_with(|| index.clone())
-                        .clone()
-                },
-                Path::to_path_buf,
-            );
-            if owning_index == *index {
-                owned.push((path, cmd, root));
-            }
+            candidates.push((index, path, cmd, root));
+        }
+    }
+
+    let mut claimed = HashMap::<&str, &Path>::new();
+    let mut rooted = HashSet::<(&Path, &str)>::new();
+    for (index, _, _, root) in &candidates {
+        claimed.entry(root).or_insert(index.as_path());
+        rooted.insert((index.as_path(), root));
+    }
+    let mut owned = Vec::<(PathBuf, String, String)>::new();
+    for (index, path, cmd, root) in &candidates {
+        let chosen = owner_of(root)
+            .filter(|owner| rooted.contains(&(*owner, root.as_str())))
+            .or_else(|| claimed.get(root.as_str()).copied());
+        if chosen == Some(index.as_path()) {
+            owned.push((path.clone(), cmd.clone(), root.clone()));
         }
     }
 
