@@ -542,13 +542,6 @@ fn source_from_json_data(data: &str) -> String {
         .unwrap_or_else(|| "json".to_owned())
 }
 
-const fn has_completion_content(result: &ManpageResult) -> bool {
-    !result.entries.is_empty()
-        || !result.subcommands.is_empty()
-        || !result.positional_choices.is_empty()
-        || !result.positionals.is_empty()
-}
-
 fn switch_from_json(value: &Value) -> Option<OwnedSwitch> {
     let kind = value.get("type")?.as_str()?;
     match kind {
@@ -695,7 +688,7 @@ pub fn lookup(dirs: &[PathBuf], command: &str) -> Option<ManpageResult> {
     for directory in dirs {
         let native = iter::once(&base_name).chain(&parent_base).find_map(|base| {
             let data = read_file(&directory.join(format!("{base}.nu")))?;
-            Some(parse_nu_completions(command, &data)).filter(has_completion_content)
+            Some(parse_nu_completions(command, &data)).filter(ManpageResult::has_structured_content)
         });
         if native.is_some() {
             return native;
@@ -711,7 +704,7 @@ pub fn lookup_raw(dirs: &[PathBuf], command: &str) -> Option<String> {
     let base_name = filename_of_command(command);
     for directory in dirs {
         if let Some(data) = read_file(&directory.join(format!("{base_name}.nu")))
-            && has_completion_content(&parse_nu_completions(command, &data))
+            && parse_nu_completions(command, &data).has_structured_content()
         {
             return Some(data);
         }
@@ -835,7 +828,7 @@ pub fn file_type_of(dirs: &[PathBuf], command: &str) -> Option<String> {
     let base = filename_of_command(command);
     for directory in dirs {
         if let Some(data) = read_file(&directory.join(format!("{base}.nu")))
-            && has_completion_content(&parse_nu_completions(command, &data))
+            && parse_nu_completions(command, &data).has_structured_content()
         {
             return Some("native".to_owned());
         }

@@ -43,7 +43,7 @@ pub struct Scrape {
     /// file listing commands to skip entirely
     #[pound(long)]
     pub ignore:     Option<PathBuf>,
-    /// file listing commands to scrape with --help, skipping manpages
+    /// file of commands, and their subcommands, to scrape with --help only
     #[pound(long)]
     pub help_only:  Option<PathBuf>,
     /// per-subprocess timeout in milliseconds

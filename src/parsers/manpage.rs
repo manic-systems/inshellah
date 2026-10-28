@@ -142,6 +142,22 @@ pub struct ManpageResult {
 }
 
 impl ManpageResult {
+    pub const fn has_structured_content(&self) -> bool {
+        !self.entries.is_empty()
+            || !self.subcommands.is_empty()
+            || !self.positional_choices.is_empty()
+            || !self.positionals.is_empty()
+    }
+
+    /// whether a manpage names anything the cache can act on. bare positionals
+    /// are left out because synopsis lines parse into junk names that would
+    /// outrank `--help`.
+    pub const fn has_manpage_content(&self) -> bool {
+        !self.entries.is_empty()
+            || !self.subcommands.is_empty()
+            || !self.positional_choices.is_empty()
+    }
+
     /// canonicalise so the cache holds one shape. runs once at the end of every
     /// parse path.
     pub fn normalize(&mut self) {

@@ -102,10 +102,6 @@ fn self_listed(result: &ManpageResult, sub_args: &[String]) -> bool {
     })
 }
 
-const fn parse_is_empty(result: &ManpageResult) -> bool {
-    result.entries.is_empty() && result.subcommands.is_empty() && result.positionals.is_empty()
-}
-
 /// resolve one node in source priority: native (top level only), else manpage
 /// as primary (+help supplement, +recovered group children), else `--help`.
 ///
@@ -132,7 +128,7 @@ pub fn resolve_node(
 
     if let Some(contents) = probe.manpage(&hyphenated) {
         let mut result = parse_manpage(&contents);
-        if !result.entries.is_empty() || !result.subcommands.is_empty() {
+        if result.has_manpage_content() {
             strip_subcmd_prefix(&mut result, &hyphenated);
             let supplemented = probe.supplement_from_help(&mut result, sub_args);
             let regrouped = if looks_like_unenumerated_group(&result)
@@ -161,7 +157,7 @@ pub fn resolve_node(
         return Outcome::Empty;
     };
     let result = parse_help(&text);
-    if parse_is_empty(&result) || self_listed(&result, sub_args) {
+    if !result.has_structured_content() || self_listed(&result, sub_args) {
         return Outcome::Empty;
     }
     let children = child_tokens(&result.subcommands);
@@ -177,9 +173,12 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
-    use crate::parsers::manpage::{
-        ManpageEntry,
-        OwnedSwitch,
+    use crate::{
+        parsers::manpage::{
+            ManpageEntry,
+            OwnedSwitch,
+        },
+        types::Positional,
     };
 
     fn sub(name: &str) -> ManpageSubcommand {
@@ -210,6 +209,16 @@ mod tests {
         }
     }
 
+    fn with_positional(name: &str) -> ManpageResult {
+        ManpageResult {
+            positionals: vec![(name.to_owned(), Positional {
+                optional: false,
+                variadic: false,
+            })],
+            ..ManpageResult::default()
+        }
+    }
+
     /// counts native probes, to prove they don't fire for subcommands.
     struct FakeProbe {
         class:        NodeClass,
@@ -217,6 +226,7 @@ mod tests {
         native_calls: Cell<u32>,
         manpage:      Option<String>,
         help:         Option<String>,
+        supplement:   Option<ManpageResult>,
     }
 
     impl Default for FakeProbe {
@@ -227,6 +237,7 @@ mod tests {
                 native_calls: Cell::new(0),
                 manpage:      None,
                 help:         None,
+                supplement:   None,
             }
         }
     }
@@ -245,8 +256,13 @@ mod tests {
         fn help_text(&self, _sub_args: &[String]) -> Option<String> {
             self.help.clone()
         }
-        fn supplement_from_help(&self, _r: &mut ManpageResult, _s: &[String]) -> bool {
-            false
+        fn supplement_from_help(&self, result: &mut ManpageResult, _s: &[String]) -> bool {
+            let Some(help) = &self.supplement else {
+                return false;
+            };
+            result.entries.extend(help.entries.iter().cloned());
+            result.subcommands.extend(help.subcommands.iter().cloned());
+            true
         }
         fn group_children(&self, _h: &str, _s: &[String]) -> Option<Vec<ManpageSubcommand>> {
             None
@@ -255,7 +271,14 @@ mod tests {
 
     // parser stand-ins keyed off a marker in the text.
     fn parse_manpage_stub(text: &str) -> ManpageResult {
-        if text == "MAN_SUBS" {
+        if text == "MAN_POSITIONAL" {
+            ManpageResult {
+                positional_choices: vec![sub("start")],
+                ..ManpageResult::default()
+            }
+        } else if text == "MAN_BARE" {
+            with_positional("json")
+        } else if text == "MAN_SUBS" {
             with_subs(&["build", "check"])
         } else if text == "MAN_FLAG" {
             with_flag()
@@ -267,6 +290,7 @@ mod tests {
         match text {
             "HELP_SUBS" => with_subs(&["alpha", "beta"]),
             "HELP_FLAG" => with_flag(),
+            "HELP_FILES" => with_positional("file"),
             "HELP_SELFLISTED" => with_subs(&["alpha"]),
             _ => ManpageResult::default(),
         }
@@ -344,6 +368,50 @@ mod tests {
             },
             other @ (Outcome::Native { .. } | Outcome::Empty) => {
                 panic!("expected manpage Content, got {other:?}")
+            },
+        }
+    }
+
+    #[test]
+    fn positional_only_manpage_gains_subcommands_and_flags_from_help() {
+        let mut richer = with_subs(&["build", "check"]);
+        richer.entries = with_flag().entries;
+        let probe = FakeProbe {
+            manpage: Some("MAN_POSITIONAL".into()),
+            help: Some("HELP_SUBS".into()),
+            supplement: Some(richer),
+            ..Default::default()
+        };
+        match resolve(&probe, "foo", &[]) {
+            Outcome::Content {
+                result,
+                source,
+                children,
+            } => {
+                assert_eq!(source, "manpage+help");
+                assert_eq!(result.entries.len(), 1);
+                assert_eq!(children, vec!["build".to_owned(), "check".to_owned()]);
+            },
+            other @ (Outcome::Native { .. } | Outcome::Empty) => {
+                panic!("expected supplemented Content, got {other:?}")
+            },
+        }
+    }
+
+    #[test]
+    fn bare_positional_manpage_yields_to_help() {
+        let probe = FakeProbe {
+            manpage: Some("MAN_BARE".into()),
+            help: Some("HELP_FILES".into()),
+            ..Default::default()
+        };
+        match resolve(&probe, "foo", &[]) {
+            Outcome::Content { result, source, .. } => {
+                assert_eq!(source, "help");
+                assert_eq!(result.positionals[0].0, "file");
+            },
+            other @ (Outcome::Native { .. } | Outcome::Empty) => {
+                panic!("expected help Content, got {other:?}")
             },
         }
     }

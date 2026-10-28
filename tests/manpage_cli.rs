@@ -160,3 +160,22 @@ Set argv[0] to the value string.
 
     fs::remove_dir_all(root).expect("remove temp dir");
 }
+
+#[test]
+fn manpage_with_only_synopsis_positionals_prints_nothing() {
+    let root = unique_temp_dir("inshellah-manpage-cli");
+    fs::create_dir_all(&root).expect("temp dir");
+    let manpage = root.join("jq.1");
+    fs::write(&manpage, ".SH SYNOPSIS\njq <filter> <file>\n").expect("write manpage");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("manpage")
+        .arg(&manpage)
+        .output()
+        .expect("run inshellah manpage");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    fs::remove_dir_all(root).expect("remove temp dir");
+    assert!(output.status.success());
+    assert_eq!(stdout, "");
+}
