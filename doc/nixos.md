@@ -114,8 +114,8 @@ programs.inshellah = {
   # set to 0 to disable this runtime timeout
   dynamicTimeoutMs = 5000;
 
-  # result cap requested from live providers that support native limits.
-  # set to 0 to omit provider-specific limit flags
+  # result cap requested from live providers that support native limits,
+  # lifted once a prefix is typed. set to 0 to omit provider-specific limit flags
   dynamicLimit = 200;
 
   # characters that trigger flag completions when a partial token begins
@@ -192,7 +192,9 @@ the provider timeout defaults to 5s and is controlled by
 `programs.inshellah.dynamicTimeoutMs` / `INSHELLAH_DYNAMIC_TIMEOUT_MS`.
 set it to 0 to disable the runtime timeout. providers with native result
 caps use `programs.inshellah.dynamicLimit` / `INSHELLAH_DYNAMIC_LIMIT`,
-defaulting to 200. set it to 0 to omit provider-specific limit flags;
+defaulting to 200. the cap only bounds the unfiltered listing, so once a prefix
+is typed providers query without it. set it to 0 to omit provider-specific
+limit flags. the nix provider caps its own listing the same way, and other
 providers without native caps ignore it.
 
 `programs.inshellah.completeTimeoutMs` / `INSHELLAH_TIMEOUT_MS` is

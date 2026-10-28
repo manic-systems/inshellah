@@ -135,7 +135,7 @@ fn coredumpctl_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>
     let mut out: Vec<Candidate> = Vec::new();
 
     let mut args: Vec<String> = vec![ctx.bin("coredumpctl"), "list".into()];
-    args.extend(ctx.limit_args("-n"));
+    args.extend(ctx.limit_args("-n", last));
     args.extend(["--no-pager", "--no-legend"].into_iter().map(str::to_owned));
     if let Some(text) = run(&args, ctx) {
         for line in text.lines() {

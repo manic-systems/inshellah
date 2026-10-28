@@ -130,11 +130,11 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
             values,
             description,
         } => Some(static_candidates(values, description)),
-        GitCompletion::Refs => git_refs(&git, ctx),
-        GitCompletion::Branches => git_branches(&git, ctx),
-        GitCompletion::Tags => git_tags(&git, ctx),
+        GitCompletion::Refs => git_refs(&git, ctx, words.current()),
+        GitCompletion::Branches => git_branches(&git, ctx, words.current()),
+        GitCompletion::Tags => git_tags(&git, ctx, words.current()),
         GitCompletion::Remotes => git_remotes(&git, ctx),
-        GitCompletion::Stashes => git_stashes(&git, ctx),
+        GitCompletion::Stashes => git_stashes(&git, ctx, words.current()),
         GitCompletion::StatusPaths => git_status_paths(&git, ctx),
         GitCompletion::TrackedPaths => git_tracked_paths(&git, ctx),
         GitCompletion::Submodules => git_submodules(&git, ctx),
@@ -251,9 +251,9 @@ fn command(git: &[String], args: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn git_refs(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+fn git_refs(git: &[String], ctx: &DynCtx, prefix: &str) -> Option<Vec<Candidate>> {
     let mut args = command(git, &["for-each-ref"]);
-    args.extend(ctx.limit_args("--count"));
+    args.extend(ctx.limit_args("--count", prefix));
     args.push("--format=%(refname:short)%09%(objecttype)%09%(contents:subject)".into());
     args.extend(
         ["refs/heads", "refs/remotes", "refs/tags"]
@@ -269,9 +269,9 @@ fn git_refs(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     }))
 }
 
-fn git_branches(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+fn git_branches(git: &[String], ctx: &DynCtx, prefix: &str) -> Option<Vec<Candidate>> {
     let mut args = command(git, &["for-each-ref"]);
-    args.extend(ctx.limit_args("--count"));
+    args.extend(ctx.limit_args("--count", prefix));
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/heads".into());
     let out = run(&args, ctx)?;
@@ -283,9 +283,9 @@ fn git_branches(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     }))
 }
 
-fn git_tags(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+fn git_tags(git: &[String], ctx: &DynCtx, prefix: &str) -> Option<Vec<Candidate>> {
     let mut args = command(git, &["for-each-ref"]);
-    args.extend(ctx.limit_args("--count"));
+    args.extend(ctx.limit_args("--count", prefix));
     args.push("--format=%(refname:short)%09%(contents:subject)".into());
     args.push("refs/tags".into());
     let out = run(&args, ctx)?;
@@ -310,9 +310,9 @@ fn git_remotes(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn git_stashes(git: &[String], ctx: &DynCtx) -> Option<Vec<Candidate>> {
+fn git_stashes(git: &[String], ctx: &DynCtx, prefix: &str) -> Option<Vec<Candidate>> {
     let mut args = command(git, &["stash", "list"]);
-    args.extend(ctx.limit_args("-n"));
+    args.extend(ctx.limit_args("-n", prefix));
     let out = run(&args, ctx)?;
     let mut candidates = Vec::new();
     // stash@{N}: WIP on branch: subject

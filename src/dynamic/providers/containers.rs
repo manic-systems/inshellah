@@ -36,7 +36,7 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     if DOCKER_CONTAINER_VERBS.contains(&sub) {
         let mut args = base;
         args.push("ps".into());
-        args.extend(ctx.limit_args("--last"));
+        args.extend(ctx.limit_args("--last", words.current()));
         args.extend(
             ["--format", "{{.Names}}\t{{.Image}}"]
                 .into_iter()
