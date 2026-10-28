@@ -33,6 +33,14 @@ enum Kind {
     Fallback,
 }
 
+/// where a command accepts its global flags. cobra persistent flags work after
+/// the subcommand too, git and docker globals only before it.
+#[derive(Clone, Copy, PartialEq)]
+enum Globals {
+    Leading,
+    Anywhere,
+}
+
 trait Provider {
     fn commands(&self) -> &'static [&'static str];
     fn kind(&self) -> Kind;
@@ -48,6 +56,7 @@ struct FunctionProvider {
     matching:    Matching,
     /// global flags whose value is the next word, beyond what the cache knows.
     value_flags: &'static [&'static str],
+    globals:     Globals,
     complete:    CompleteFn,
 }
 
@@ -69,8 +78,10 @@ impl Provider for FunctionProvider {
     }
 
     fn complete(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
-        let words = Words::parse(spans, |flag| {
-            self.value_flags.contains(&flag) || ctx.value_flags.iter().any(|known| known == flag)
+        let words = Words::parse(spans, |flag, leading| {
+            let known = |flags: &[String]| flags.iter().any(|known| known == flag);
+            let global = self.value_flags.contains(&flag) || known(ctx.global_value_flags);
+            known(ctx.value_flags) || (global && (leading || self.globals == Globals::Anywhere))
         });
         (self.complete)(&words, ctx)
     }
@@ -83,6 +94,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         files:       Files::Replace,
         matching:    Matching::Value,
         value_flags: &[],
+        globals:     Globals::Leading,
         complete:    adb::complete,
     },
     FunctionProvider {
@@ -91,6 +103,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         files:       Files::Alongside,
         matching:    Matching::Value,
         value_flags: &[],
+        globals:     Globals::Leading,
         complete:    nix::complete,
     },
     FunctionProvider {
@@ -127,6 +140,7 @@ const PROVIDERS: &[FunctionProvider] = &[
             "--unit",
             "--user-unit",
         ],
+        globals:     Globals::Anywhere,
         complete:    systemd::complete,
     },
     FunctionProvider {
@@ -135,6 +149,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         files:       Files::Replace,
         matching:    Matching::Value,
         value_flags: &[],
+        globals:     Globals::Leading,
         complete:    ssh::complete,
     },
     FunctionProvider {
@@ -143,6 +158,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         files:       Files::Alongside,
         matching:    Matching::Value,
         value_flags: &[],
+        globals:     Globals::Leading,
         complete:    ssh::complete,
     },
     FunctionProvider {
@@ -162,6 +178,7 @@ const PROVIDERS: &[FunctionProvider] = &[
             "-l",
             "--log-level",
         ],
+        globals:     Globals::Leading,
         complete:    containers::complete,
     },
     FunctionProvider {
@@ -187,6 +204,7 @@ const PROVIDERS: &[FunctionProvider] = &[
             "-c",
             "--container",
         ],
+        globals:     Globals::Anywhere,
         complete:    kubectl::complete,
     },
     FunctionProvider {
@@ -195,6 +213,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         files:       Files::Alongside,
         matching:    Matching::Value,
         value_flags: &["-C", "-c", "--git-dir", "--work-tree", "--namespace"],
+        globals:     Globals::Leading,
         complete:    git::complete,
     },
     FunctionProvider {
@@ -203,6 +222,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         files:       Files::Replace,
         matching:    Matching::Value,
         value_flags: &[],
+        globals:     Globals::Leading,
         complete:    jj::complete,
     },
     FunctionProvider {
@@ -227,6 +247,7 @@ const PROVIDERS: &[FunctionProvider] = &[
             "--working-directory",
             "--build-file",
         ],
+        globals:     Globals::Anywhere,
         complete:    project::complete,
     },
     FunctionProvider {
@@ -235,6 +256,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         files:       Files::Replace,
         matching:    Matching::ValueOrDescription,
         value_flags: &[],
+        globals:     Globals::Leading,
         complete:    process::complete,
     },
 ];

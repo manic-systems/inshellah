@@ -31,13 +31,15 @@ pub enum Matching {
 
 #[derive(Clone, Copy)]
 pub struct DynCtx<'span> {
-    pub deadline:          Option<Instant>,
-    pub limit:             usize,
-    pub cmd_name:          &'span str,
-    pub explicit_cmd_path: Option<&'span Path>,
-    pub slot:              Slot<'span>,
-    /// flags the static cache knows take a value.
-    pub value_flags:       &'span [String],
+    pub deadline:           Option<Instant>,
+    pub limit:              usize,
+    pub cmd_name:           &'span str,
+    pub explicit_cmd_path:  Option<&'span Path>,
+    pub slot:               Slot<'span>,
+    /// flags the static cache knows take a value at the root command.
+    pub global_value_flags: &'span [String],
+    /// flags the static cache knows take a value at the resolved subcommand.
+    pub value_flags:        &'span [String],
 }
 
 /// the words before the cursor, split into positionals and flags.
@@ -47,12 +49,16 @@ pub struct Words<'span> {
     flags:       Vec<(&'span str, Option<&'span str>)>,
     /// how many of `flags` came before the first positional.
     leading:     usize,
+    /// the last word before the cursor when it is a flag still owed a value.
+    pending:     Option<&'span str>,
 }
 
 impl<'span> Words<'span> {
+    /// `takes_value(flag, leading)` says whether `flag` consumes the next word,
+    /// where `leading` is true before the first positional.
     pub fn parse<TakesValue>(spans: &'span [String], takes_value: TakesValue) -> Self
     where
-        TakesValue: Fn(&str) -> bool,
+        TakesValue: Fn(&str, bool) -> bool,
     {
         let before = spans.split_last().map_or(&[][..], |(_, before)| before);
         let mut words = before.iter().skip(1).map(String::as_str);
@@ -60,6 +66,7 @@ impl<'span> Words<'span> {
         let mut flags = Vec::new();
         let mut after_dashes = false;
         let mut leading = None;
+        let mut pending = None;
 
         while let Some(word) = words.next() {
             if word.is_empty() {
@@ -71,12 +78,14 @@ impl<'span> Words<'span> {
             } else if word == "--" {
                 after_dashes = true;
             } else if let Some((flag, value)) = word.split_once('=')
-                && flag.starts_with("--")
+                && (flag.starts_with("--") || flag.len() == 2)
             {
                 flags.push((flag, Some(value)));
             } else {
-                let value = if takes_value(word) {
-                    words.next()
+                let value = if consumes_next(word, leading.is_none(), &takes_value) {
+                    let value = words.next();
+                    pending = value.is_none().then_some(word);
+                    value
                 } else {
                     None
                 };
@@ -88,6 +97,7 @@ impl<'span> Words<'span> {
             positionals,
             leading: leading.unwrap_or(flags.len()),
             flags,
+            pending,
         }
     }
 
@@ -113,6 +123,11 @@ impl<'span> Words<'span> {
         self.positionals.len()
     }
 
+    /// whether the cursor word is a command operand rather than a flag's value.
+    pub const fn at_operand(&self, ctx: &DynCtx<'_>) -> bool {
+        self.pending.is_none() && ctx.slot.positional()
+    }
+
     pub fn has(&self, names: &[&str]) -> bool {
         self.flags.iter().any(|(flag, _)| names.contains(flag))
     }
@@ -130,6 +145,27 @@ impl<'span> Words<'span> {
     pub fn global_flag(&self, names: &[&str]) -> Option<(&'span str, &'span str)> {
         flag_in(&self.flags[..self.leading], names)
     }
+}
+
+/// a short cluster like `-fNL` takes the next word when its first
+/// value-taking letter is its last, since getopt hands that letter the rest.
+fn consumes_next<TakesValue>(word: &str, leading: bool, takes_value: &TakesValue) -> bool
+where
+    TakesValue: Fn(&str, bool) -> bool,
+{
+    if takes_value(word, leading) {
+        return true;
+    }
+    let Some(cluster) = word
+        .strip_prefix('-')
+        .filter(|cluster| cluster.len() > 1 && !cluster.starts_with('-'))
+    else {
+        return false;
+    };
+    cluster
+        .char_indices()
+        .find(|(_, letter)| takes_value(&format!("-{letter}"), leading))
+        .is_some_and(|(at, letter)| at + letter.len_utf8() == cluster.len())
 }
 
 fn flag_in<'span>(

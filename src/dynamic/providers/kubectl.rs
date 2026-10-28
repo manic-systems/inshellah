@@ -8,7 +8,7 @@ use crate::{
     },
 };
 pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if !ctx.slot.positional() {
+    if !words.at_operand(ctx) {
         return None;
     }
     let sub = words.arg(0);

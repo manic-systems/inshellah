@@ -269,7 +269,8 @@ pub fn decide(
                 ArgSlot::AfterDoubleDash => Slot::Positional,
                 ArgSlot::Free => Slot::from_spans(&spans),
             },
-            &value_flags(lookup(&dirs, &cmd_name).as_ref(), found.as_ref()),
+            &value_flags(lookup(&dirs, &cmd_name).as_ref()),
+            &subcommand_value_flags(found.as_ref()),
             trace.protocol,
             cfg,
         )
@@ -582,11 +583,11 @@ fn forget_foreign_protocol(user_dir: &Path, reply: &Reply, trace: &mut Trace) {
     }
 }
 
-/// value-taking flags of the root command and the resolved subcommand.
-fn value_flags(root: Option<&ManpageResult>, found: Option<&Node>) -> Vec<String> {
-    let nodes = root.into_iter().chain(found.map(|node| &node.result));
-    nodes
-        .flat_map(|result| &result.entries)
+/// value-taking flags of the root command or the resolved subcommand.
+fn value_flags(result: Option<&ManpageResult>) -> Vec<String> {
+    result
+        .into_iter()
+        .flat_map(|found| &found.entries)
         .filter(|entry| entry.takes_next_word())
         .flat_map(|entry| {
             match &entry.switch {
@@ -596,6 +597,10 @@ fn value_flags(root: Option<&ManpageResult>, found: Option<&Node>) -> Vec<String
             }
         })
         .collect()
+}
+
+fn subcommand_value_flags(found: Option<&Node>) -> Vec<String> {
+    value_flags(found.filter(|node| node.depth > 1).map(|node| &node.result))
 }
 
 fn switch_takes_value(result: &ManpageResult, token: &str) -> bool {

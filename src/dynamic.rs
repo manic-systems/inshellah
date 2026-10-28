@@ -127,6 +127,7 @@ pub fn dynamic_value_completions(
         cmd_name,
         explicit_cmd_path,
         slot: Slot::from_spans(&spans),
+        global_value_flags: &[],
         value_flags: &[],
     };
     providers::value_completions(&spans, &ctx)
@@ -143,6 +144,7 @@ pub fn dynamic_complete_with_path(
         spans,
         explicit_cmd_path,
         Slot::from_spans(spans),
+        &[],
         &[],
         None,
         cfg,
@@ -161,6 +163,7 @@ pub fn dynamic_complete_candidates_with_path(
     spans: &[String],
     explicit_cmd_path: Option<&Path>,
     slot: Slot<'_>,
+    global_value_flags: &[String],
     value_flags: &[String],
     protocol: Option<Protocol>,
     cfg: &Config,
@@ -179,6 +182,7 @@ pub fn dynamic_complete_candidates_with_path(
         cmd_name: &spans[0],
         explicit_cmd_path,
         slot,
+        global_value_flags,
         value_flags,
     };
     let reply = match (providers::dispatch(spans, &ctx), protocol) {
@@ -293,7 +297,7 @@ mod tests {
             "prod".into(),
             String::new(),
         ];
-        let scope = kubectl_scope(&Words::parse(&spans, |flag| flag == "-n"));
+        let scope = kubectl_scope(&Words::parse(&spans, |flag, _| flag == "-n"));
         assert!(!scope.all);
         assert_eq!(scope.args, vec!["-n".to_owned(), "prod".to_owned()]);
     }
@@ -307,8 +311,29 @@ mod tests {
             "-A".into(),
             String::new(),
         ];
-        let scope = kubectl_scope(&Words::parse(&spans, |_| false));
+        let scope = kubectl_scope(&Words::parse(&spans, |_, _| false));
         assert!(scope.all);
+    }
+
+    fn spans_of(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn leading_only_flags_take_no_value_after_the_subcommand() {
+        let spans = spans_of(&["git", "-c", "a=b", "log", "-c", "main", ""]);
+        let words = Words::parse(&spans, |flag, leading| flag == "-c" && leading);
+        assert_eq!(words.arg_count(), 2);
+        assert_eq!(words.arg(1), "main");
+    }
+
+    #[test]
+    fn a_cluster_takes_a_value_only_when_its_value_letter_is_last() {
+        let takes_l = |flag: &str, _| flag == "-L";
+        let trailing = spans_of(&["ssh", "-fNL", "8080:db:80", "host", ""]);
+        assert_eq!(Words::parse(&trailing, takes_l).arg(0), "host");
+        let attached = spans_of(&["ssh", "-L8080:db:80", "host", ""]);
+        assert_eq!(Words::parse(&attached, takes_l).arg(0), "host");
     }
 
     #[test]
