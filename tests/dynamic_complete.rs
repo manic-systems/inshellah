@@ -67,6 +67,8 @@ fn install_fakes(bin_dir: &Path) {
 const FAKE_NIX: &str = r#"#!/bin/sh
 if [ "${1:-}" = eval ]; then
   printf 'raw package description\n'
+elif case "$*" in *big#*) true ;; *) false ;; esac; then
+  printf 'header\nbig#pkg-a\nbig#pkg-b\nbig#pkg-c\nbig#pkg-d\nbig#pkg-e\nbig#pkg-f\nbig#pkg-g\n'
 elif [ "${1:-}" = slow ]; then
   sleep 1
   printf 'header\nslow-package\n'

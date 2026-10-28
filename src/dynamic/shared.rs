@@ -195,8 +195,10 @@ impl DynCtx<'_> {
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    pub(crate) fn limit_args(&self, flag: &str) -> Vec<String> {
-        if self.limit == 0 {
+    /// a backend row limit, dropped once a prefix is typed because the backend
+    /// cuts its list before `filter_candidates` sees the prefix.
+    pub(crate) fn limit_args(&self, flag: &str, prefix: &str) -> Vec<String> {
+        if self.limit == 0 || !prefix.is_empty() {
             Vec::new()
         } else {
             vec![flag.to_owned(), self.limit.to_string()]

@@ -32,7 +32,10 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     // bare `nixpkgs#` makes nix return the whole attribute set (tens of
     // thousands of entries), bound it like every other provider to avoid
     // shipping and fuzzy-scoring megabytes per keystroke.
-    if ctx.limit != 0 && rows.len() > ctx.limit {
+    let bare_attribute_set = last
+        .rsplit_once('#')
+        .is_some_and(|(_, typed)| typed.is_empty());
+    if bare_attribute_set && ctx.limit != 0 && rows.len() > ctx.limit {
         rows.truncate(ctx.limit);
     }
     let enrich = rows.len() < 6 && looks_like_flake_pkg(last);
