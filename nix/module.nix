@@ -32,6 +32,18 @@ let
   cfg = config.programs.inshellah;
   completerSnippet = ./inshellah-completer.nu;
   defaultPackage = pkgs.callPackage ./package.nix { };
+  wrapperFor =
+    buildPkgs: package:
+    let
+      dirPaths = lib.concatStringsSep ":" (
+        [ "/run/current-system/sw${cfg.completionsPath}" ] ++ cfg.extraDirs
+      );
+    in
+    buildPkgs.writeShellScriptBin "inshellah" ''
+      export INSHELLAH_DIR="''${INSHELLAH_DIR:-''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}}"
+      exec ${package}/bin/inshellah "$@"
+    '';
+  wrapped = wrapperFor pkgs cfg.package;
 in
 {
   options.programs.inshellah = {
@@ -232,22 +244,12 @@ in
       toString cfg.completeTimeoutMs
     );
 
-    environment.systemPackages =
-      let
-        systemDir = "/run/current-system/sw${cfg.completionsPath}";
-        dirPaths = lib.concatStringsSep ":" ([ systemDir ] ++ cfg.extraDirs);
-        wrapped = pkgs.writeShellScriptBin "inshellah" ''
-          export INSHELLAH_DIR="''${INSHELLAH_DIR:-''${XDG_CACHE_HOME:-$HOME/.cache}/inshellah:${dirPaths}}"
-          exec ${cfg.package}/bin/inshellah "$@"
-        '';
-      in
-      [
-        (lib.hiPrio wrapped)
-        cfg.package
-      ];
+    environment.systemPackages = [
+      (lib.hiPrio wrapped)
+      cfg.package
+    ];
     environment.extraSetup =
       let
-        inshellah = "${cfg.package}/bin/inshellah";
         destDir = "$out${cfg.completionsPath}";
         ignoreFile = pkgs.writeText "inshellah-ignore" (
           lib.concatMapStrings (name: "${name}\n") cfg.ignoreCommands
@@ -270,53 +272,18 @@ in
           map (o: if o == main then pkg else pkg.${o}) (
             lib.filter (o: lib.elem o (pkg.outputs or [ main ])) wanted
           );
-        hostTools = {
-          inherit (pkgs) bash coreutils man;
-          inherit (pkgs.stdenv.hostPlatform) system;
-          nushell = cfg.nushellPackage;
-          inshellah = cfg.package;
-        };
-        # aliases warn once instantiated, long after tryEval has passed them
-        # as a twin, so skip them by name
-        aliases = import (
-          pkgs.path + "/pkgs/top-level/aliases.nix"
-        ) lib pkgs.buildPackages pkgs.buildPackages;
-        buildTwin =
-          pkg:
-          let
-            name = pkg.pname or "";
-            byName = if aliases ? ${name} then null else pkgs.buildPackages.${name} or null;
-            sameByName = builtins.tryEval (
-              lib.isDerivation byName
-              && byName.pname or null == pkg.pname
-              && byName.version or null == pkg.version or null
-            );
-          in
-          if pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform then
-            null
-          else if pkg ? __spliced.buildHost then
-            pkg.__spliced.buildHost
-          else if sameByName.success && sameByName.value then
-            byName
-          else
-            null;
-        buildTools =
-          let
-            nushell = buildTwin cfg.nushellPackage;
-            inshellah =
-              if cfg.package == defaultPackage then
-                pkgs.buildPackages.callPackage ./package.nix { }
-              else
-                buildTwin cfg.package;
-          in
-          if nushell == null || inshellah == null then
-            null
-          else
-            {
-              inherit (pkgs.buildPackages) bash coreutils man;
-              inherit (pkgs.stdenv.buildPlatform) system;
-              inherit nushell inshellah;
+        inherit
+          (import ./tools.nix {
+            inherit pkgs cfg defaultPackage;
+            wrapper = {
+              package = wrapped;
+              forBuild = wrapperFor;
             };
+          })
+          mergeTools
+          indexToolsFor
+          ;
+        inshellah = "${mergeTools.inshellah}/bin/inshellah";
         # some tools put their own bin/ on PATH before exec'ing `man` for
         # `--help`, so `man` sits beside them as in the profile.
         mkIndex =
@@ -359,36 +326,27 @@ in
               ''
             ];
           };
-        # a cross host scrapes each package's build-platform twin natively; one
-        # without a twin indexes on the host platform via a native builder.
+        # a cross host scrapes each package's build-platform twin natively.
         indexFor =
           pkg:
           let
-            twin = buildTwin pkg;
+            plan = indexToolsFor pkg;
+            index = mkIndex pkg.name plan.tools (installedOutputs plan.scrape);
           in
-          {
-            prefixes = installedOutputs pkg;
-            index =
-              if twin != null && buildTools != null then
-                mkIndex pkg.name buildTools (installedOutputs twin)
-              else
-                mkIndex pkg.name hostTools (installedOutputs pkg);
-          };
+          lib.optionalString (plan != null) (
+            lib.concatMapStrings (prefix: "${prefix} ${index}\n") (installedOutputs pkg)
+          );
         sourcesFile = pkgs.writeText "inshellah-sources" (
-          lib.concatMapStrings (
-            pkg:
-            let
-              inherit (indexFor pkg) prefixes index;
-            in
-            lib.concatMapStrings (prefix: "${prefix} ${index}\n") prefixes
-          ) (lib.filter lib.isDerivation (config.environment.systemPackages ++ cfg.extraScrapePackages))
+          lib.concatMapStrings indexFor (
+            lib.filter lib.isDerivation (config.environment.systemPackages ++ cfg.extraScrapePackages)
+          )
         );
         snippetFile = pkgs.writeText "inshellah-completer.nu" cfg.snippet;
       in
       ''
         mkdir -p ${destDir}
 
-        PATH="${cfg.nushellPackage}/bin:$PATH" \
+        PATH="${mergeTools.nushell}/bin:$PATH" \
           ${inshellah} merge "$out" --dir ${destDir} --sources ${sourcesFile}${flags}
 
         find ${destDir} -maxdepth 1 -empty -delete

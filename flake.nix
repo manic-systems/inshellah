@@ -148,6 +148,7 @@
         {
           inherit rust nushell;
           module-indexing = import ./nix/tests/module-indexing.nix { inherit pkgs; };
+          module-cross = import ./nix/tests/module-cross.nix { inherit pkgs; };
           fmt =
             pkgs.runCommand "inshellah-fmt-check"
               {
