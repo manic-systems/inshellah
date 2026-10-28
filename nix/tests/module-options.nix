@@ -40,8 +40,12 @@ let
     let
       name = builtins.head (builtins.attrNames case);
       evaluated = (evalModule case).config.programs.inshellah.${name};
+      config = (evalModule case).config;
+      forced = builtins.seq (map (pkg: pkg.drvPath) config.environment.systemPackages) (
+        builtins.stringLength config.environment.extraSetup
+      );
     in
-    (builtins.tryEval evaluated).success;
+    (builtins.tryEval (builtins.seq forced evaluated)).success;
   validCases = [
     { workers = 1; }
     { timeoutMs = 0; }
