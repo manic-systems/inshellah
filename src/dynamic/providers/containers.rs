@@ -23,7 +23,7 @@ const ENDPOINT_FLAGS: &[&[&str]] = &[
 ];
 
 pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if !ctx.slot.positional() {
+    if !words.at_operand(ctx) {
         return None;
     }
     let mut base = vec![ctx.bin(words.command())];

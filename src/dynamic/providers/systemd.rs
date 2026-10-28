@@ -12,7 +12,7 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx<'_>) -> Option<Vec<Candidate>
     match words.command() {
         "journalctl" => journalctl_completions(words, ctx),
         "coredumpctl" => coredumpctl_completions(words, ctx),
-        _ if !ctx.slot.positional() => None,
+        _ if !words.at_operand(ctx) => None,
         "systemctl" => systemctl_completions(words, ctx),
         "loginctl" => loginctl_completions(words, ctx),
         "machinectl" => machinectl_completions(words, ctx),
@@ -129,7 +129,7 @@ fn coredumpctl_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>
     if let Some("-u" | "--unit") = ctx.slot.value_flag() {
         return unit_candidates(&[], last, ctx);
     }
-    if !ctx.slot.positional() {
+    if !words.at_operand(ctx) {
         return None;
     }
     let mut out: Vec<Candidate> = Vec::new();

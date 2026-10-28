@@ -26,7 +26,7 @@ use crate::{
 pub(super) fn complete(words: &Words, ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match words.command() {
         "cargo" => cargo_completions(words, ctx),
-        _ if !ctx.slot.positional() => None,
+        _ if !words.at_operand(ctx) => None,
         "npm" | "pnpm" | "yarn" => npm_like_completions(words),
         "make" => make_completions(words),
         "just" => just_completions(words, ctx),
