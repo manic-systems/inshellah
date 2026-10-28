@@ -190,11 +190,18 @@ fn parse_output(stdout: &str) -> Option<Vec<Cand>> {
 }
 
 struct Harness {
+    root:      PathBuf,
     bin_dir:   PathBuf,
     cache_dir: PathBuf,
     /// arg-capture files (`KUBECTL_ARGS_FILE`, `INSHELLAH_GIT_ARGS_FILE`) the
     /// fakes write into. wiped between runs.
     aux_files: BTreeMap<String, PathBuf>,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        drop(fs::remove_dir_all(&self.root));
+    }
 }
 
 impl Harness {
@@ -209,6 +216,7 @@ impl Harness {
         aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), root.join("git-args.txt"));
         aux_files.insert("INSHELLAH_JJ_ARGS_FILE".into(), root.join("jj-args.txt"));
         Self {
+            root,
             bin_dir,
             cache_dir,
             aux_files,
