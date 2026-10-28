@@ -104,15 +104,31 @@ JSON
 "#;
 
 const FAKE_GIT: &str = r#"#!/bin/sh
+if [ -n "${INSHELLAH_GIT_ARGS_FILE:-}" ]; then
+  printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$INSHELLAH_GIT_ARGS_FILE"
+fi
+while [ "$#" -gt 0 ]; do
+  case "${1:-}" in
+    -C|-c|--config-env|--git-dir|--namespace|--work-tree)
+      shift 2
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 case "${1:-}" in
   remote)
     printf 'origin\nupstream\n'
     ;;
   for-each-ref)
-    if [ -n "${INSHELLAH_GIT_ARGS_FILE:-}" ]; then
-      printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$INSHELLAH_GIT_ARGS_FILE"
-    fi
     case "$*" in
+      *"refs/remotes/origin"*)
+        printf 'HEAD\tHead\nmain\tRemote main\nrelease/1\tRemote release\n'
+        ;;
       *"refs/heads refs/remotes refs/tags"*)
         printf 'main\tcommit\tMain branch\norigin/main\tcommit\tRemote main\nv1.0\tcommit\tRelease 1\n'
         ;;
@@ -129,14 +145,21 @@ case "${1:-}" in
       printf 'stash@{0}: WIP on main: demo stash\n'
     fi
     ;;
+  rev-parse)
+    printf '/repo\n%s\n' "$(cat "$(dirname "$0")/show-prefix" 2>/dev/null)"
+    ;;
   status)
-    printf ' M src/main.rs\n?? new-file.txt\nR  old.txt -> renamed.txt\n'
+    printf ' M src/main.rs\0?? new-file.txt\0R  renamed.txt\0old.txt\0?? spaced name.txt\0'
     ;;
   ls-files)
-    printf 'src/main.rs\nREADME.md\n'
+    if [ "${2:-}" = -z ]; then
+      printf 'src/main.rs\0README.md\0caf\303\251.txt\0'
+    else
+      printf 'src/main.rs\nREADME.md\n"caf\\303\\251.txt"\n'
+    fi
     ;;
   config)
-    printf 'submodule.demo.path deps/demo\n'
+    printf 'submodule.demo.path\ndeps/demo\0submodule.spaced.path\ndeps/with space\0'
     ;;
   worktree)
     if [ "${2:-}" = list ]; then
@@ -477,7 +500,10 @@ fn git_submodule_update_completes_submodule_paths() {
     let harness = Harness::new("dyn-git-submodule");
     let (stdout, ..) = harness.run(&["git", "submodule", "update", ""], &[]);
     let cands = parse_output(&stdout).expect("submodules");
-    assert_eq!(Harness::values(&cands), vec!["deps/demo"]);
+    assert_eq!(Harness::values(&cands), vec![
+        "deps/demo",
+        "deps/with space"
+    ]);
 }
 
 #[test]
@@ -504,7 +530,8 @@ fn git_add_completes_changed_paths_including_renames() {
     assert_eq!(Harness::values(&cands), vec![
         "src/main.rs",
         "new-file.txt",
-        "renamed.txt"
+        "renamed.txt",
+        "spaced name.txt"
     ]);
 }
 
@@ -513,7 +540,11 @@ fn git_rm_completes_tracked_paths() {
     let harness = Harness::new("dyn-git-rm");
     let (stdout, ..) = harness.run(&["git", "rm", ""], &[]);
     let cands = parse_output(&stdout).expect("tracked");
-    assert_eq!(Harness::values(&cands), vec!["src/main.rs", "README.md"]);
+    assert_eq!(Harness::values(&cands), vec![
+        "src/main.rs",
+        "README.md",
+        "caf\u{e9}.txt"
+    ]);
 }
 
 #[test]
@@ -529,6 +560,84 @@ fn git_worktree_remove_completes_existing_worktrees() {
     let (stdout, ..) = harness.run(&["git", "worktree", "remove", ""], &[]);
     let cands = parse_output(&stdout).expect("worktrees");
     assert_eq!(cands[0].value, "/repo/linked");
+}
+
+#[test]
+fn git_global_repository_selectors_are_forwarded_to_queries() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["git", "-C", "/repo", "fetch", "origin", ""], "-C /repo"),
+        (
+            &["git", "--git-dir", "/repo/.git", "fetch", "origin", ""],
+            "--git-dir /repo/.git",
+        ),
+        (
+            &["git", "--work-tree", "/repo", "fetch", "origin", ""],
+            "--work-tree /repo",
+        ),
+        (
+            &["git", "--git-dir=/repo/.git", "fetch", "origin", ""],
+            "--git-dir /repo/.git",
+        ),
+    ];
+    for (index, (spans, expected)) in cases.iter().enumerate() {
+        let harness = Harness::new(&format!("dyn-git-global-scope-{index}"));
+        let (stdout, stderr, ok) = harness.run(spans, &[]);
+        assert!(ok, "stderr={stderr}");
+        assert!(parse_output(&stdout).is_some(), "spans={spans:?}");
+        let captured = harness.read_aux("INSHELLAH_GIT_ARGS_FILE");
+        assert!(captured.contains(expected), "captured={captured}");
+        assert!(captured.contains("for-each-ref"), "captured={captured}");
+    }
+}
+
+#[test]
+fn git_push_refspec_destination_offers_the_remotes_branches() {
+    let harness = Harness::new("dyn-git-push-destination");
+    let (all_out, ..) = harness.run(&["git", "push", "origin", "main:"], &[]);
+    let all = parse_output(&all_out).expect("destination branches");
+    assert_eq!(Harness::values(&all), vec!["main:main", "main:release/1"]);
+
+    let (partial_out, ..) = harness.run(&["git", "push", "origin", "+HEAD:re"], &[]);
+    let partial = parse_output(&partial_out).expect("partial destination");
+    assert_eq!(Harness::values(&partial), vec!["+HEAD:release/1"]);
+
+    let (unknown, ..) = harness.run(&["git", "push", "upstream", "main:"], &[]);
+    assert_eq!(unknown.trim(), "null", "no local branches as a fallback");
+
+    let (source_out, ..) = harness.run(&["git", "push", "origin", "ma"], &[]);
+    let source = parse_output(&source_out).expect("source refs");
+    assert!(Harness::values(&source).iter().any(|name| name == "main"));
+}
+
+#[test]
+fn git_add_and_submodule_paths_are_relative_to_the_working_directory() {
+    let harness = Harness::new("dyn-git-subdir-paths");
+    fs::write(harness.bin_dir.join("show-prefix"), "src/").unwrap();
+    let (add_out, ..) = harness.run(&["git", "add", ""], &[]);
+    let add = parse_output(&add_out).expect("changed paths");
+    assert_eq!(Harness::values(&add), vec![
+        "main.rs",
+        "../new-file.txt",
+        "../renamed.txt",
+        "../spaced name.txt"
+    ]);
+    let captured = harness.read_aux("INSHELLAH_GIT_ARGS_FILE");
+    assert!(
+        captured.contains("status --porcelain=v1 -z -uall"),
+        "captured={captured}"
+    );
+
+    let (submodules_out, ..) = harness.run(&["git", "submodule", "update", ""], &[]);
+    let submodules = parse_output(&submodules_out).expect("submodule paths");
+    assert_eq!(Harness::values(&submodules), vec![
+        "../deps/demo",
+        "../deps/with space"
+    ]);
+    let submodule_args = harness.read_aux("INSHELLAH_GIT_ARGS_FILE");
+    assert!(
+        submodule_args.contains("--file /repo/.gitmodules --null"),
+        "captured={submodule_args}"
+    );
 }
 
 #[test]
