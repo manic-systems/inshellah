@@ -7,30 +7,55 @@ use crate::{
         run,
     },
 };
+
+const RESOURCE_VERBS: &[&str] = &[
+    "get", "describe", "delete", "edit", "scale", "annotate", "label",
+];
+
+const ROLLOUT_ACTIONS: &[&str] = &["history", "pause", "restart", "resume", "status", "undo"];
+
+pub(super) const VALUE_FLAGS: &[&str] = &[
+    "-n",
+    "--namespace",
+    "--context",
+    "--kubeconfig",
+    "--cluster",
+    "--user",
+    "--server",
+    "-s",
+];
+
 pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if !words.at_operand(ctx) {
+    if !words.at_operand(ctx) || words.current().starts_with('-') {
         return None;
     }
-    let sub = words.arg(0);
-    let resource_verbs = [
-        "get", "describe", "delete", "edit", "scale", "annotate", "label",
-    ];
-    if resource_verbs.contains(&sub) && words.arg_count() >= 2 {
-        return kubectl_names(words.arg(1), words, ctx);
+    let verb = words.arg(0);
+    let operands = words.arg_count().checked_sub(1)?;
+    match verb {
+        _ if RESOURCE_VERBS.contains(&verb) && operands >= 1 && !words.arg(1).contains('/') => {
+            kubectl_names(words.arg(1), words, ctx, "")
+        },
+        "exec" if !words.past_dashes() && operands == 0 => kubectl_names("pods", words, ctx, ""),
+        "logs" | "port-forward" if operands == 0 => kubectl_names("pods", words, ctx, ""),
+        "cp" => {
+            let typed = words.current();
+            let bare =
+                !typed.is_empty() && !typed.contains([':', '/']) && !typed.starts_with(['.', '~']);
+            if bare {
+                kubectl_names("pods", words, ctx, ":")
+            } else {
+                None
+            }
+        },
+        "rollout"
+            if operands == 2
+                && ROLLOUT_ACTIONS.contains(&words.arg(1))
+                && !words.arg(2).contains('/') =>
+        {
+            kubectl_names(words.arg(2), words, ctx, "")
+        },
+        _ => None,
     }
-    if matches!(sub, "logs" | "exec" | "port-forward") && words.arg_count() >= 1 {
-        return kubectl_names("pods", words, ctx);
-    }
-    if sub == "rollout"
-        && words.arg_count() >= 3
-        && matches!(
-            words.arg(1),
-            "history" | "pause" | "restart" | "resume" | "status" | "undo"
-        )
-    {
-        return kubectl_names(words.arg(2), words, ctx);
-    }
-    None
 }
 
 pub struct KubeScope {
@@ -39,7 +64,9 @@ pub struct KubeScope {
 }
 
 pub fn kubectl_scope(words: &Words) -> KubeScope {
-    if words.has(&["-A", "--all-namespaces"]) {
+    if words.has(&["-A", "--all-namespaces"])
+        && words.value(&["-A", "--all-namespaces"]) != Some("false")
+    {
         return KubeScope {
             args: vec!["--all-namespaces".into()],
             all:  true,
@@ -53,18 +80,19 @@ pub fn kubectl_scope(words: &Words) -> KubeScope {
 }
 
 fn cluster_args(words: &Words) -> Vec<String> {
-    ["--context", "--kubeconfig"]
-        .into_iter()
+    VALUE_FLAGS
+        .iter()
+        .filter(|flag| !matches!(**flag, "-n" | "--namespace"))
         .filter_map(|flag| {
             words
                 .value(&[flag])
-                .map(|value| [flag.to_owned(), value.to_owned()])
+                .map(|value| [(*flag).to_owned(), value.to_owned()])
         })
         .flatten()
         .collect()
 }
 
-fn kubectl_names(kind: &str, words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+fn kubectl_names(kind: &str, words: &Words, ctx: &DynCtx, suffix: &str) -> Option<Vec<Candidate>> {
     if kind.is_empty() {
         return None;
     }
@@ -94,9 +122,12 @@ fn kubectl_names(kind: &str, words: &Words, ctx: &DynCtx) -> Option<Vec<Candidat
             if parts.len() < 2 {
                 continue;
             }
-            candidates.push(Candidate::new(parts[1], format!("{kind} in {}", parts[0])));
+            candidates.push(Candidate::new(
+                format!("{}{suffix}", parts[1]),
+                format!("{kind} in {}", parts[0]),
+            ));
         } else {
-            candidates.push(Candidate::new(trimmed, kind));
+            candidates.push(Candidate::new(format!("{trimmed}{suffix}"), kind));
         }
     }
     (!candidates.is_empty()).then_some(candidates)
