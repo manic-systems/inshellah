@@ -19,9 +19,9 @@ use crate::{
     dynamic::shared::{
         DynCtx,
         Words,
-        find_in_path,
         run_scrape,
     },
+    executable::find_in_path,
 };
 
 #[derive(Clone, Debug)]

@@ -38,7 +38,6 @@ use std::{
 use self::probe::{
     Classify,
     classify_binary,
-    is_executable,
     parse_help_text,
     remaining_ms,
     skip_name,
@@ -47,6 +46,7 @@ use self::probe::{
     try_native_completion,
 };
 use crate::{
+    executable::is_executable,
     parsers::{
         manpage::{
             ManpageEntry,

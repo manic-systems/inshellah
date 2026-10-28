@@ -10,6 +10,7 @@ use std::{
 };
 
 use inshellah::{
+    executable::find_in_path,
     indexer::{
         Resolved,
         resolve_command_path_and_cache,
@@ -20,10 +21,7 @@ use inshellah::{
     },
 };
 
-use super::{
-    common::find_in_path,
-    complete::mandirs_with_bin_prefix,
-};
+use super::complete::mandirs_with_bin_prefix;
 
 pub fn purge(user_dir: &Path, cmds: &[String]) -> io::Result<()> {
     if cmds.is_empty() {

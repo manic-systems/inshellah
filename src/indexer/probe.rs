@@ -24,11 +24,6 @@ use crate::{
     subprocess::run_cmd,
 };
 
-pub fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    fs::metadata(path).is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
-}
-
 fn is_script(path: &Path) -> bool {
     let Ok(real) = fs::canonicalize(path) else {
         return false;
