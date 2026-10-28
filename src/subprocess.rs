@@ -23,6 +23,7 @@ use std::{
     },
     path::PathBuf,
     process::{
+        Child,
         Command,
         Stdio,
     },
@@ -71,15 +72,18 @@ pub enum Run {
     Succeeded(String),
     /// exited nonzero, with what it printed.
     Errored(String),
-    /// never spawned, or killed at the deadline or the capture cap.
+    /// no process to run, or killed at the deadline or the capture cap.
     Failed,
+    /// the binary itself cannot run, as with a missing interpreter or an
+    /// executable for another platform. transient spawn errors are `Failed`.
+    Unspawned(io::Error),
 }
 
 impl Run {
-    fn printed(self) -> Option<String> {
+    pub fn printed(self) -> Option<String> {
         match self {
             Self::Succeeded(out) | Self::Errored(out) => (!out.is_empty()).then_some(out),
-            Self::Failed => None,
+            Self::Failed | Self::Unspawned(_) => None,
         }
     }
 }
@@ -88,6 +92,11 @@ impl Run {
 /// state.
 pub fn run_cmd(args: &[String], timeout_ms: u64) -> Option<String> {
     run_cmd_inner(args, timeout_ms, false, false, |_| {}).printed()
+}
+
+/// `run_cmd` that keeps how the run ended.
+pub fn run_cmd_ended(args: &[String], timeout_ms: u64) -> Run {
+    run_cmd_inner(args, timeout_ms, false, false, |_| {})
 }
 
 pub fn run_cmd_with<F>(args: &[String], timeout_ms: u64, customize: F) -> Option<String>
@@ -184,8 +193,11 @@ fn run_cmd_inner<F>(
 where
     F: FnOnce(&mut Command),
 {
-    let Some(program) = args.first().and_then(|arg0| program_path(arg0)) else {
+    let Some(name) = args.first() else {
         return Run::Failed;
+    };
+    let Some(program) = program_path(name) else {
+        return Run::Unspawned(io::Error::from(ErrorKind::NotFound));
     };
     let mut cmd = Command::new(program);
     cmd.arg0(&args[0]);
@@ -208,9 +220,29 @@ where
     new_session(&mut cmd);
     customize(&mut cmd);
 
-    let Ok(mut child) = cmd.spawn() else {
-        return Run::Failed;
-    };
+    match cmd.spawn() {
+        Ok(child) => capture(child, timeout_ms),
+        Err(err) if binary_cannot_run(&err) => Run::Unspawned(err),
+        Err(_) => Run::Failed,
+    }
+}
+
+fn binary_cannot_run(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(
+            libc::ENOENT
+                | libc::ENOTDIR
+                | libc::EACCES
+                | libc::ENOEXEC
+                | libc::ELOOP
+                | libc::ENAMETOOLONG
+                | libc::EISDIR
+        )
+    )
+}
+
+fn capture(mut child: Child, timeout_ms: u64) -> Run {
     let pgid = child.id().cast_signed();
     let Some(mut stdout) = child.stdout.take() else {
         return Run::Failed;

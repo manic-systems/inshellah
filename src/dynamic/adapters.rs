@@ -131,7 +131,7 @@ impl Protocol {
                 match run {
                     Run::Succeeded(out) => Some(out.contains("COMPLETE=fish")),
                     Run::Errored(out) => out.contains("COMPLETE=fish").then_some(true),
-                    Run::Failed => None,
+                    Run::Failed | Run::Unspawned(_) => None,
                 }
             },
         }
@@ -161,7 +161,7 @@ fn cobra(spans: &[String], ctx: &DynCtx) -> Reply {
         cmd.env("COBRA_ACTIVE_HELP", "0");
     }) {
         Run::Succeeded(out) => out,
-        Run::Errored(_) | Run::Failed => return Reply::Silent,
+        Run::Errored(_) | Run::Failed | Run::Unspawned(_) => return Reply::Silent,
     };
 
     let trimmed = out.trim_end();

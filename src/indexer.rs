@@ -4,7 +4,10 @@
 pub mod probe;
 
 use std::{
-    cell::Cell,
+    cell::{
+        Cell,
+        RefCell,
+    },
     collections::{
         HashMap,
         HashSet,
@@ -41,8 +44,8 @@ use self::probe::{
     parse_help_text,
     remaining_ms,
     skip_name,
-    try_help,
     try_help_args,
+    try_help_spawned,
     try_native_completion,
 };
 use crate::{
@@ -304,6 +307,12 @@ fn split_command_for_binary(name: &str) -> Option<(&str, Vec<String>)> {
     Some((base, parts.map(str::to_owned).collect()))
 }
 
+/// what a scrape wrote, and the roots whose binary could not be started.
+struct Scraped {
+    indexed:      HashSet<String>,
+    unexecutable: HashSet<String>,
+}
+
 struct ScrapeCtx {
     cache_dir:      PathBuf,
     mandirs:        Vec<PathBuf>,
@@ -317,6 +326,7 @@ struct ScrapeCtx {
     root_help:      Mutex<HashMap<String, u64>>,
     subtree_health: Mutex<HashMap<String, SubtreeHealth>>,
     write_error:    Mutex<Option<io::Error>>,
+    unexecutable:   Mutex<HashSet<String>>,
 }
 
 // a loaded box times out healthy tools too, so only roots where nothing
@@ -458,6 +468,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
         }),
         timed_out:    Cell::new(false),
         echoed:       Cell::new(false),
+        unspawned:    RefCell::new(None),
     };
 
     // classify only at top level
@@ -466,6 +477,16 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
     }
 
     let outcome = resolve_one(&probe, &job.base_cmd, &job.sub_args);
+    if let Some(err) = probe.unspawned.take()
+        && is_root
+    {
+        note_unexecutable(&job.base_cmd, &job.bin_path, &err);
+        ctx.unexecutable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(job.base_cmd.clone());
+        return;
+    }
     let identity = is_root.then(|| ExeIdentity::of(&job.bin_path)).flatten();
     let with_exe = |written: io::Result<()>| -> io::Result<()> {
         written?;
@@ -532,13 +553,15 @@ where
     write_nushell_native_commands(dir, &nushell_commands)?;
     let binaries = list_binaries(bindirs, &nushell_commands);
     let profile = ProfileBinaries::new(&binaries, ignorelist);
-    let mut indexed = ScrapeCtx::new(dir, mandirs, help_only, timeout_ms)
+    let scraped = ScrapeCtx::new(dir, mandirs, help_only, timeout_ms)
         .scrape(profile.paths.iter(), num_workers)?;
+    let mut indexed = scraped.indexed;
 
     ManpagePass {
         dir,
         mandirs,
         profile: &profile,
+        unexecutable: &scraped.unexecutable,
         help_only,
         nushell_commands: &nushell_commands,
         timeout_ms,
@@ -550,12 +573,79 @@ where
     Ok(())
 }
 
+const MAX_SYMLINK_HOPS: usize = 40;
+
+fn validate_merge_inputs(profile_dir: &Path) -> io::Result<()> {
+    if !profile_dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("profile {} is not a directory", profile_dir.display()),
+        ));
+    }
+    let bin = profile_dir.join("bin");
+    match fs::read_dir(&bin) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => {
+            Err(io::Error::new(
+                err.kind(),
+                format!("cannot read profile bin {}, {err}", bin.display()),
+            ))
+        },
+        _ => Ok(()),
+    }
+}
+
+fn resolve_merge_sources(sources: &[(PathBuf, PathBuf)]) -> io::Result<Vec<(PathBuf, &Path)>> {
+    sources
+        .iter()
+        .map(|(package, index)| {
+            fs::canonicalize(package)
+                .map(|resolved| (resolved, index.as_path()))
+                .map_err(|err| {
+                    io::Error::new(
+                        err.kind(),
+                        format!("cannot resolve source package {}, {err}", package.display()),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// a file in a source index and the command it describes.
+struct Candidate<'src> {
+    index: &'src PathBuf,
+    path:  PathBuf,
+    cmd:   String,
+    root:  String,
+}
+
+/// the index of the first package the symlink chain from `start` enters.
+///
+/// canonicalizing would jump to the end of the chain, past a wrapper package
+/// that links to the real one.
+fn owning_index<'src>(start: &Path, sources: &[(PathBuf, &'src Path)]) -> Option<&'src Path> {
+    let mut link = start.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let parent = link.parent()?;
+        let here = fs::canonicalize(parent).ok()?.join(link.file_name()?);
+        if let Some((_, index)) = sources
+            .iter()
+            .find(|(package, _)| here.starts_with(package))
+        {
+            return Some(index);
+        }
+        let target = fs::read_link(&link).ok()?;
+        link = parent.join(target);
+    }
+    None
+}
+
 /// each command's files come from the package owning the profile's binary for
 /// its root, else from the first source that has them.
 ///
 /// # Errors
 ///
-/// fails when the cache dir, `nu` discovery, a copy, or a cache write fails.
+/// fails when an input cannot be read, the cache dir, `nu` discovery, a copy,
+/// or a cache write fails.
 pub fn cmd_merge<S>(
     profile_dir: &Path,
     sources: &[(PathBuf, PathBuf)],
@@ -568,6 +658,8 @@ pub fn cmd_merge<S>(
 where
     S: BuildHasher,
 {
+    validate_merge_inputs(profile_dir)?;
+    let resolved_sources = resolve_merge_sources(sources)?;
     ensure_dir(dir)?;
     let nushell_commands = discover_nushell_native_commands()?;
     write_nushell_native_commands(dir, &nushell_commands)?;
@@ -575,28 +667,23 @@ where
     let profile = ProfileBinaries::new(&binaries, ignorelist);
     let mandirs = [profile_dir.join("share/man")];
 
-    let owner_of = |root: &str| -> Option<&Path> {
-        let target = fs::read_link(profile.paths.get(root)?).ok()?;
-        sources
-            .iter()
-            .find(|(package, _)| target.starts_with(package))
-            .map(|(_, index)| index.as_path())
-    };
+    let owner_of = |root: &str| owning_index(profile.paths.get(root)?, &resolved_sources);
 
-    let mut claimed = HashMap::<String, PathBuf>::new();
-    let mut owned = Vec::<(PathBuf, String, String)>::new();
-
+    let mut candidates = Vec::<Candidate>::new();
     let mut seen = HashSet::<&PathBuf>::new();
 
     for (_, index) in sources {
         if !seen.insert(index) {
             continue;
         }
-        let Ok(entries) = fs::read_dir(index) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries = fs::read_dir(index).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("cannot read source index {}, {err}", index.display()),
+            )
+        })?;
+        for entry in entries {
+            let path = entry?.path();
             let (Some(stem), Some(ext)) = (
                 path.file_stem().and_then(OsStr::to_str),
                 path.extension().and_then(OsStr::to_str),
@@ -610,62 +697,85 @@ where
                 continue;
             };
             let root = cmd.split(' ').next().unwrap_or_default().to_owned();
-            let owning_index = owner_of(&root).map_or_else(
-                || {
-                    claimed
-                        .entry(root.clone())
-                        .or_insert_with(|| index.clone())
-                        .clone()
-                },
-                Path::to_path_buf,
-            );
-            if owning_index == *index {
-                owned.push((path, cmd, root));
-            }
+            candidates.push(Candidate {
+                index,
+                path,
+                cmd,
+                root,
+            });
+        }
+    }
+
+    let mut claimed = HashMap::<&str, &Path>::new();
+    let mut rooted = HashSet::<(&Path, &str)>::new();
+    for candidate in &candidates {
+        claimed
+            .entry(&candidate.root)
+            .or_insert(candidate.index.as_path());
+        rooted.insert((candidate.index.as_path(), &candidate.root));
+    }
+    let mut owned = Vec::<&Candidate>::new();
+    for candidate in &candidates {
+        let root = candidate.root.as_str();
+        let chosen = owner_of(root)
+            .filter(|owner| rooted.contains(&(*owner, root)))
+            .or_else(|| claimed.get(root).copied());
+        if chosen == Some(candidate.index.as_path()) {
+            owned.push(candidate);
         }
     }
 
     // wrapper packages ship no manpage, so their index fell back to `--help`.
     let rescrape: HashMap<&String, &PathBuf> = owned
         .iter()
-        .filter(|(path, cmd, root)| {
-            cmd == root
-                && path.extension().is_some_and(|ext| ext == "json")
-                && find_manpage_path(&mandirs, cmd).is_some()
-                && path
+        .filter(|candidate| {
+            candidate.cmd == candidate.root
+                && candidate.path.extension().is_some_and(|ext| ext == "json")
+                && find_manpage_path(&mandirs, &candidate.cmd).is_some()
+                && candidate
+                    .path
                     .parent()
-                    .and_then(|index| read_result(index, cmd))
+                    .and_then(|index| read_result(index, &candidate.cmd))
                     .is_some_and(|(source, _)| source == "help")
         })
-        .filter_map(|(_, cmd, _)| profile.paths.get_key_value(cmd))
+        .filter_map(|candidate| profile.paths.get_key_value(&candidate.cmd))
         .collect();
-    for (path, cmd, root) in &owned {
-        if rescrape.contains_key(root) {
+    let scraped = ScrapeCtx::new(dir, &mandirs, help_only, timeout_ms)
+        .scrape(rescrape.iter().map(|(cmd, bin)| (*cmd, *bin)), num_workers)?;
+    let rescraped =
+        |root: &String| rescrape.contains_key(root) && !scraped.unexecutable.contains(root);
+    for candidate in &owned {
+        if rescraped(&candidate.root) {
             continue;
         }
         // cross builds index build twins, so name the profile's binary.
-        if path.extension().is_some_and(|ext| ext == "exe") {
-            if let Some(identity) = profile.paths.get(root).and_then(|bin| ExeIdentity::of(bin)) {
-                write_exe(dir, cmd, &identity)?;
+        if candidate.path.extension().is_some_and(|ext| ext == "exe") {
+            if let Some(identity) = profile
+                .paths
+                .get(&candidate.root)
+                .and_then(|bin| ExeIdentity::of(bin))
+            {
+                write_exe(dir, &candidate.cmd, &identity)?;
             }
         } else {
-            fs::copy(path, dir.join(path.file_name().unwrap_or_default()))?;
+            fs::copy(
+                &candidate.path,
+                dir.join(candidate.path.file_name().unwrap_or_default()),
+            )?;
         }
     }
     let mut indexed: HashSet<String> = owned
         .into_iter()
-        .filter(|(_, _, root)| !rescrape.contains_key(root))
-        .map(|(_, cmd, _)| cmd)
+        .filter(|candidate| !rescraped(&candidate.root))
+        .map(|candidate| candidate.cmd.clone())
         .collect();
-    indexed.extend(
-        ScrapeCtx::new(dir, &mandirs, help_only, timeout_ms)
-            .scrape(rescrape.into_iter(), num_workers)?,
-    );
+    indexed.extend(scraped.indexed);
 
     ManpagePass {
         dir,
         mandirs: &mandirs,
         profile: &profile,
+        unexecutable: &scraped.unexecutable,
         help_only,
         nushell_commands: &nushell_commands,
         timeout_ms,
@@ -704,6 +814,7 @@ impl ScrapeCtx {
             root_help: Mutex::new(HashMap::new()),
             subtree_health: Mutex::new(HashMap::new()),
             write_error: Mutex::new(None),
+            unexecutable: Mutex::new(HashSet::new()),
         }
     }
 
@@ -737,7 +848,7 @@ impl ScrapeCtx {
         self,
         roots: impl Iterator<Item = (&'roots String, &'roots PathBuf)>,
         num_workers: usize,
-    ) -> io::Result<HashSet<String>> {
+    ) -> io::Result<Scraped> {
         let ctx = Arc::new(self);
         let pool = ScrapePool::new(num_workers, {
             let worker_ctx = Arc::clone(&ctx);
@@ -765,10 +876,16 @@ impl ScrapeCtx {
         {
             return Err(err);
         }
-        Ok(scraped
-            .indexed
-            .into_inner()
-            .unwrap_or_else(PoisonError::into_inner))
+        Ok(Scraped {
+            indexed:      scraped
+                .indexed
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner),
+            unexecutable: scraped
+                .unexecutable
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner),
+        })
     }
 }
 
@@ -798,6 +915,7 @@ struct ManpagePass<'pass, S> {
     dir:              &'pass Path,
     mandirs:          &'pass [PathBuf],
     profile:          &'pass ProfileBinaries,
+    unexecutable:     &'pass HashSet<String>,
     help_only:        &'pass HashSet<String, S>,
     nushell_commands: &'pass HashSet<String>,
     timeout_ms:       u64,
@@ -813,6 +931,7 @@ where
             dir,
             mandirs,
             profile,
+            unexecutable,
             help_only,
             nushell_commands,
             timeout_ms,
@@ -884,6 +1003,7 @@ where
             indexed.insert(name.clone());
             plan.push(PlannedWrite {
                 help: help_for(&name),
+                noted: unexecutable.contains(&name),
                 stubs: sub_sections.is_empty(),
                 name,
                 result,
@@ -896,6 +1016,7 @@ where
                 indexed.insert(sub_cmd.clone());
                 plan.push(PlannedWrite {
                     help:       help_for(&sub_cmd),
+                    noted:      false,
                     stubs:      false,
                     name:       sub_cmd,
                     result:     sub_result,
@@ -974,13 +1095,20 @@ fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str
     any
 }
 
-fn run_help(path: &Path, sub_args: &[String], timeout_ms: u64) -> Option<String> {
+fn run_help(path: &Path, sub_args: &[String], timeout_ms: u64) -> io::Result<Option<String>> {
     if sub_args.is_empty() {
-        try_help(path, timeout_ms)
+        try_help_spawned(path, timeout_ms)
     } else {
         let bin_s = path.to_string_lossy().to_string();
-        try_help_args(&bin_s, sub_args, timeout_ms)
+        Ok(try_help_args(&bin_s, sub_args, timeout_ms))
     }
+}
+
+fn note_unexecutable(cmd: &str, bin: &Path, err: &io::Error) {
+    eprintln!(
+        "note: cannot execute {cmd} at {}, its --help was not read, {err}",
+        bin.display()
+    );
 }
 
 fn group_subcommands_from_help(text: &str) -> Option<Vec<ManpageSubcommand>> {
@@ -1258,6 +1386,7 @@ struct PlannedWrite {
     name:       String,
     result:     ManpageResult,
     help:       Option<(PathBuf, Vec<String>)>,
+    noted:      bool,
     stubs:      bool,
     duplicates: Vec<ManpageResult>,
 }
@@ -1283,13 +1412,20 @@ impl WritePlan {
 
 impl PlannedWrite {
     fn run(mut self, dir: &Path, timeout_ms: u64) -> io::Result<Vec<(String, String)>> {
-        let mut source = if let Some((path, sub_args)) = &self.help
-            && supplement_result_from_help_command(&mut self.result, path, sub_args, timeout_ms)
-        {
-            String::from("manpage+help")
-        } else {
-            String::from("manpage")
-        };
+        let mut source = String::from("manpage");
+        if let Some((path, sub_args)) = &self.help {
+            match run_help(path, sub_args, timeout_ms) {
+                Ok(Some(text))
+                    if supplement_result_from_help_text(&mut self.result, &text, sub_args) =>
+                {
+                    source = String::from("manpage+help");
+                },
+                Err(err) if sub_args.is_empty() && !self.noted => {
+                    note_unexecutable(&self.name, path, &err);
+                },
+                Ok(_) | Err(_) => {},
+            }
+        }
         let stubs = if self.stubs {
             self.result
                 .subcommands
@@ -1319,16 +1455,6 @@ fn supplement_result_from_help_text(
         .is_some_and(|help| supplement_result_from_help(result, help))
 }
 
-fn supplement_result_from_help_command(
-    result: &mut ManpageResult,
-    path: &Path,
-    sub_args: &[String],
-    timeout_ms: u64,
-) -> bool {
-    run_help(path, sub_args, timeout_ms)
-        .is_some_and(|text| supplement_result_from_help_text(result, &text, sub_args))
-}
-
 // group command with a leftover `<command>`/`<subcommands>` placeholder and no
 // subcommands populated.
 pub fn looks_like_unenumerated_group(result: &ManpageResult) -> bool {
@@ -1356,6 +1482,7 @@ struct RealProbe<'probe> {
     root_help:    Cell<Option<u64>>,
     timed_out:    Cell<bool>,
     echoed:       Cell<bool>,
+    unspawned:    RefCell<Option<io::Error>>,
 }
 
 impl RealProbe<'_> {
@@ -1368,11 +1495,18 @@ impl RealProbe<'_> {
     fn help(&self, sub_args: &[String]) -> Option<String> {
         let timeout_ms = self.step_timeout();
         let started = Instant::now();
-        let Some(text) = run_help(self.path, sub_args, timeout_ms) else {
-            if started.elapsed() >= Duration::from_millis(timeout_ms) {
-                self.timed_out.set(true);
-            }
-            return None;
+        let text = match run_help(self.path, sub_args, timeout_ms) {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                if started.elapsed() >= Duration::from_millis(timeout_ms) {
+                    self.timed_out.set(true);
+                }
+                return None;
+            },
+            Err(err) => {
+                *self.unspawned.borrow_mut() = Some(err);
+                return None;
+            },
         };
         let mut hasher = DefaultHasher::new();
         text.hash(&mut hasher);
@@ -1470,6 +1604,7 @@ pub fn resolve_command_path_and_cache(
         root_help: Cell::new(None),
         timed_out: Cell::new(false),
         echoed: Cell::new(false),
+        unspawned: RefCell::new(None),
     };
     let full = resolver::full_cmd(base_cmd, sub_args);
     let with_exe = |written: io::Result<()>| -> io::Result<()> {
