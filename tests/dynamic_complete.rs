@@ -3,7 +3,7 @@
 //!
 //! each case builds a temp dir of fake shell shims, puts it ahead of the
 //! host PATH, runs `inshellah complete`, and asserts the JSON. the cache
-//! dir is always empty so the dynamic path fires.
+//! dir is empty unless a test seeds it, so the dynamic path fires.
 #![cfg(test)]
 
 use std::{
@@ -28,6 +28,18 @@ use std::{
         SystemTime,
         UNIX_EPOCH,
     },
+};
+
+use inshellah::{
+    parsers::manpage::{
+        ManpageEntry,
+        ManpageResult,
+        ManpageSubcommand,
+        OwnedParam,
+        OwnedSwitch,
+        ParamKind,
+    },
+    store::write_result,
 };
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -89,12 +101,18 @@ esac
 "#;
 
 const FAKE_KUBECTL: &str = r#"#!/bin/sh
-printf '%s\n' "$*" > "$KUBECTL_ARGS_FILE"
-if [ "${1:-}" = get ] && [ "${2:-}" = deployment ]; then
-  printf 'deploy-a\n'
-elif [ "${1:-}" = get ]; then
-  printf 'pod-a\n'
-fi
+case "$*" in
+  *--no-headers*)
+    printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$KUBECTL_ARGS_FILE"
+    if echo " $* " | grep -q ' get deployment '; then
+      printf 'deploy-a\n'
+    elif echo " $* " | grep -q ' --all-namespaces '; then
+      printf 'prod pod-a\ndev pod-b\n'
+    elif echo " $* " | grep -q ' get '; then
+      printf 'pod-a\npod-b\n'
+    fi
+    ;;
+esac
 "#;
 
 const FAKE_CARGO: &str = r#"#!/bin/sh
@@ -380,6 +398,126 @@ fn kubectl_rollout_uses_resource_kind() {
     let (stdout, ..) = harness.run(&["kubectl", "rollout", "status", "deployment", ""], &[]);
     let cands = parse_output(&stdout).expect("rollout target");
     assert_eq!(cands[0].description, "deployment");
+}
+
+#[test]
+fn kubectl_cluster_selectors_are_forwarded_wherever_they_are_typed() {
+    let harness = Harness::new("dyn-kubectl-selectors");
+    let (stdout, ..) = harness.run(
+        &[
+            "kubectl",
+            "--context",
+            "dev",
+            "-n",
+            "prod",
+            "get",
+            "--cluster",
+            "c1",
+            "--user=bob",
+            "-s",
+            "https://api",
+            "pods",
+            "",
+        ],
+        &[],
+    );
+    let cands = parse_output(&stdout).expect("pods");
+    assert_eq!(Harness::values(&cands), vec!["pod-a", "pod-b"]);
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    for forwarded in [
+        "--context dev",
+        "-n prod",
+        "--cluster c1",
+        "--user bob",
+        "-s https://api",
+    ] {
+        assert!(args.contains(forwarded), "args captured: {args}");
+    }
+}
+
+#[test]
+fn kubectl_typed_prefix_matches_names_past_the_row_limit() {
+    let harness = Harness::new("dyn-kubectl-limit-prefix");
+    let (stdout, stderr, ok) = harness.run(&["kubectl", "get", "pods", "pod-b"], &[(
+        "INSHELLAH_DYNAMIC_LIMIT",
+        "1",
+    )]);
+    assert!(ok, "stderr={stderr}");
+    let candidates = parse_output(&stdout).expect("prefix match beyond the limit");
+    assert_eq!(Harness::values(&candidates), vec!["pod-b"]);
+}
+
+#[test]
+fn kubectl_explicit_path_is_preserved() {
+    let harness = Harness::new("dyn-kubectl-path");
+    let kubectl_path = harness
+        .bin_dir
+        .join("kubectl")
+        .to_string_lossy()
+        .into_owned();
+    let (stdout, stderr, ok) = harness.run(
+        &["sudo", &kubectl_path, "--context", "dev", "get", "pods", ""],
+        &[],
+    );
+    assert!(ok, "stderr={stderr}");
+    assert!(parse_output(&stdout).is_some());
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(
+        args.contains(&format!("argv0={kubectl_path}")),
+        "args={args}"
+    );
+    assert!(args.contains("--context dev"), "args={args}");
+}
+
+#[test]
+fn kubectl_cached_subcommand_flags_decide_which_word_is_the_resource() {
+    let harness = Harness::new("dyn-kubectl-cached-arity");
+    let root = ManpageResult {
+        entries:            Vec::new(),
+        subcommands:        vec![ManpageSubcommand::new("get".to_owned(), String::new())],
+        positional_choices: Vec::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
+    };
+    let get = ManpageResult {
+        entries:            vec![ManpageEntry {
+            switch: OwnedSwitch::Both('L', "label-columns".to_owned()),
+            param:  Some(OwnedParam::new(ParamKind::Mandatory, "COLS".to_owned())),
+            desc:   String::new(),
+        }],
+        subcommands:        Vec::new(),
+        positional_choices: Vec::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
+    };
+    write_result(&harness.cache_dir, "kubectl", "help", &root).expect("root cache");
+    write_result(&harness.cache_dir, "kubectl get", "help", &get).expect("get cache");
+
+    let (stdout, ..) = harness.run(&["kubectl", "get", "-L", "app", "pods", ""], &[]);
+    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(args.contains("args=get pods "), "args captured: {args}");
+}
+
+#[test]
+fn kubectl_scrapes_a_missing_subcommand_before_reading_its_flags() {
+    let harness = Harness::new("dyn-kubectl-scraped-arity");
+    write_executable(
+        &harness.bin_dir,
+        "kubectl",
+        r#"#!/bin/sh
+case "$*" in
+  "--help") printf 'kubectl controls the cluster.\n\nCommands:\n  get  Display resources\n' ;;
+  "get --help") printf 'Display one or many resources.\n\nOptions:\n    -A, --all-namespaces=false:\n\tIf present, list the requested object(s) across all namespaces.\n\n    -o, --output=\047\047:\n\tOutput format.\n\nUsage:\n  kubectl get [(-o|--output=)json|yaml] [options]\n' ;;
+  *--no-headers*) printf 'args=%s\n' "$*" > "$KUBECTL_ARGS_FILE"; printf 'pod-a\n' ;;
+esac
+"#,
+    );
+
+    let (stdout, ..) = harness.run(&["kubectl", "get", "-o", "wide", "pods", ""], &[]);
+    assert!(parse_output(&stdout).is_some(), "stdout={stdout}");
+    let args = harness.read_aux("KUBECTL_ARGS_FILE");
+    assert!(args.contains("args=get pods "), "args captured: {args}");
 }
 
 // === cargo ===
