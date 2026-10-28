@@ -111,8 +111,8 @@ in
       example = lib.literalExpression "[ pkgs.git pkgs.clang ]";
       description = ''
         additional packages to scrape for completions alongside the system
-        profile. each package is indexed on its own and merged in, so it must
-        contain bin/ and/or share/man/.
+        profile. each package is indexed on its own and merged in. only commands
+        under its bin/ get completions, its share/man/ pages enrich them.
 
         useful on macOS, where the active developer toolchain (git, clang,
         …) lives outside the nix system profile behind /usr/bin shims:

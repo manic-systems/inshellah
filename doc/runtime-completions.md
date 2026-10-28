@@ -183,5 +183,6 @@ inshellah index /run/current-system/sw --prefix /nix/store/â€¦-git:/nix/store/â€
 ```
 
 `--prefix` takes a colon-separated list of extra prefixes, scraped
-alongside the positional ones. the nix module exposes this as
-`programs.inshellah.extraScrapePackages` (see [nixos.md](nixos.md)).
+alongside the positional ones. the nix module covers the same need with
+`programs.inshellah.extraScrapePackages`, indexing each package on its own and
+merging it in (see [nixos.md](nixos.md)).
