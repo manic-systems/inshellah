@@ -106,6 +106,8 @@
             EOF
             cargo clippy --all-targets -- -D warnings
             cargo test --all-targets
+            RUSTDOCFLAGS="-D warnings" \
+              cargo doc --no-deps --document-private-items
             popd
           '';
           nushellCheckPhase = ''
@@ -137,13 +139,14 @@
                 ${phase}
                 touch $out
               '';
-        in
-        {
           # nushell is in the rust check inputs so the composed seam test
           # (tests/seam_nu.rs) runs the real binary through the real nu
           # tokenizer instead of self-skipping when nu is absent.
           rust = mkShellCheck "inshellah-rust-check" (rustInputs ++ [ pkgs.nushell ]) rustCheckPhase;
           nushell = mkShellCheck "inshellah-nushell-check" [ pkgs.nushell ] nushellCheckPhase;
+        in
+        {
+          inherit rust nushell;
           module-indexing = import ./nix/tests/module-indexing.nix { inherit pkgs; };
           fmt =
             pkgs.runCommand "inshellah-fmt-check"
@@ -165,10 +168,7 @@
                 find . -name '*.nix' -exec nixfmt --check {} +
                 touch $out
               '';
-          default = mkShellCheck "inshellah-check" (rustInputs ++ [ pkgs.nushell ]) ''
-            ${rustCheckPhase}
-            ${nushellCheckPhase}
-          '';
+          default = pkgs.linkFarm "inshellah-check" { inherit rust nushell; };
         }
       );
 

@@ -355,7 +355,7 @@ fn looks_like_synopsis_prose(line: &str, cmd: &str, reject_long_unmarked: bool) 
         && !line_has_invocation_marker
 }
 
-/// replace \fI...\f[RP] with <...> so `extract_cmd` sees italic params as
+/// replace `\fI...\f[RP]` with <...> so `extract_cmd` sees italic params as
 /// non-word tokens.
 ///
 /// exception: some synopses italicise the command name itself (git-am.1's
