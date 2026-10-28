@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 use std::{
-    env,
-    fs,
-    path::{
-        Path,
-        PathBuf,
-    },
+    path::Path,
     process::Command,
     time::Instant,
 };
@@ -227,23 +222,6 @@ pub fn run(args: &[String], ctx: &DynCtx) -> Option<String> {
 /// adb's `devices`/`pm list` must not inherit the user's cwd.
 pub fn run_scrape(args: &[String], ctx: &DynCtx) -> Option<String> {
     subprocess::run_cmd(args, ctx.ms_left())
-}
-
-/// resolve a bare name through PATH (adb, when no explicit path was given).
-pub fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = env::var("PATH").ok()?;
-    for dir in path_var.split(':') {
-        let candidate = Path::new(dir).join(name);
-        if is_executable(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    fs::metadata(path).is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
 }
 
 pub fn run_with<F>(args: &[String], ctx: &DynCtx, customize: F) -> Option<String>

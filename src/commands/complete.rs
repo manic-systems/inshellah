@@ -42,10 +42,11 @@ use inshellah::{
         dynamic_value_completions,
         provider_kind,
     },
-    indexer::{
-        probe::is_executable,
-        resolve_command_path_and_cache,
+    executable::{
+        find_in_path,
+        is_executable,
     },
+    indexer::resolve_command_path_and_cache,
     parsers::{
         manpage::{
             ManpageEntry,
@@ -67,8 +68,6 @@ use inshellah::{
         write_fact,
     },
 };
-
-use super::common::find_in_path;
 
 const ELEVATION_COMMANDS: &[&str] = &["sudo", "doas", "pkexec", "su", "run0"];
 
