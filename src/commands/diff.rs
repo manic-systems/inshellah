@@ -11,6 +11,7 @@ use std::{
 };
 
 use inshellah::{
+    executable::find_in_path,
     indexer::{
         find_manpage_path,
         list_manpages,
@@ -28,8 +29,6 @@ use inshellah::{
         read_manpage_file,
     },
 };
-
-use super::common::find_in_path;
 
 fn mandirs_for_bin(bin: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

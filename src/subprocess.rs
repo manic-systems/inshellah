@@ -20,6 +20,7 @@ use std::{
         },
         unix::process::CommandExt as _,
     },
+    path::PathBuf,
     process::{
         Command,
         Stdio,
@@ -31,6 +32,8 @@ use std::{
         Instant,
     },
 };
+
+use crate::executable::find_in_path;
 
 /// drop DISPLAY-family vars so gui tools don't pop windows during `--help`.
 /// cached: indexing spawns thousands of times.
@@ -145,6 +148,16 @@ fn set_nonblocking(fd: RawFd) {
     }
 }
 
+/// a bare name resolves through the shared lookup, never execvp's own search,
+/// which would honour empty and relative `PATH` entries against the child cwd.
+fn program_path(arg0: &str) -> Option<PathBuf> {
+    if arg0.contains('/') {
+        Some(PathBuf::from(arg0))
+    } else {
+        find_in_path(arg0)
+    }
+}
+
 fn run_cmd_inner<F>(
     args: &[String],
     timeout_ms: u64,
@@ -155,10 +168,11 @@ fn run_cmd_inner<F>(
 where
     F: FnOnce(&mut Command),
 {
-    if args.is_empty() {
+    let Some(program) = args.first().and_then(|arg0| program_path(arg0)) else {
         return Run::Failed;
-    }
-    let mut cmd = Command::new(&args[0]);
+    };
+    let mut cmd = Command::new(program);
+    cmd.arg0(&args[0]);
     cmd.args(&args[1..]);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
