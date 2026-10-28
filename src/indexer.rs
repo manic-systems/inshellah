@@ -152,11 +152,7 @@ type ProcessedManpage = (String, ManpageResult, Vec<NamedManpageResult>);
 pub fn process_manpage(file: &Path) -> Option<ProcessedManpage> {
     let contents = read_manpage_file(file).ok()?;
     let (mut result, sub_sections) = parse_manpage_with_subs(&contents);
-    if result.entries.is_empty()
-        && result.subcommands.is_empty()
-        && result.positional_choices.is_empty()
-        && sub_sections.is_empty()
-    {
+    if !result.has_manpage_content() && sub_sections.is_empty() {
         return None;
     }
     let name = resolve_manpage_cmd_name(file, &contents);
@@ -288,6 +284,18 @@ where
     }
     name.split_once(' ')
         .is_some_and(|(parent, _)| binary_names.contains(parent))
+}
+
+fn help_only_contains_command_or_ancestor<S>(
+    help_only: &HashSet<String, S>,
+    command: &str,
+) -> bool {
+    help_only.iter().any(|listed| {
+        command == listed
+            || command
+                .strip_prefix(listed.as_str())
+                .is_some_and(|rest| rest.starts_with(' '))
+    })
 }
 
 fn split_command_for_binary(name: &str) -> Option<(&str, Vec<String>)> {
@@ -438,7 +446,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
         // pool bounds total work + per-subprocess timeouts, so no per-job
         // budget
         deadline:     Instant::now() + Duration::from_hours(24),
-        skip_manpage: ctx.help_only.contains(&job.base_cmd) || ctx.help_only.contains(&full_cmd),
+        skip_manpage: help_only_contains_command_or_ancestor(&ctx.help_only, &full_cmd),
         root_help:    Cell::new(if is_root {
             None
         } else {
@@ -841,7 +849,7 @@ where
                 continue;
             }
             let base_cmd = cmd_name_of_manpage(manpage_path);
-            if help_only.contains(&name) {
+            if help_only_contains_command_or_ancestor(help_only, &name) {
                 continue;
             }
             if nushell_commands.contains(&name) {
@@ -867,7 +875,7 @@ where
                 }
                 continue;
             }
-            if help_only.contains(&name) {
+            if help_only_contains_command_or_ancestor(help_only, &name) {
                 continue;
             }
             if nushell_commands.contains(&name) {
@@ -916,7 +924,7 @@ where
             let mut result = find_manpage_path(mandirs, &hyphenated)
                 .and_then(|path| read_manpage_file(&path).ok())
                 .map(|contents| parse_manpage_string(&contents))
-                .filter(|parsed| !parsed.entries.is_empty() || !parsed.subcommands.is_empty())
+                .filter(ManpageResult::has_manpage_content)
                 .unwrap_or_default();
             strip_subcmd_prefix(&mut result, &hyphenated);
             if result.description.is_empty() {
@@ -1563,6 +1571,23 @@ mod tests {
         ParamKind,
         ParamOrigin,
     };
+
+    #[test]
+    fn help_only_entries_apply_to_descendants() {
+        let commands = HashSet::from(["git".to_owned(), "cargo test".to_owned()]);
+
+        assert!(help_only_contains_command_or_ancestor(&commands, "git"));
+        assert!(help_only_contains_command_or_ancestor(&commands, "git add"));
+        assert!(help_only_contains_command_or_ancestor(
+            &commands,
+            "cargo test unit"
+        ));
+        assert!(!help_only_contains_command_or_ancestor(
+            &commands,
+            "cargo build"
+        ));
+        assert!(!help_only_contains_command_or_ancestor(&commands, "github"));
+    }
 
     #[test]
     fn manpage_names_must_match_installed_binary_or_subcommand_parent() {
