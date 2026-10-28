@@ -267,4 +267,6 @@ providers) and on-the-fly (`--help`), just without a prebuilt cache.
 **build-time errors**: index-time discovery requires a working `nu`.
 `programs.inshellah.nushellPackage` controls which nushell package is
 used by the module. if discovery or indexing fails, the build fails rather
-than silently shipping an empty or incomplete index.
+than silently shipping an empty or incomplete index. when cross compiling, a
+`nushellPackage` with no build-platform twin falls back to the stock
+`pkgs.buildPackages.nushell` for discovery.

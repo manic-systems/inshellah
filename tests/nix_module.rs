@@ -29,8 +29,9 @@ fn nix_module_uses_configurable_nushell_package_for_indexing() {
         "module should default index-time discovery to pkgs.nushell"
     );
     assert!(
-        module.contains("PATH=\"${cfg.nushellPackage}/bin:$PATH\""),
-        "index command should run with the configured nushell package on PATH"
+        module.contains("nushell = cfg.nushellPackage;")
+            && module.contains("PATH=\"${mergeTools.nushell}/bin:$PATH\""),
+        "merge should run with the configured nushell package on PATH unless cross compiling"
     );
     assert!(
         !module.contains("2>/dev/null || true"),

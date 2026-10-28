@@ -247,7 +247,6 @@ in
       ];
     environment.extraSetup =
       let
-        inshellah = "${cfg.package}/bin/inshellah";
         destDir = "$out${cfg.completionsPath}";
         ignoreFile = pkgs.writeText "inshellah-ignore" (
           lib.concatMapStrings (name: "${name}\n") cfg.ignoreCommands
@@ -300,23 +299,35 @@ in
             byName
           else
             null;
-        buildTools =
+        buildInshellah =
+          if cfg.package == defaultPackage then
+            pkgs.buildPackages.callPackage ./package.nix { }
+          else
+            buildTwin cfg.package;
+        buildNushell =
           let
-            nushell = buildTwin cfg.nushellPackage;
-            inshellah =
-              if cfg.package == defaultPackage then
-                pkgs.buildPackages.callPackage ./package.nix { }
-              else
-                buildTwin cfg.package;
+            twin = buildTwin cfg.nushellPackage;
           in
-          if nushell == null || inshellah == null then
+          if twin == null then pkgs.buildPackages.nushell else twin;
+        buildTools =
+          if buildInshellah == null then
             null
           else
             {
               inherit (pkgs.buildPackages) bash coreutils man;
               inherit (pkgs.stdenv.buildPlatform) system;
-              inherit nushell inshellah;
+              nushell = buildNushell;
+              inshellah = buildInshellah;
             };
+        mergeTools =
+          if pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform || buildTools == null then
+            {
+              nushell = cfg.nushellPackage;
+              inshellah = cfg.package;
+            }
+          else
+            buildTools;
+        inshellah = "${mergeTools.inshellah}/bin/inshellah";
         # some tools put their own bin/ on PATH before exec'ing `man` for
         # `--help`, so `man` sits beside them as in the profile.
         mkIndex =
@@ -359,8 +370,9 @@ in
               ''
             ];
           };
-        # a cross host scrapes each package's build-platform twin natively; one
-        # without a twin indexes on the host platform via a native builder.
+        # a cross host scrapes each package's build-platform twin natively.
+        # one without a twin is indexed with host-platform tools, which needs a
+        # builder that can run the host system.
         indexFor =
           pkg:
           let
@@ -389,7 +401,7 @@ in
         mkdir -p ${destDir}
 
         if [ -d "$out/bin" ] || ${lib.boolToString (cfg.extraScrapePackages != [ ])}; then
-          PATH="${cfg.nushellPackage}/bin:$PATH" \
+          PATH="${mergeTools.nushell}/bin:$PATH" \
             ${inshellah} merge "$out" --dir ${destDir} --sources ${sourcesFile}${flags}
         fi
 
