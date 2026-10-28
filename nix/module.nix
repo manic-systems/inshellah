@@ -249,10 +249,12 @@ in
       let
         inshellah = "${cfg.package}/bin/inshellah";
         destDir = "$out${cfg.completionsPath}";
-        ignoreFile = pkgs.writeText "inshellah-ignore" (lib.concatStringsSep "\n" cfg.ignoreCommands);
+        ignoreFile = pkgs.writeText "inshellah-ignore" (
+          lib.concatMapStrings (name: "${name}\n") cfg.ignoreCommands
+        );
         ignoreFlag = lib.optionalString (cfg.ignoreCommands != [ ]) " --ignore ${ignoreFile}";
         helpOnlyFile = pkgs.writeText "inshellah-help-only" (
-          lib.concatStringsSep "\n" cfg.helpOnlyCommands
+          lib.concatMapStrings (name: "${name}\n") cfg.helpOnlyCommands
         );
         helpOnlyFlag = lib.optionalString (cfg.helpOnlyCommands != [ ]) " --help-only ${helpOnlyFile}";
         timeoutFlag = lib.optionalString (cfg.timeoutMs != null) " --timeout-ms ${toString cfg.timeoutMs}";
@@ -327,6 +329,7 @@ in
             args = [
               "-ec"
               ''
+                shopt -s nullglob
                 mkdir -p $out profile/bin profile/share/man
                 for prefix in ${lib.escapeShellArgs prefixes}; do
                   if [ -d "$prefix/bin" ]; then
