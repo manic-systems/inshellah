@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! subprocess runner, unix-only.
 //!
-//! the child is its own pgid leader; on timeout killpg takes the whole tree so
-//! wrapped `--help` and forked grandchildren go too. pipes are non-blocking so
-//! poll-then-read never blocks on the next chunk.
+//! the child leads a new session, so it has no controlling tty for ssh to
+//! prompt on and is its own pgid leader. on timeout killpg takes the whole tree
+//! so wrapped `--help` and forked grandchildren go too. pipes are non-blocking
+//! so poll-then-read never blocks on the next chunk.
 
 use std::{
     env,
@@ -148,6 +149,21 @@ fn set_nonblocking(fd: RawFd) {
     }
 }
 
+fn setsid() -> io::Result<()> {
+    // SAFETY: setsid takes no arguments and touches no memory.
+    if unsafe { libc::setsid() } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn new_session(cmd: &mut Command) {
+    // SAFETY: setsid is async-signal-safe, so it may run between fork and exec.
+    unsafe {
+        cmd.pre_exec(setsid);
+    }
+}
+
 /// a bare name resolves through the shared lookup, never execvp's own search,
 /// which would honour empty and relative `PATH` entries against the child cwd.
 fn program_path(arg0: &str) -> Option<PathBuf> {
@@ -185,10 +201,11 @@ where
     for (key, value) in safe_env_vars() {
         cmd.env(key, value);
     }
+    cmd.env("SSH_ASKPASS_REQUIRE", "never");
     if !inherit_cwd {
         cmd.current_dir("/tmp");
     }
-    cmd.process_group(0);
+    new_session(&mut cmd);
     customize(&mut cmd);
 
     let Ok(mut child) = cmd.spawn() else {
@@ -304,6 +321,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn children_never_fall_back_to_a_gui_askpass() {
+        let out = run_cmd(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "printf %s \"$SSH_ASKPASS_REQUIRE\"".into(),
+            ],
+            2000,
+        );
+        assert_eq!(out.as_deref(), Some("never"));
+    }
 
     #[test]
     fn run_cmd_rejects_capped_output() {
