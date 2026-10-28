@@ -8,6 +8,25 @@ use crate::{
     },
 };
 
+fn scope_args(words: &Words, plain: &[&str]) -> Vec<String> {
+    let mut args = Vec::new();
+    for (long, names) in [
+        ("--host", ["-H", "--host"]),
+        ("--machine", ["-M", "--machine"]),
+    ] {
+        if let Some(value) = words.value(&names) {
+            args.extend([long.to_owned(), value.to_owned()]);
+        }
+    }
+    args.extend(
+        plain
+            .iter()
+            .filter(|flag| words.has(&[flag]))
+            .map(|flag| (*flag).to_owned()),
+    );
+    args
+}
+
 pub(super) fn complete(words: &Words, ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
     match words.command() {
         "journalctl" => journalctl_completions(words, ctx),
@@ -33,6 +52,7 @@ const SYSTEMCTL_UNIT_VERBS: &[&str] = &[
     "try-restart",
     "reload-or-restart",
     "reload-or-try-restart",
+    "try-reload-or-restart",
     "isolate",
     "kill",
     "reset-failed",
@@ -49,20 +69,20 @@ const SYSTEMCTL_UNIT_VERBS: &[&str] = &[
 ];
 
 fn systemctl_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    if !SYSTEMCTL_UNIT_VERBS.contains(&words.arg(0)) {
+    let verb = words.arg(0);
+    if !SYSTEMCTL_UNIT_VERBS.contains(&verb) || (verb == "isolate" && words.arg_count() > 1) {
         return None;
     }
-    let scope: &[&str] = if words.has(&["--user"]) {
-        &["--user"]
-    } else {
-        &[]
-    };
-    unit_candidates(scope, words.current(), ctx)
+    unit_candidates(
+        &scope_args(words, &["--user", "--system"]),
+        words.current(),
+        ctx,
+    )
 }
 
-fn unit_candidates(scope: &[&str], prefix: &str, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+fn unit_candidates(scope: &[String], prefix: &str, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let mut args: Vec<String> = vec![ctx.bin("systemctl")];
-    args.extend(scope.iter().map(ToString::to_string));
+    args.extend(scope.iter().cloned());
     args.extend(
         [
             "list-units",
@@ -100,20 +120,15 @@ fn unit_candidates(scope: &[&str], prefix: &str, ctx: &DynCtx) -> Option<Vec<Can
 }
 
 fn journalctl_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let prev = ctx.slot.value_flag()?;
-    // -u takes a unit and may end a combined short group (-xeu); --unit and
-    // --user-unit take one too.
-    let takes_unit = matches!(prev, "--unit" | "--user-unit")
-        || (prev.len() >= 2
-            && prev.starts_with('-')
-            && !prev.starts_with("--")
-            && prev.ends_with('u'));
-    if !takes_unit {
+    let prev = words.value_slot(ctx)?;
+    if !matches!(prev, "-u" | "--unit" | "--user-unit") {
         return None;
     }
-    let user_scope = words.has(&["--user-unit", "--user"]);
-    let scope: &[&str] = if user_scope { &["--user"] } else { &[] };
-    unit_candidates(scope, words.current(), ctx)
+    let mut scope = scope_args(words, &["--user"]);
+    if words.has(&["--user-unit"]) && !words.has(&["--user"]) {
+        scope.push("--user".into());
+    }
+    unit_candidates(&scope, words.current(), ctx)
 }
 
 fn coredumpctl_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
@@ -126,7 +141,7 @@ fn coredumpctl_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>
     // positional takes a PID, COMM, or exe path. only offer units for `-u` so
     // they don't leak into the positional where they can never match a recorded
     // coredump.
-    if let Some("-u" | "--unit") = ctx.slot.value_flag() {
+    if let Some("-u" | "--unit") = words.value_slot(ctx) {
         return unit_candidates(&[], last, ctx);
     }
     if !words.at_operand(ctx) {
@@ -170,78 +185,72 @@ fn loginctl_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
         "kill-session",
     ];
     let sub = words.arg(0);
-    if user_verbs.contains(&sub) {
-        let out = run(
-            &[
-                ctx.bin("loginctl"),
-                "list-users".into(),
-                "--no-pager".into(),
-                "--no-legend".into(),
-            ],
-            ctx,
-        )?;
-        let mut candidates = Vec::new();
-        for line in out.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 2 {
-                continue;
-            }
-            candidates.push(Candidate::new(parts[1], format!("UID {}", parts[0])));
-        }
-        (!candidates.is_empty()).then_some(candidates)
-    } else if session_verbs.contains(&sub) {
-        let out = run(
-            &[
-                ctx.bin("loginctl"),
-                "list-sessions".into(),
-                "--no-pager".into(),
-                "--no-legend".into(),
-            ],
-            ctx,
-        )?;
-        let mut candidates = Vec::new();
-        for line in out.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 3 {
-                continue;
-            }
-            candidates.push(Candidate::new(parts[0], format!("user {}", parts[2])));
-        }
-        (!candidates.is_empty()).then_some(candidates)
-    } else {
-        None
+    if sub == "activate" && words.arg_count() > 1 {
+        return None;
     }
+    let (list, min_fields) = if user_verbs.contains(&sub) {
+        ("list-users", 2)
+    } else if session_verbs.contains(&sub) {
+        ("list-sessions", 3)
+    } else {
+        return None;
+    };
+    let mut args = vec![ctx.bin("loginctl")];
+    args.extend(scope_args(words, &[]));
+    args.extend([list.into(), "--no-pager".into(), "--no-legend".into()]);
+    let out = run(&args, ctx)?;
+    let mut candidates = Vec::new();
+    for line in out.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < min_fields {
+            continue;
+        }
+        candidates.push(if list == "list-users" {
+            Candidate::new(parts[1], format!("UID {}", parts[0]))
+        } else {
+            Candidate::new(parts[0], format!("user {}", parts[2]))
+        });
+    }
+    (!candidates.is_empty()).then_some(candidates)
 }
 
 fn machinectl_completions(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
-    let verbs = [
+    const MACHINE_VERBS: &[&str] = &[
         "status",
         "show",
-        "start",
-        "login",
-        "shell",
-        "enable",
-        "disable",
         "poweroff",
         "reboot",
+        "pause",
+        "resume",
         "terminate",
         "kill",
-        "bind",
-        "copy-to",
-        "copy-from",
     ];
-    if !verbs.contains(&words.arg(0)) {
+    const SINGLE_MACHINE_VERBS: &[&str] = &["login", "shell", "bind", "copy-to", "copy-from"];
+    const IMAGE_VERBS: &[&str] = &[
+        "start",
+        "enable",
+        "disable",
+        "image-status",
+        "show-image",
+        "edit",
+        "cat",
+        "remove",
+    ];
+    const SINGLE_IMAGE_VERBS: &[&str] = &["clone", "rename", "read-only"];
+    let sub = words.arg(0);
+    let images = IMAGE_VERBS.contains(&sub) || SINGLE_IMAGE_VERBS.contains(&sub);
+    let single = SINGLE_MACHINE_VERBS.contains(&sub) || SINGLE_IMAGE_VERBS.contains(&sub);
+    if !(images || single || MACHINE_VERBS.contains(&sub)) || (single && words.arg_count() > 1) {
         return None;
     }
-    let out = run(
-        &[
-            ctx.bin("machinectl"),
-            "list".into(),
-            "--no-pager".into(),
-            "--no-legend".into(),
-        ],
-        ctx,
-    )?;
+    let mut args = vec![ctx.bin("machinectl")];
+    args.extend(scope_args(words, &["--system", "--user"]));
+    args.extend([
+        if images { "list-images" } else { "list" }.into(),
+        "--no-pager".into(),
+        "--no-legend".into(),
+    ]);
+    let out = run(&args, ctx)?;
     let mut candidates = Vec::new();
     for line in out.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();

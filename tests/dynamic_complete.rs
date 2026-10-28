@@ -69,8 +69,19 @@ fn install_fakes(bin_dir: &Path) {
     fs::create_dir_all(bin_dir).expect("bin dir");
 
     write_executable(bin_dir, "nix", FAKE_NIX);
-    write_executable(bin_dir, "systemctl", FAKE_SYSTEMCTL);
-    for name in ["ssh", "scp", "sftp"] {
+    for name in [
+        "systemctl",
+        "journalctl",
+        "coredumpctl",
+        "loginctl",
+        "machinectl",
+        "networkctl",
+    ] {
+        write_executable(bin_dir, name, FAKE_SYSTEMD);
+    }
+    write_executable(bin_dir, "zig", FAKE_ZIG);
+    write_executable(bin_dir, "ps", FAKE_PS);
+    for name in ["ssh", "scp", "sftp", "kill", "pkill"] {
         write_executable(bin_dir, name, "#!/bin/sh\nexit 0\n");
     }
     write_executable(bin_dir, "kubectl", FAKE_KUBECTL);
@@ -94,16 +105,52 @@ else
 fi
 "#;
 
-const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
-case "$*" in
-  *"g*"*)
-    printf 'greetd.service loaded active running Greeter\n'
+const FAKE_SYSTEMD: &str = r#"#!/bin/sh
+if [ -n "${INSHELLAH_SYSTEMD_ARGS_FILE:-}" ]; then
+  printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$INSHELLAH_SYSTEMD_ARGS_FILE"
+fi
+case "${0##*/}" in
+  systemctl)
+    case "$*" in
+      *"g*"*) printf 'greetd.service loaded active running Greeter\n' ;;
+      *) printf 'demo.service loaded active running Demo Unit\n' ;;
+    esac
     ;;
-  *)
-    printf 'demo.service loaded active running Demo Unit\n'
+  coredumpctl)
+    printf 'Thu 2025-01-01 00:00:00 UTC 4242 1000 1000 11 present demo-app\n'
+    ;;
+  loginctl)
+    case "$*" in
+      *list-users*) printf '1000 alice\n' ;;
+      *list-sessions*) printf 'c1 1000 alice seat0\n' ;;
+    esac
+    ;;
+  machinectl)
+    case "$*" in
+      *list-images*) printf 'demo-image raw\n' ;;
+      *) printf 'demo-machine container systemd\n' ;;
+    esac
+    ;;
+  networkctl)
+    printf '1 eth0 ether routable configured\n'
     ;;
 esac
 "#;
+
+const FAKE_ZIG: &str = r#"#!/bin/sh
+if [ -n "${ZIG_ARGS_FILE:-}" ]; then
+  printf 'argv0=%s\nargs=%s\n' "$0" "$*" > "$ZIG_ARGS_FILE"
+fi
+case " $* " in
+  *" --list-steps "*)
+    printf 'install (default) Copy build artifacts\n\ntest Run project tests\n'
+    ;;
+esac
+"#;
+
+const FAKE_PS: &str = r"#!/bin/sh
+printf ' 101 worker\n 202 database server\n'
+";
 
 const FAKE_KUBECTL: &str = r#"#!/bin/sh
 case "$*" in
@@ -291,6 +338,11 @@ impl Harness {
         );
         aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), root.join("git-args.txt"));
         aux_files.insert("INSHELLAH_JJ_ARGS_FILE".into(), root.join("jj-args.txt"));
+        aux_files.insert("ZIG_ARGS_FILE".into(), root.join("zig-args.txt"));
+        aux_files.insert(
+            "INSHELLAH_SYSTEMD_ARGS_FILE".into(),
+            root.join("systemd-args.txt"),
+        );
         Self {
             root,
             bin_dir,
@@ -577,7 +629,7 @@ fn ssh_clustered_short_flags_follow_the_cached_arity() {
     assert_eq!(Harness::values(&hosts)[0], "tt-example");
 }
 
-// === systemctl ===
+// === systemctl and friends ===
 
 #[test]
 fn systemctl_emits_units_only_for_unit_verbs() {
@@ -596,6 +648,45 @@ fn systemctl_emits_units_only_for_unit_verbs() {
     let prefixed = parse_output(&prefixed_out).expect("prefix-filtered units");
     assert_eq!(prefixed[0].value, "greetd.service");
 }
+
+#[test]
+fn systemctl_forwards_host_machine_and_scope_to_unit_queries() {
+    let harness = Harness::new("dyn-systemctl-scope");
+    let (stdout, stderr, ok) = harness.run(
+        &["systemctl", "--host", "remote", "--user", "status", ""],
+        &[],
+    );
+    assert!(ok, "stderr={stderr}");
+    let cands = parse_output(&stdout).expect("units after global options");
+    assert_eq!(cands[0].value, "demo.service");
+    let args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+    assert!(
+        args.contains("args=--host remote --user list-units"),
+        "args={args}"
+    );
+
+    let (machine, ..) = harness.run(&["systemctl", "-M", "box", "--system", "start", ""], &[]);
+    assert!(parse_output(&machine).is_some(), "stdout={machine}");
+    let machine_args = harness.read_aux("INSHELLAH_SYSTEMD_ARGS_FILE");
+    assert!(
+        machine_args.contains("args=--machine box --system list-units"),
+        "args={machine_args}"
+    );
+}
+
+#[test]
+fn systemctl_option_values_from_the_cache_do_not_leak_unit_candidates() {
+    let harness = Harness::new("dyn-systemctl-value-slot");
+    seed_command(&harness, "systemctl", &[], &["--signal", "--job-mode"], &[]);
+
+    let (stdout, ..) = harness.run(&["systemctl", "status", "--signal", ""], &[]);
+    assert_eq!(stdout.trim(), "null", "signal value must not receive units");
+
+    let (job_mode, ..) = harness.run(&["systemctl", "--job-mode", "fail", "start", ""], &[]);
+    assert!(parse_output(&job_mode).is_some(), "stdout={job_mode}");
+}
+
+// === kill/pkill ===
 
 // === kubectl ===
 
@@ -738,6 +829,8 @@ fn cargo_bin_completes_only_bin_targets() {
     let cands = parse_output(&stdout).expect("bin targets");
     assert_eq!(Harness::values(&cands), vec!["app-cli"]);
 }
+
+// === zig ===
 
 // === git ===
 

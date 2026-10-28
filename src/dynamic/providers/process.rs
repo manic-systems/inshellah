@@ -12,6 +12,12 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
         return None;
     }
     let by_pid = words.command() == "kill";
+    // util-linux kill --timeout takes a millisecond count and then a signal.
+    let awaiting_signal = by_pid && words.has(&["--timeout"]) && words.arg_count() == 0;
+    let pattern_given = !by_pid && words.arg_count() > 0;
+    if awaiting_signal || pattern_given {
+        return None;
+    }
     let out = run(
         &[
             "ps".into(),
