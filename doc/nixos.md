@@ -54,9 +54,13 @@ on macOS, the tools you reach through `/usr/bin` (`git`, `clang`, …) are
 developer dir, outside the nix system profile — so they aren't indexed by
 default. rather than probe the host toolchain impurely, list the nix
 equivalents you want completed in `extraScrapePackages`; the module rolls
-their store paths into the build-time scrape (`inshellah index … --prefix
-…`). this applies on NixOS too, for any package whose completions you want
-indexed without putting it on the system path.
+each package into its own build-time index, then merges those indexes into
+the system result. this applies on NixOS too, for any package whose
+completions you want indexed without putting it on the system path.
+
+an indexed package must install a command under `bin/`. a `share/man/`
+output can enrich that command's completion data, but a man-only package
+does not create a completion because there is no installed command to run.
 
 after rebuilding, completions are immediately available through the
 autoloaded nushell shim.
@@ -66,8 +70,9 @@ autoloaded nushell shim.
 - installs the inshellah binary, wrapped to default `INSHELLAH_DIR` to
   the user cache plus the system completion path. an `INSHELLAH_DIR` you
   set yourself, or an explicit `--dir`, wins.
-- runs `inshellah index "$out"` during the system profile build,
-  producing one file per command under `$out/share/inshellah/`.
+- indexes each installed package in its own derivation, then runs
+  `inshellah merge` during the system profile build to select and combine
+  completion files under `$out/share/inshellah/`.
 - drops the full nushell external-completer shim into
   `/share/nushell/vendor/autoload/`, including sudo/doas overrides so elevated
   commands still complete through inshellah. the single external completer
@@ -101,13 +106,12 @@ programs.inshellah = {
   # commands to skip manpage parsing for (uses --help instead)
   helpOnlyCommands = [ "nix" ];
 
-  # extra packages to scrape alongside the system profile; each store path
-  # is passed to `inshellah index --prefix`. handy on macOS for the nix
-  # equivalents of /usr/bin shim tools (git, clang, …)
+  # extra packages to index and merge alongside the system profile. handy
+  # on macOS for the nix equivalents of /usr/bin shim tools (git, clang, …)
   extraScrapePackages = [ pkgs.git pkgs.clang ];
 
   # per-subprocess timeout in ms during indexing (null = built-in
-  # default of 200ms)
+  # default of 1200ms)
   timeoutMs = null;
 
   # wall-clock timeout in ms for live providers at tab-completion time.
@@ -131,12 +135,16 @@ programs.inshellah = {
   # (nushell's built-in default of 200 still applies)
   maxCompletions = 0;
 
+  # rescrape user-cached completions older than this many seconds.
+  # 0 disables time-based rescraping
+  cacheTtlSecs = 604800;
+
   # per-subprocess timeout (ms) for the completer's on-the-fly --help
-  # resolution of uncached commands. null = built-in default of 200ms.
+  # resolution of uncached commands. null = built-in default of 1200ms.
   # distinct from timeoutMs (indexing) and dynamicTimeoutMs (live shim)
   completeTimeoutMs = null;
 
-  # worker-thread count for the parallel scrape
+  # positive worker-thread count for the parallel scrape
   workers = null;
 };
 ```
