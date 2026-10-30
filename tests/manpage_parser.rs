@@ -514,6 +514,50 @@ supports an environment block passed to the processes it spawns\&.
     assert_eq!(names, vec!["start"]);
 }
 
+#[test]
+fn pflag_manpage_defaults_tell_switches_from_valued_flags() {
+    let groff = r#".TH KUBECTL-LOGS "1"
+.SH NAME
+kubectl logs \- Print the logs for a container in a pod
+.SH OPTIONS
+\fB\-\-all\-containers\fP=false
+	Get all containers' logs in the pod(s).
+
+.PP
+\fB\-c\fP, \fB\-\-container\fP=""
+	Print the logs of this container
+
+.PP
+\fB\-f\fP, \fB\-\-follow\fP=false
+	Specify if the logs should be streamed.
+
+.PP
+\fB\-\-tail\fP=\-1
+	Lines of recent log file to display.
+"#;
+    let result = parse_manpage_string(groff);
+    assert_eq!(
+        takes_value(&result, 'c'),
+        Some(true),
+        "{:?}",
+        result.entries
+    );
+    assert_eq!(
+        takes_value(&result, 'f'),
+        Some(false),
+        "{:?}",
+        result.entries
+    );
+    for (long, expected) in [("all-containers", false), ("tail", true)] {
+        let entry = result
+            .entries
+            .iter()
+            .find(|entry| entry.switch == OwnedSwitch::Long(long.to_owned()))
+            .unwrap_or_else(|| panic!("--{long} in {:?}", result.entries));
+        assert_eq!(entry.param.is_some(), expected, "--{long}");
+    }
+}
+
 fn param_of(result: &ManpageResult, short: char) -> Option<&OwnedParam> {
     result
         .entries
