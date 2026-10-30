@@ -6,7 +6,6 @@ use std::{
         self,
         Write as _,
     },
-    iter,
     path::{
         Path,
         PathBuf,
@@ -27,7 +26,10 @@ use inshellah::{
     },
 };
 
-use super::complete::decide;
+use super::complete::{
+    StaleReason,
+    decide,
+};
 
 pub fn run(
     spans: &[String],
@@ -52,20 +54,19 @@ pub fn run(
         None => writeln!(out, "binary    not on PATH")?,
     }
     for stale in &trace.dropped {
-        writeln!(
-            out,
-            "stale     {} came from {}",
-            stale.dir.display(),
-            stale.stored.path().display()
-        )?;
+        let why = match stale.reason {
+            StaleReason::BinaryChanged => {
+                format!("{} has changed since", stale.stored.path().display())
+            },
+            StaleReason::OtherBuild => "written by another inshellah build".to_owned(),
+        };
+        writeln!(out, "stale     {} dropped, {why}", stale.dir.display())?;
     }
     if !trace.path.is_empty() {
         writeln!(out, "path      {}", trace.path.join(" "))?;
     }
 
-    let dirs = iter::once(user_dir)
-        .chain(system_dirs.iter().map(PathBuf::as_path))
-        .filter(|dir| !trace.dropped.iter().any(|stale| stale.dir == *dir));
+    let dirs = trace.dirs.iter().map(PathBuf::as_path);
     match &trace.node {
         Some(node) => {
             let hit = dirs.into_iter().find_map(|dir| {

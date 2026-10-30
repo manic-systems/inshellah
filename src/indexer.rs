@@ -46,7 +46,10 @@ use self::probe::{
     try_native_completion,
 };
 use crate::{
-    executable::is_executable,
+    executable::{
+        find_in_path,
+        is_executable,
+    },
     parsers::{
         manpage::{
             ManpageEntry,
@@ -1097,10 +1100,6 @@ where
 
 // resolves each `cmd-*.N` page's real space-separated name from its content, so
 // `subcommands_of` can surface children the parent page didn't enumerate.
-#[expect(
-    clippy::let_underscore_must_use,
-    reason = "runtime cache writes are best-effort, a failed one is rescraped next time"
-)]
 fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str) -> bool {
     let prefix = format!("{hyphenated}-");
     let mut any = false;
@@ -1120,12 +1119,17 @@ fn index_sibling_manpages(user_dir: &Path, mandirs: &[PathBuf], hyphenated: &str
                     continue;
                 }
                 if let Some((name, result, subs)) = process_manpage(&entry.path()) {
-                    let _: io::Result<()> = write_result(user_dir, &name, "manpage", &result);
+                    let stamp = || {
+                        find_in_path(&name)
+                            .and_then(|bin| ExeIdentity::of(&bin))
+                            .map_or(Ok(()), |identity| write_exe(user_dir, &name, &identity))
+                    };
+                    any |= write_result(user_dir, &name, "manpage", &result)
+                        .and_then(|()| stamp())
+                        .is_ok();
                     for (sub_name, sub_result) in subs {
-                        let _: io::Result<()> =
-                            write_result(user_dir, &sub_name, "manpage", &sub_result);
+                        any |= write_result(user_dir, &sub_name, "manpage", &sub_result).is_ok();
                     }
-                    any = true;
                 }
             }
         }

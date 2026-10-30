@@ -24,9 +24,12 @@ use std::{
     },
     process,
     str::FromStr,
-    sync::atomic::{
-        AtomicU64,
-        Ordering,
+    sync::{
+        OnceLock,
+        atomic::{
+            AtomicU64,
+            Ordering,
+        },
     },
     time::{
         Duration,
@@ -345,16 +348,51 @@ pub fn write_native(dir: &Path, command: &str, data: &str) -> io::Result<()> {
     remove_if_present(&dir.join(format!("{base}.json")))
 }
 
-/// the binary a command's cache entries came from.
+/// the binary a command's cache entries came from, and the running inshellah
+/// build that wrote them. entries from before builds were recorded read as an
+/// empty one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExeIdentity {
     path:     PathBuf,
     len:      u64,
     modified: u64,
+    build:    String,
 }
 
 impl ExeIdentity {
+    /// `None` when `bin` or the running inshellah cannot be read.
     pub fn of(bin: &Path) -> Option<Self> {
+        let FileStamp {
+            path,
+            len,
+            modified,
+        } = FileStamp::of(bin)?;
+        Some(Self {
+            path,
+            len,
+            modified,
+            build: running_build()?.to_owned(),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// the same file, whichever inshellah build recorded it.
+    pub fn same_binary(&self, other: &Self) -> bool {
+        self.path == other.path && self.len == other.len && self.modified == other.modified
+    }
+}
+
+struct FileStamp {
+    path:     PathBuf,
+    len:      u64,
+    modified: u64,
+}
+
+impl FileStamp {
+    fn of(bin: &Path) -> Option<Self> {
         let path = fs::canonicalize(bin).ok()?;
         let meta = fs::metadata(&path).ok()?;
         let modified = meta
@@ -369,20 +407,34 @@ impl ExeIdentity {
             modified,
         })
     }
+}
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
+fn running_build() -> Option<&'static str> {
+    static BUILD: OnceLock<Option<String>> = OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            let FileStamp {
+                path,
+                len,
+                modified,
+            } = FileStamp::of(&env::current_exe().ok()?)?;
+            Some(format!(
+                "{len}:{modified}:{}",
+                path.to_string_lossy().replace('\t', "\\t")
+            ))
+        })
+        .as_deref()
 }
 
 impl Display for ExeIdentity {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}\t{}\t{}",
+            "{}\t{}\t{}\t{}",
             self.len,
             self.modified,
-            self.path.display()
+            self.path.display(),
+            self.build
         )
     }
 }
@@ -400,11 +452,13 @@ impl FromStr for ExeIdentity {
             .next()
             .and_then(|field| field.parse().ok())
             .ok_or(())?;
-        let path = fields.next().filter(|field| !field.is_empty()).ok_or(())?;
+        let rest = fields.next().filter(|field| !field.is_empty()).ok_or(())?;
+        let (path, build) = rest.rsplit_once('\t').unwrap_or((rest, ""));
         Ok(Self {
             path: PathBuf::from(path),
             len,
             modified,
+            build: build.to_owned(),
         })
     }
 }
