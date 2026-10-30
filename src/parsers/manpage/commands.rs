@@ -97,7 +97,9 @@ pub fn extract_subcommands_from_commands(lines: &[GroffLine]) -> Vec<ManpageSubc
                 if i >= lines.len() {
                     continue;
                 }
-                if let Some(cmd_name) = extract_command_name_from_line(&lines[i]) {
+                let is_pp_prose = name == "PP"
+                    && !matches!(lines.get(i + 1), Some(GroffLine::Macro { name: next, .. }) if next == "RS");
+                if !is_pp_prose && let Some(cmd_name) = extract_command_name_from_line(&lines[i]) {
                     let (desc, new_i) = collect_subcmd_desc(lines, i + 1);
                     let short_desc = first_sentence(&desc);
                     out.push(ManpageSubcommand::new(

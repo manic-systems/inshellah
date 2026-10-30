@@ -12,6 +12,7 @@ flags:
   -c|--change
   --named
   --dry-run
+  -o|--option
   -h|--help
   -R|--repository
   --ignore-working-copy

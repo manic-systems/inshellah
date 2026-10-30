@@ -1,4 +1,6 @@
 use inshellah::parsers::manpage::{
+    ManpageResult,
+    OwnedParam,
     OwnedSwitch,
     ParamKind,
     parse_manpage_string,
@@ -413,4 +415,218 @@ Limit history depth.
             OwnedSwitch::Long(long) if long == "depth"
         )
     }));
+}
+
+fn takes_value(result: &ManpageResult, short: char) -> Option<bool> {
+    result
+        .entries
+        .iter()
+        .find(|entry| {
+            matches!(&entry.switch, OwnedSwitch::Short(found) | OwnedSwitch::Both(found, _) if *found == short)
+        })
+        .map(|entry| entry.param.is_some())
+}
+
+#[test]
+fn mdoc_nested_list_does_not_end_the_option_list() {
+    let mdoc = ".Sh NAME\n.Nm tool\n.Nd demo\n.Sh DESCRIPTION\n.Bl -tag -width Ds\n.It Fl \
+                a\nPlain switch.\n.It Fl O Ar ctl_cmd\nValid commands are:\n.Bl -tag -width check \
+                -compact\n.It Cm check\nCheck the master.\n.It Cm exit\nExit the \
+                master.\n.El\n.It Fl p Ar port\nPort to use.\n.El\n";
+    let result = parse_manpage_string(mdoc);
+    assert_eq!(takes_value(&result, 'O'), Some(true));
+    assert_eq!(
+        takes_value(&result, 'p'),
+        Some(true),
+        "entries: {:?}",
+        result.entries
+    );
+    assert_eq!(takes_value(&result, 'a'), Some(false));
+}
+
+#[test]
+fn mdoc_xo_item_keeps_its_parameter() {
+    let mdoc = ".Sh NAME\n.Nm tool\n.Nd demo\n.Sh DESCRIPTION\n.Bl -tag -width Ds\n.It Fl L \
+                Xo\n.Sm off\n.Oo Ar bind_address : Oc\n.Ar port : host : hostport\n.Sm \
+                on\n.Xc\n.It Fl L Xo\n.Sm off\n.Ar local_socket : remote_socket\n.Sm \
+                on\n.Xc\nForward a port.\n.It Fl q\nQuiet.\n.El\n";
+    let result = parse_manpage_string(mdoc);
+    assert_eq!(
+        takes_value(&result, 'L'),
+        Some(true),
+        "entries: {:?}",
+        result.entries
+    );
+    assert_eq!(takes_value(&result, 'q'), Some(false));
+}
+
+#[test]
+fn bare_equals_long_option_takes_a_value() {
+    let groff = r#".TH APP "1"
+.SH NAME
+app \- demo
+.SH OPTIONS
+.PP
+\fB\-t\fR, \fB\-\-type=\fR
+.RS 4
+Unit types to show.
+.RE
+.PP
+\fB\-\-all\fR
+.RS 4
+Show everything.
+.RE
+"#;
+    let result = parse_manpage_string(groff);
+    assert_eq!(
+        takes_value(&result, 't'),
+        Some(true),
+        "entries: {:?}",
+        result.entries
+    );
+    assert!(result.entries.iter().any(|entry| {
+        matches!(&entry.switch, OwnedSwitch::Long(long) if long == "all") && entry.param.is_none()
+    }));
+}
+
+#[test]
+fn bold_word_opening_a_prose_paragraph_is_not_a_subcommand() {
+    let groff = r#".TH APP "1"
+.SH NAME
+app \- demo
+.SH COMMANDS
+.PP
+\fBstart\fR \fIUNIT\fR
+.RS 4
+Start a unit.
+.RE
+.SS "Environment Commands"
+.PP
+\fBdaemon\fR
+supports an environment block passed to the processes it spawns\&.
+"#;
+    let result = parse_manpage_string(groff);
+    let names: Vec<&str> = result
+        .subcommands
+        .iter()
+        .map(|sub| sub.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["start"]);
+}
+
+fn param_of(result: &ManpageResult, short: char) -> Option<&OwnedParam> {
+    result
+        .entries
+        .iter()
+        .find(|entry| {
+            matches!(&entry.switch, OwnedSwitch::Short(found) | OwnedSwitch::Both(found, _) if *found == short)
+        })
+        .and_then(|entry| entry.param.as_ref())
+}
+
+fn choice_values(param: &OwnedParam) -> Vec<&str> {
+    param
+        .choices
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect()
+}
+
+#[test]
+fn mdoc_cm_run_after_a_flag_is_its_choice_list() {
+    let mdoc = ".Sh NAME\n.Nm tool\n.Nd demo\n.Sh DESCRIPTION\n.Bl -tag -width Ds\n.It Fl t Cm \
+                rsa | ed25519 | ecdsa\nKey type.\n.It Fl M Cm generate\nGenerate.\n.It Fl M Cm \
+                screen\nScreen.\n.It Fl q\nQuiet.\n.El\n";
+    let result = parse_manpage_string(mdoc);
+    let key_type = param_of(&result, 't').expect("-t takes a value");
+    assert_eq!(key_type.kind, ParamKind::Mandatory);
+    assert_eq!(choice_values(key_type), ["rsa", "ed25519", "ecdsa"]);
+    let module = param_of(&result, 'M').expect("-M takes a value");
+    assert_eq!(choice_values(module), ["generate", "screen"]);
+    assert_eq!(
+        result
+            .entries
+            .iter()
+            .filter(|entry| entry.switch == OwnedSwitch::Short('M'))
+            .count(),
+        1
+    );
+    assert_eq!(takes_value(&result, 'q'), Some(false));
+}
+
+#[test]
+fn mdoc_bare_xo_item_keeps_its_flag_and_parameter() {
+    let mdoc = ".Sh NAME\n.Nm tool\n.Nd demo\n.Sh DESCRIPTION\n.Bl -tag -width Ds\n.It Xo\n.Fl W \
+                Ar host : port\n.Xc\nForward stdio.\n.It Fl q\nQuiet.\n.El\n";
+    let result = parse_manpage_string(mdoc);
+    let forward = result
+        .entries
+        .iter()
+        .find(|entry| entry.switch == OwnedSwitch::Short('W'))
+        .expect("-W kept");
+    assert_eq!(
+        forward.param.as_ref().map(|param| param.name.as_str()),
+        Some("host")
+    );
+    assert_eq!(forward.desc, "Forward stdio.");
+    assert_eq!(takes_value(&result, 'q'), Some(false));
+}
+
+#[test]
+fn mdoc_unterminated_xo_does_not_swallow_later_options() {
+    let mdoc = ".Sh NAME\n.Nm tool\n.Nd demo\n.Sh DESCRIPTION\n.Bl -tag -width Ds\n.It Fl L \
+                Xo\n.Ar port\nForward a port.\n.It Fl q\nQuiet.\n.It Fl p Ar port\nPort.\n.El\n";
+    let result = parse_manpage_string(mdoc);
+    assert_eq!(takes_value(&result, 'L'), Some(true));
+    assert_eq!(takes_value(&result, 'q'), Some(false));
+    assert_eq!(takes_value(&result, 'p'), Some(true));
+}
+
+#[test]
+fn mdoc_keyword_glued_to_a_value_is_not_a_choice_list() {
+    let mdoc = ".Sh NAME\n.Nm tool\n.Nd demo\n.Sh DESCRIPTION\n.Bl -tag -width Ds\n.It Fl I Cm os \
+                Ns = Ns Ar name\nSet the os.\n.It Fl d Cm der | pem ,\nFormat.\n.It Fl \
+                q\nQuiet.\n.El\n";
+    let result = parse_manpage_string(mdoc);
+    let os = param_of(&result, 'I').expect("-I takes a value");
+    assert_eq!(os.name, "name");
+    assert!(os.choices.is_empty(), "choices: {:?}", os.choices);
+    let format = param_of(&result, 'd').expect("-d takes a value");
+    assert_eq!(choice_values(format), ["der", "pem"]);
+}
+
+#[test]
+fn prose_line_opening_with_a_flag_is_not_an_option() {
+    let groff = ".TH APP 1\n.SH NAME\napp \\- demo\n.SH OPTIONS\n.SS \\fB--all\\fP\nAdd \
+                 everything from the list. Combining\n\\fI--all\\fP with any of the other options \
+                 described below is NOT recommended.\n.SS \\fB--cgroups\\fP=\\fImode\\fP\nSet the \
+                 mode.\nContainers started with\n\\fB--cgroups=disabled\\fP cannot be frozen and \
+                 so do not get this guarantee.\n";
+    let result = parse_manpage_string(groff);
+    for entry in &result.entries {
+        assert!(
+            entry
+                .param
+                .as_ref()
+                .is_none_or(|param| !matches!(param.name.as_str(), "with" | "disabled")),
+            "prose became a value: {entry:?}"
+        );
+    }
+}
+
+#[test]
+fn single_space_option_row_after_a_finished_line_is_kept() {
+    let groff = ".TH APP 1\n.SH NAME\napp \\- demo\n.SH OPTIONS\nThe options are:\n-a list all \
+                 entries in dir\n-q quiet output, no listing at all\n";
+    let result = parse_manpage_string(groff);
+    for short in ['a', 'q'] {
+        assert!(
+            result
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.switch, OwnedSwitch::Short(found) if found == short)),
+            "-{short} dropped: {:?}",
+            result.entries
+        );
+    }
 }

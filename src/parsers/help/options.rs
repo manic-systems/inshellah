@@ -5,10 +5,14 @@ use crate::{
         manpage::{
             OwnedParam,
             OwnedSwitch,
+            ParamChoice,
             ParamKind,
+            ParamOrigin,
         },
     },
 };
+
+const PLACEHOLDER_PARAM: &str = "value";
 
 // zero-copy intermediates, live only between nom combinators here. public
 // parsers emit the owned model.
@@ -22,6 +26,8 @@ enum Param<'src> {
     Mandatory(&'src str),
     Optional(&'src str),
     OptionalWord(&'src str),
+    Guessed(&'src str),
+    Placeholder,
 }
 
 impl From<Switch<'_>> for OwnedSwitch {
@@ -34,17 +40,53 @@ impl From<Switch<'_>> for OwnedSwitch {
     }
 }
 
+// `yes|no` spelled out in place of a value name.
+fn word_choices(name: &str) -> Vec<ParamChoice> {
+    let words: Vec<&str> = name.split('|').collect();
+    let all_words = words.iter().all(|word| {
+        !word.is_empty()
+            && word
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    });
+    if words.len() < 2 || !all_words {
+        return Vec::new();
+    }
+    words
+        .into_iter()
+        .map(|word| {
+            ParamChoice {
+                value: word.to_owned(),
+                desc:  String::new(),
+            }
+        })
+        .collect()
+}
+
 impl From<Param<'_>> for OwnedParam {
     fn from(param: Param<'_>) -> Self {
         match param {
             Param::Mandatory(name) => Self::new(ParamKind::Mandatory, name.to_owned()),
-            Param::Optional(name) => Self::new(ParamKind::Optional, name.to_owned()),
+            Param::Optional(name) => {
+                let mut optional = Self::new(ParamKind::Optional, name.to_owned());
+                optional.choices = word_choices(name);
+                optional
+            },
             Param::OptionalWord(name) => Self::new(ParamKind::OptionalWord, name.to_owned()),
+            Param::Guessed(name) => {
+                Self::new(ParamKind::Mandatory, name.to_owned())
+                    .with_origin(ParamOrigin::ProseGuess)
+            },
+            Param::Placeholder => {
+                Self::new(ParamKind::Mandatory, PLACEHOLDER_PARAM.to_owned())
+                    .with_origin(ParamOrigin::Placeholder)
+            },
         }
     }
 }
 
 use nom::{
+    Err as NomErr,
     IResult,
     Parser as _,
     branch::alt,
@@ -61,17 +103,24 @@ use nom::{
         space1,
     },
     combinator::{
+        eof,
         map,
         opt,
+        peek,
         recognize,
         value,
         verify,
+    },
+    error::{
+        Error as NomError,
+        ErrorKind,
     },
     multi::many0,
     sequence::{
         delimited,
         preceded,
         separated_pair,
+        terminated,
     },
 };
 
@@ -89,6 +138,27 @@ preceded(tag("--"), verify(take_while1(is_option_char), |name: &str| {
 make_parser!(negatable_long_switch<'src> -> &'src str,
     preceded(tag("--[no-]"), take_while1(is_option_char)));
 
+// the text up to the bracket that closes an already opened one, nested pairs
+// included.
+fn balanced_brackets(input: &str) -> IResult<&str, &str> {
+    let mut depth = 0_usize;
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' if depth == 0 => {
+                return match input.split_at_checked(idx) {
+                    Some((inner, rest)) if idx > 0 => Ok((rest, inner)),
+                    _ => Err(NomErr::Error(NomError::new(input, ErrorKind::TakeTill1))),
+                };
+            },
+            ']' => depth -= 1,
+            '\n' | ' ' => break,
+            _ => {},
+        }
+    }
+    Err(NomErr::Error(NomError::new(input, ErrorKind::TakeTill1)))
+}
+
 make_parser!(comma -> (),
     value((), preceded(char(','), space0)));
 
@@ -98,8 +168,32 @@ make_parser!(eq_optional_param<'src> -> Param<'src>,
 make_parser!(eq_optional_angle_param<'src> -> Param<'src>,
     delimited(tag("[=<"), take_till1(|ch| ch == '>'), tag(">]")) => Param::Optional);
 
+// `--lines[=[+]INTEGER]` and `--diff[=yes|no]`, any text up to the matching
+// bracket.
+make_parser!(eq_optional_any_param<'src> -> Param<'src>,
+    delimited(tag("[="), balanced_brackets, char(']')) => Param::Optional);
+
 make_parser!(eq_mandatory_param<'src> -> Param<'src>,
     preceded(char('='), take_while1(is_option_char)) => Param::Mandatory);
+
+// `--to=[USER@]HOST`.
+make_parser!(eq_bracket_prefixed_param<'src> -> Param<'src>,
+    preceded(char('='), recognize((
+        delimited(char('['), balanced_brackets, char(']')),
+        take_while1(is_option_char),
+    ))) => Param::Mandatory);
+
+make_parser!(eq_angle_param<'src> -> Param<'src>,
+    preceded(char('='), delimited(char('<'), take_till1(|ch| ch == '>'), char('>')))
+        => Param::Mandatory);
+
+// `--require=...` and `--debugger-arguments=…` take a value without naming it.
+make_parser!(eq_ellipsis_param<'src> -> Param<'src>,
+    preceded(char('='), alt((tag("..."), tag("\u{2026}")))) => |_| Param::Placeholder);
+
+// systemd manpages write `--type=` with the placeholder dropped.
+make_parser!(eq_bare_param<'src> -> Param<'src>,
+    terminated(char('='), eof) => |_| Param::Placeholder);
 
 // widen to a full token then verify all-caps. taking only uppercase chars
 // would match just "N" of " Needs:..." and leave "eeds:..." as desc.
@@ -142,21 +236,38 @@ make_parser!(spaced_angle_param_after_space<'src> -> Param<'src>,
 // full lowercase token then verify <=10 chars. a 10-char-capped
 // take_while_m_n leaves a partial match: "--foo nanoseconds" yields
 // "nanosecond" and "s" as desc. a word >10 chars is almost certainly desc.
-make_parser!(spaced_type_param<'src> -> Param<'src>,
-    preceded(
+// only a lowercase word with prose right behind it on the same line may be
+// description, `--ignore-command-error ignore exit codes`.
+fn spaced_type_param(input: &str) -> IResult<&str, Param<'_>> {
+    let (rem, word) = preceded(
         char(' '),
-        verify(
-            take_while1(|ch: char| !ch.is_whitespace()),
-            |word: &str| word.len() <= 10 && word.chars().all(|ch| ch.is_ascii_lowercase())
-        )
-    ) => Param::Mandatory
-);
+        verify(take_while1(|ch: char| !ch.is_whitespace()), |word: &str| {
+            word.len() <= 10 && word.chars().all(|ch| ch.is_ascii_lowercase())
+        }),
+    )
+    .parse(input)?;
+    let prose_follows = rem
+        .strip_prefix(' ')
+        .and_then(|tail| tail.chars().next())
+        .is_some_and(|ch| !ch.is_whitespace());
+    let letter_name = word.len() == 1 && word != "a";
+    if prose_follows && !letter_name {
+        Ok((rem, Param::Guessed(word)))
+    } else {
+        Ok((rem, Param::Mandatory(word)))
+    }
+}
 
 make_parser!(param_parser_borrowed<'src> -> Param<'src>, alt((
     brace_choice_param,
     eq_optional_angle_param,
     eq_optional_param,
+    eq_optional_any_param,
     eq_mandatory_param,
+    eq_bracket_prefixed_param,
+    eq_angle_param,
+    eq_ellipsis_param,
+    eq_bare_param,
     spaced_opt_angle_param,
     spaced_opt_bracket_param,
     spaced_angle_param_after_space,
@@ -166,6 +277,16 @@ make_parser!(param_parser_borrowed<'src> -> Param<'src>, alt((
 )));
 
 make_parser!(pub param_parser -> OwnedParam, param_parser_borrowed => OwnedParam::from);
+
+/// the value after a flag, `None` for a switch. never errors since a flag may
+/// have no value at all.
+///
+/// # Errors
+///
+/// never errors, the `IResult` shape composes with the nom parsers.
+pub fn flag_param(input: &str) -> IResult<&str, Option<OwnedParam>> {
+    opt(param_parser).parse(input)
+}
 
 macro_rules! switch_pair {
     ($name:ident, $left:expr, $sep:expr, $right:expr => | $a:ident, $b:ident | $body:expr) => {
@@ -221,6 +342,31 @@ fn short_param_comma_long(input: &str) -> IResult<&str, Switch<'_>> {
     Ok((rem, Switch::Both(short, long)))
 }
 
+switch_pair!(long_comma_short,
+    long_switch, comma, short_switch => |long, short| Switch::Both(short, long));
+
+// iptables `--table\t-t table` and `--set-counters -c PKTS BYTES`. gnu tar
+// opens descriptions with a flag, `--null   -T reads null-terminated names`.
+fn long_space_short(input: &str) -> IResult<&str, Switch<'_>> {
+    let (rem, (long, _, short)) = (
+        long_switch,
+        take_while1(|ch| ch == ' ' || ch == '\t'),
+        terminated(short_switch, peek(alt((space1, eof)))),
+    )
+        .parse(input)?;
+    let column = rem
+        .strip_prefix(' ')
+        .and_then(|tail| tail.split(['\t', '\n']).next())
+        .and_then(|cell| cell.split("  ").next())
+        .unwrap_or_default();
+    let sentence = column.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && column.split_whitespace().count() >= 3;
+    if sentence {
+        return Err(NomErr::Error(NomError::new(input, ErrorKind::Verify)));
+    }
+    Ok((rem, Switch::Both(short, long)))
+}
+
 make_parser!(short_as_switch<'src> -> Switch<'src>, short_switch => Switch::Short);
 make_parser!(negatable_long_as_switch<'src> -> Switch<'src>, negatable_long_switch => Switch::Long);
 make_parser!(long_as_switch<'src> -> Switch<'src>, long_switch => Switch::Long);
@@ -233,6 +379,8 @@ make_parser!(switch_parser_borrowed<'src> -> Switch<'src>,
         short_space_long,
         short_param_comma_long,
         long_slash_short,
+        long_comma_short,
+        long_space_short,
         short_as_switch,
         negatable_long_as_switch,
         long_as_switch,
