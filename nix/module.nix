@@ -100,8 +100,8 @@ in
       default = [ ];
       example = [ "nix" ];
       description = ''
-        list of command names to skip manpage parsing for,
-        using --help scraping instead
+        list of command names to skip manpage parsing for, along with
+        their subcommands, using --help scraping instead
       '';
     };
 
