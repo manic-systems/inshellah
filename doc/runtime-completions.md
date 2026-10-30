@@ -78,6 +78,8 @@ your shell before nushell starts.
 | `INSHELLAH_DYNAMIC_TIMEOUT_MS` | `5000` | wall-clock budget in milliseconds shared by live provider subprocesses for one completion request. `0` disables this runtime timeout. on timeout the provider returns no candidates and inshellah prints `null` if nothing else can answer. |
 | `INSHELLAH_DYNAMIC_LIMIT` | `200` | cap passed to live providers that support native limits, such as `git for-each-ref --count` and `docker ps --last`, for the unfiltered listing only, since a typed prefix queries without it. `0` omits those provider-specific limit flags; the nix provider caps its own listing the same way, and other providers without native caps ignore it. |
 | `INSHELLAH_TIMEOUT_MS` | `1200` | per-subprocess timeout for on-the-fly `--help` resolution of uncached commands and subcommands. it also bounds the `adb` and `jj` providers. an explicit `--timeout-ms` flag overrides it. this is separate from `INSHELLAH_DYNAMIC_TIMEOUT_MS`. |
+| `INSHELLAH_CACHE_TTL_SECS` | `604800` | age after which `complete` rescrapes a user-cached command set. `0` never rescrapes on age. |
+| `INSHELLAH_MAX_INDEX_NODES` | `10000` | cap on subcommand nodes `index` and `merge` resolve per root command. |
 | `INSHELLAH_MAX_COMPLETIONS` | `0` | cap on candidates returned by indexed/static matching, and nushell's `max_results` when sourcing the bundled snippet. `0` imposes no inshellah cap; nushell's own default of 200 still applies. |
 
 ### flag triggering
@@ -150,7 +152,7 @@ with `null`.
 | `adb` | device selectors and installed package names |
 | `docker` / `podman` | containers and image refs by subcommand |
 | `kubectl` | resource names from the selected cluster and namespace |
-| `git` | refs and worktree paths |
+| `git` | refs, remotes, stashes, worktrees and tracked paths |
 | `jj` | jj's own completer via `COMPLETE=fish`, ahead of the static index |
 | `npm` / `pnpm` / `yarn` | package.json scripts |
 | `make` / `just` | targets and recipes |

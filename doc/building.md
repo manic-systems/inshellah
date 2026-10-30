@@ -1,8 +1,9 @@
 # building and installing
 
 inshellah is a rust crate. it builds with stock cargo on unix targets,
-including linux and macos. executable checks use `access(2)` and subprocesses
-run in their own session and process group, so windows is not supported.
+including linux and macos. executable checks use `access(2)`, subprocesses run
+in their own process group and live completion spawns also in their own
+session, so windows is not supported.
 
 ## with nix
 
@@ -22,7 +23,7 @@ cargo test
 
 ## with cargo
 
-requires rust >= 1.85 (edition 2024).
+requires rust >= 1.97 (edition 2024).
 
 ```sh
 cargo build --release
@@ -40,14 +41,18 @@ sudo install -Dm755 target/release/inshellah /usr/local/bin/inshellah
 
 ## debian / ubuntu
 
+distro toolchains on stable releases are usually older than 1.97, so install
+rust with rustup.
+
 ```sh
-sudo apt install cargo rustc
-# or: rustup install stable
+rustup install stable
 cargo build --release
 sudo install -Dm755 target/release/inshellah /usr/local/bin/inshellah
 ```
 
 ## fedora
+
+fedora's packaged rust may also be older than 1.97, in which case use rustup.
 
 ```sh
 sudo dnf install cargo rust

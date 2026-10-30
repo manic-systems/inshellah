@@ -104,7 +104,7 @@ programs.inshellah = {
   # commands to skip entirely during indexing
   ignoreCommands = [ "problematic-tool" ];
 
-  # commands to skip manpage parsing for (uses --help instead)
+  # commands and their subcommands to skip manpage parsing for (uses --help instead)
   helpOnlyCommands = [ "nix" ];
 
   # extra packages to index and merge alongside the system profile. handy
@@ -208,8 +208,8 @@ providers without native caps ignore it.
 
 `programs.inshellah.completeTimeoutMs` / `INSHELLAH_TIMEOUT_MS` is
 separate: it is the per-subprocess timeout for on-the-fly `--help`
-resolution of uncached commands, and also bounds the current `adb` value
-provider. `programs.inshellah.maxCompletions` /
+resolution of uncached commands, and also bounds the `adb` and `jj` value
+providers. `programs.inshellah.maxCompletions` /
 `INSHELLAH_MAX_COMPLETIONS` caps indexed/static candidates and the
 snippet's nushell `max_results`.
 
@@ -224,20 +224,21 @@ snippet's nushell `max_results`.
 | `adb` | device selectors and installed package names |
 | `docker` / `podman` | containers and image refs by subcommand |
 | `kubectl` | resource names from the selected cluster and namespace |
-| `git` | refs and worktree paths |
+| `git` | refs, remotes, stashes, worktrees and tracked paths |
 | `jj` | jj's own completer via `COMPLETE=fish`, ahead of the static index |
 | `npm` / `pnpm` / `yarn` | package.json scripts |
 | `make` / `just` | targets and recipes |
 | `cargo` | workspace targets for `--bin`, `--example`, and related slots |
 | `kill` / `pkill` | pid and command pairs |
+| `zig` | build.zig steps |
 | cobra programs | the program's own `__complete` |
 | clap `CompleteEnv` programs | the program's own completer via `COMPLETE=fish` |
 
 ## home manager and user-level package managers
 
-the system module only indexes packages installed system-wide. for
-home-manager or per-user nix profiles, run `inshellah index` against
-those prefixes separately:
+the system module only indexes packages installed system-wide and those in
+`extraScrapePackages`. for home-manager or per-user nix profiles, run
+`inshellah index` against those prefixes separately:
 
 ```sh
 # home-manager / per-user profile
@@ -248,12 +249,15 @@ inshellah index ~/.nix-profile
 ```
 
 this indexes into `$XDG_CACHE_HOME/inshellah`, which the completer
-searches automatically. to automate via home-manager:
+searches automatically. `/etc/profiles/per-user/$USER` only exists with
+home-manager's `useUserPackages`, and `index` fails on a missing prefix, so the
+activation below uses home-manager's own profile directory, which is right for
+both setups:
 
 ```nix
 home.activation.inshellah-index = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
   PATH="${pkgs.nushell}/bin:$PATH" \
-    ${pkgs.inshellah}/bin/inshellah index /etc/profiles/per-user/$USER
+    ${pkgs.inshellah}/bin/inshellah index ${config.home.profileDirectory}
 '';
 ```
 
@@ -268,9 +272,10 @@ built-in (`help commands | where name == "thecommand"`) — built-ins
 are excluded.
 
 **a command's arguments don't complete**: the external completer fires for
-any external on `PATH`, but only commands linked into the system profile are
-indexed at build time. user-profile commands still complete live (dynamic
-providers) and on-the-fly (`--help`), just without a prebuilt cache.
+any external on `PATH`, but only commands linked into the system profile or
+listed in `extraScrapePackages` are indexed at build time. user-profile
+commands still complete live (dynamic providers) and on-the-fly (`--help`),
+just without a prebuilt cache.
 
 **stale completions after update**: the index regenerates on every
 `nixos-rebuild`. if a command changed its flags, rebuild.

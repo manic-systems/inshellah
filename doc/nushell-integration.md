@@ -47,10 +47,18 @@ inshellah index PREFIX... [--dir PATH] [--ignore FILE] [--help-only FILE]
     PREFIX is a directory containing bin/ and share/man/.
     default dir: $XDG_CACHE_HOME/inshellah
     --ignore FILE     skip listed commands entirely
-    --help-only FILE  skip manpages for listed commands, use --help instead
+    --help-only FILE  skip manpages for listed commands and their subcommands,
+                      use --help instead
     --prefix PATHS    extra scrape prefixes, colon-separated
     --workers N       worker-thread count
     --timeout-ms N    per-subprocess timeout in ms (default: 1200)
+
+inshellah merge PROFILE --dir DIR --sources FILE [--ignore FILE]
+                      [--help-only FILE] [--workers N] [--timeout-ms N]
+    merge per-package indexes for a profile whose bin/ links into them.
+    FILE lists `PACKAGE INDEX` lines in priority order. manpages under
+    PROFILE/share/man are then applied profile-wide. the nix module runs
+    this at build time.
 
 inshellah complete CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
     nushell custom completer. outputs JSON completion candidates.
@@ -60,13 +68,16 @@ inshellah complete CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
     --dir takes colon-separated paths. the first path is the writable
     user cache; additional paths are read-only system directories.
 
-inshellah query CMD [--dir PATH[:PATH...]]
+inshellah explain CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
+    show how `complete` answers a command line and why.
+
+inshellah query CMD [SUB...] [--dir PATH[:PATH...]]
     print stored completion data for CMD.
 
 inshellah dump [--dir PATH[:PATH...]]
     list indexed commands.
 
-inshellah diff CMD [SUB...] [--dir EXTRA_MANDIR] [--timeout-ms N]
+inshellah diff CMD [SUB...] [--dir PATH[:PATH...]] [--timeout-ms N]
 inshellah diff --scan PREFIX
     compare manpage-derived and --help-derived command data.
 
@@ -77,9 +88,11 @@ inshellah purge [CMD...] [--dir PATH[:PATH...]]
 inshellah refresh CMD... [--dir PATH[:PATH...]] [--timeout-ms N]
     re-resolve CMD into the user cache from the binary on PATH.
 
-each command's cache entries record the binary they came from. when the
-binary on PATH changes, such as a different nix shell, `complete` drops
-the stale entries and resolves again.
+each command's cache entries record the binary they came from and the
+inshellah build that wrote them. when either changes, such as a different
+nix shell or an inshellah update, `complete` drops the stale entries and
+resolves again. caches built with `inshellah index` into the user dir are
+dropped the same way, so rerun `index` on those prefixes after updating.
 
 inshellah manpage FILE
     parse a manpage and emit a nushell extern block.
@@ -175,5 +188,6 @@ it is not sourced from your own config or another autoload path. inshellah's
 ship the same external completer with live providers enabled for commands
 present in the system profile. the module also exports
 `INSHELLAH_DYNAMIC_TIMEOUT_MS`, `INSHELLAH_DYNAMIC_LIMIT`,
-`INSHELLAH_TIMEOUT_MS`, and `INSHELLAH_MAX_COMPLETIONS` from the matching
+`INSHELLAH_TIMEOUT_MS`, `INSHELLAH_MAX_COMPLETIONS`, `INSHELLAH_FLAG_TRIGGERS`,
+`INSHELLAH_FLAG_ON_EMPTY` and `INSHELLAH_CACHE_TTL_SECS` from the matching
 module options. see [nixos.md](nixos.md).

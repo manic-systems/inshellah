@@ -26,7 +26,7 @@ use pound::Parse;
   INSHELLAH_CACHE_TTL_SECS  rescrape user-cached sets older than this, 604800 by default, 0 for \
                   never
 
-Read by `index`:
+Read by `index` and `merge`:
   INSHELLAH_MAX_INDEX_NODES cap on subcommand nodes per root command, 10000 by default"
 )]
 enum Cli {
