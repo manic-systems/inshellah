@@ -333,6 +333,10 @@ fn resolve_node<'ctx>(ctx: &Resolve<'ctx>) -> (CommandPath<'ctx>, Option<Node>) 
                 .is_none_or(|node| node.depth < cmd_path.path.len()))
         && !recent_miss(ctx.user_dir, &cmd_path.path.join(" "), exe.as_ref())
     {
+        let ancestor = found
+            .as_ref()
+            .filter(|node| node.depth < cmd_path.path.len())
+            .map(|node| &node.result);
         let Some(result) = resolve_command_path_and_cache(
             ctx.user_dir,
             ctx.mandirs,
@@ -340,6 +344,7 @@ fn resolve_node<'ctx>(ctx: &Resolve<'ctx>) -> (CommandPath<'ctx>, Option<Node>) 
             &cmd_path.path[1..],
             bin,
             ctx.timeout_ms,
+            ancestor,
         )
         .result
         else {

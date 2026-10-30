@@ -489,6 +489,7 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
         timed_out:    Cell::new(false),
         echoed:       Cell::new(false),
         unspawned:    Cell::new(None),
+        ancestor:     None,
     };
 
     // classify only at top level
@@ -1525,6 +1526,7 @@ struct RealProbe<'probe> {
     timed_out:    Cell<bool>,
     echoed:       Cell<bool>,
     unspawned:    Cell<Option<io::Error>>,
+    ancestor:     Option<&'probe ManpageResult>,
 }
 
 impl RealProbe<'_> {
@@ -1592,6 +1594,17 @@ impl Probe for RealProbe<'_> {
             .is_some_and(|text| supplement_result_from_help_text(result, &text, sub_args))
     }
 
+    fn echoes_parent(&self, result: &ManpageResult) -> bool {
+        self.ancestor.is_some_and(|parent| {
+            !result.subcommands.is_empty()
+                && result.subcommands.len() == parent.subcommands.len()
+                && result
+                    .subcommands
+                    .iter()
+                    .all(|sc| parent.subcommands.iter().any(|other| other.name == sc.name))
+        })
+    }
+
     fn group_children(
         &self,
         hyphenated: &str,
@@ -1633,6 +1646,7 @@ pub fn resolve_command_path_and_cache(
     sub_args: &[String],
     path: &Path,
     timeout_ms: u64,
+    ancestor: Option<&ManpageResult>,
 ) -> Resolved {
     let deadline =
         Instant::now() + Duration::from_millis(timeout_ms.saturating_mul(RESOLVE_BUDGET_MULTIPLE));
@@ -1647,6 +1661,7 @@ pub fn resolve_command_path_and_cache(
         timed_out: Cell::new(false),
         echoed: Cell::new(false),
         unspawned: Cell::new(None),
+        ancestor,
     };
     let full = resolver::full_cmd(base_cmd, sub_args);
     let with_exe = |written: io::Result<()>| -> io::Result<()> {

@@ -38,6 +38,10 @@ pub trait Probe {
     /// positionals) into a manpage result. `true` if anything was added.
     fn supplement_from_help(&self, result: &mut ManpageResult, sub_args: &[String]) -> bool;
 
+    /// `--help` that lists the same subcommands as the nearest cached
+    /// ancestor, which means the binary ignored the unknown verb.
+    fn echoes_parent(&self, result: &ManpageResult) -> bool;
+
     /// recover children for a group command whose manpage enumerated none
     /// (sibling `cmd-sub.N` pages and/or `--help`). `None` leaves the list.
     fn group_children(
@@ -157,7 +161,10 @@ pub fn resolve_node(
         return Outcome::Empty;
     };
     let result = parse_help(&text);
-    if !result.has_structured_content() || self_listed(&result, sub_args) {
+    if !result.has_structured_content()
+        || self_listed(&result, sub_args)
+        || probe.echoes_parent(&result)
+    {
         return Outcome::Empty;
     }
     let children = child_tokens(&result.subcommands);
@@ -263,6 +270,9 @@ mod tests {
             result.entries.extend(help.entries.iter().cloned());
             result.subcommands.extend(help.subcommands.iter().cloned());
             true
+        }
+        fn echoes_parent(&self, _result: &ManpageResult) -> bool {
+            false
         }
         fn group_children(&self, _h: &str, _s: &[String]) -> Option<Vec<ManpageSubcommand>> {
             None
