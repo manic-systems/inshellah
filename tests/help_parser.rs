@@ -40,6 +40,85 @@ fn param_name<'result>(result: &'result ManpageResult, long: &str) -> Option<&'r
         .map(|param| param.name.as_str())
 }
 
+const KUBECTL_LOGS: &str = "Options:
+    --all-containers=false:
+\tGet all containers' logs in the pod(s).
+
+    -c, --container='':
+\tPrint the logs of this container
+
+    -f, --follow=false:
+\tSpecify if the logs should be streamed.
+
+    --limit-bytes=0:
+\tMaximum bytes of logs to return. Defaults to no limit.
+
+    --since=0s:
+\tOnly return logs newer than a relative duration like 5s, 2m, or 3h.
+
+    --tail=-1:
+\tLines of recent log file to display.
+
+    -o, --output=json:
+\tOutput format.
+
+Usage:
+  kubectl logs [-f] [-p] (POD | TYPE/NAME) [-c CONTAINER] [options]
+";
+
+#[test]
+fn cobra_defaults_tell_switches_from_valued_flags() {
+    let result = parse(KUBECTL_LOGS);
+    for switch in ["all-containers", "follow"] {
+        assert!(entry(&result, switch).param.is_none(), "--{switch}");
+    }
+    for valued in ["container", "limit-bytes", "since", "tail", "output"] {
+        assert_eq!(param_name(&result, valued), Some("value"), "--{valued}");
+    }
+    assert_eq!(
+        entry(&result, "follow").desc,
+        "Specify if the logs should be streamed."
+    );
+}
+
+#[test]
+fn pflag_type_words_are_value_types() {
+    let result = parse(
+        "Options:
+  -e, --env stringArray                          Set environment variables in container
+      --env-host                                 Use all current host environment variables
+      --cpus float                               Number of CPUs
+  -m, --memory int                               Memory limit
+      --stop-timeout duration                    Timeout to stop a container
+",
+    );
+    for (long, name) in [
+        ("env", "stringArray"),
+        ("cpus", "float"),
+        ("memory", "int"),
+        ("stop-timeout", "duration"),
+    ] {
+        let param = entry(&result, long).param.as_ref().expect(long);
+        assert_eq!(param.name, name);
+        assert!(param.is_exact(), "--{long}");
+    }
+    assert!(entry(&result, "env-host").param.is_none());
+}
+
+#[test]
+fn flag_line_ending_in_a_colon_is_not_a_section_header() {
+    let result = parse(
+        "Options:
+  -t, --tty                              Allocate a pseudo-TTY
+  -u, --user string                      Username or UID (format:
+                                         <name|uid>[:<group|gid>])
+      --userns string                    User namespace to use
+",
+    );
+    assert_eq!(param_name(&result, "user"), Some("string"));
+    assert_eq!(result.entries.len(), 3);
+}
+
 #[test]
 fn git_negatable_long_with_an_option_value_is_kept() {
     let result = parse(

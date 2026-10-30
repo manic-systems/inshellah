@@ -233,6 +233,45 @@ make_parser!(brace_choice_param<'src> -> Param<'src>,
 make_parser!(spaced_angle_param_after_space<'src> -> Param<'src>,
     preceded(space1, delimited(char('<'), take_till1(|ch| ch == '>'), char('>'))) => Param::Mandatory);
 
+// value type names pflag prints after a flag. `count` is left out since a
+// counter flag takes no value.
+const PFLAG_TYPES: &[&str] = &[
+    "string",
+    "stringArray",
+    "stringSlice",
+    "stringToString",
+    "stringToInt",
+    "stringToInt64",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "intSlice",
+    "int32Slice",
+    "int64Slice",
+    "uintSlice",
+    "float",
+    "float32",
+    "float64",
+    "float32Slice",
+    "float64Slice",
+    "duration",
+    "durationSlice",
+    "ip",
+    "ipSlice",
+    "ipMask",
+    "ipNet",
+    "bytesHex",
+    "bytesBase64",
+    "boolSlice",
+];
+
 // full lowercase token then verify <=10 chars. a 10-char-capped
 // take_while_m_n leaves a partial match: "--foo nanoseconds" yields
 // "nanosecond" and "s" as desc. a word >10 chars is almost certainly desc.
@@ -242,7 +281,8 @@ fn spaced_type_param(input: &str) -> IResult<&str, Param<'_>> {
     let (rem, word) = preceded(
         char(' '),
         verify(take_while1(|ch: char| !ch.is_whitespace()), |word: &str| {
-            word.len() <= 10 && word.chars().all(|ch| ch.is_ascii_lowercase())
+            PFLAG_TYPES.contains(&word)
+                || (word.len() <= 10 && word.chars().all(|ch| ch.is_ascii_lowercase()))
         }),
     )
     .parse(input)?;
@@ -251,11 +291,53 @@ fn spaced_type_param(input: &str) -> IResult<&str, Param<'_>> {
         .and_then(|tail| tail.chars().next())
         .is_some_and(|ch| !ch.is_whitespace());
     let letter_name = word.len() == 1 && word != "a";
-    if prose_follows && !letter_name {
+    if prose_follows && !PFLAG_TYPES.contains(&word) && !letter_name {
         Ok((rem, Param::Guessed(word)))
     } else {
         Ok((rem, Param::Mandatory(word)))
     }
+}
+
+enum Default<'src> {
+    Switch,
+    Value(Param<'src>),
+}
+
+// cobra prints `--flag=<default>:` and pflag manpages `--flag=<default>`. a
+// boolean default is a switch, any other default means the flag takes a value.
+// `None` is not a default form, and an all-caps word names the value.
+fn default_value(line: &str) -> Option<Default<'_>> {
+    let body = line.strip_prefix('=')?.trim_end();
+    let default = body.strip_suffix(':').unwrap_or(body);
+    let first = default.chars().next()?;
+    let quoted = default.len() >= 2 && matches!(first, '\'' | '"') && default.ends_with(first);
+    let bracketed = first == '[' && default.ends_with(']');
+    let numeric = (first.is_ascii_digit() || first == '-')
+        && default
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'));
+    let word = first.is_alphabetic() && default.chars().all(is_option_char);
+    match default {
+        "false" | "true" => Some(Default::Switch),
+        _ if word && !default.chars().any(|ch| ch.is_ascii_lowercase()) => {
+            Some(Default::Value(Param::Mandatory(default)))
+        },
+        _ if quoted || bracketed || numeric || word => Some(Default::Value(Param::Placeholder)),
+        _ => None,
+    }
+}
+
+fn default_value_param(input: &str) -> IResult<&str, Option<Param<'_>>> {
+    let line_end = input.find(['\n', '\r']).unwrap_or(input.len());
+    let (line, rem) = input.split_at(line_end);
+    default_value(line)
+        .map(|default| {
+            match default {
+                Default::Switch => (rem, None),
+                Default::Value(param) => (rem, Some(param)),
+            }
+        })
+        .ok_or_else(|| NomErr::Error(NomError::new(input, ErrorKind::Verify)))
 }
 
 make_parser!(param_parser_borrowed<'src> -> Param<'src>, alt((
@@ -285,6 +367,9 @@ make_parser!(pub param_parser -> OwnedParam, param_parser_borrowed => OwnedParam
 ///
 /// never errors, the `IResult` shape composes with the nom parsers.
 pub fn flag_param(input: &str) -> IResult<&str, Option<OwnedParam>> {
+    if let Ok((rem, param)) = default_value_param(input) {
+        return Ok((rem, param.map(OwnedParam::from)));
+    }
     opt(param_parser).parse(input)
 }
 
