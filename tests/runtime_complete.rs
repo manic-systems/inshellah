@@ -2067,3 +2067,57 @@ key size
         assert!(read_exe(&setup.sys_dir, "stamped").is_some());
     }
 }
+
+#[test]
+fn complete_does_not_cache_a_subcommand_whose_help_echoes_the_parent() {
+    let root = temp_dir::TempDir::new("inshellah-echo-help");
+    let bin_dir = root.path().join("bin");
+    let cache_dir = root.path().join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+    write_executable(
+        &bin_dir,
+        "echoctl",
+        r#"#!/bin/sh
+echo "Usage: echoctl $* COMMAND"
+echo ""
+echo "Commands:"
+echo "  show-user    Show a user"
+echo "  kill         Kill a unit"
+"#,
+    );
+    let parent = ManpageResult {
+        subcommands: vec![
+            ManpageSubcommand::new("show-user".to_owned(), "Show a user".to_owned()),
+            ManpageSubcommand::new("kill".to_owned(), "Kill a unit".to_owned()),
+        ],
+        ..ManpageResult::default()
+    };
+    write_result(&cache_dir, "echoctl", "help", &parent).expect("parent cache");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("complete")
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("echoctl")
+        .arg("user-status")
+        .arg("")
+        .env("PATH", path_with_bin(&bin_dir))
+        .output()
+        .expect("run inshellah complete");
+
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !cache_dir
+            .join(format!(
+                "{}.json",
+                filename_of_command("echoctl user-status")
+            ))
+            .exists(),
+        "an echoed parent help was stored under the subcommand"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "null");
+}

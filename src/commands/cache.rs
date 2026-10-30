@@ -54,8 +54,15 @@ pub fn refresh(
         })?;
         purge_command(user_dir, cmd)?;
         let all_mandirs = mandirs_with_bin_prefix(mandirs, Some(&bin));
-        let Resolved { result, saved } =
-            resolve_command_path_and_cache(user_dir, &all_mandirs, cmd, &[], &bin, timeout_ms);
+        let Resolved { result, saved } = resolve_command_path_and_cache(
+            user_dir,
+            &all_mandirs,
+            cmd,
+            &[],
+            &bin,
+            timeout_ms,
+            None,
+        );
         saved.map_err(|err| io::Error::new(err.kind(), format!("{cmd}: cache write: {err}")))?;
         if result.is_none() {
             return Err(io::Error::other(format!(
