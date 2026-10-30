@@ -30,7 +30,7 @@
 
 let
   cfg = config.programs.inshellah;
-  completerSnippet = ./inshellah-completer.nu;
+  completerSnippet = ../shells/inshellah.nu;
   defaultPackage = pkgs.callPackage ./package.nix { };
   wrapperFor =
     buildPkgs: package:
