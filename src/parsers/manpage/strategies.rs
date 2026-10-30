@@ -1,10 +1,7 @@
 //! one strategy per groff formatting pattern, since authors use different macro
 //! combinations for the same purpose.
 
-use nom::{
-    Parser as _,
-    combinator::opt,
-};
+use nom::Parser as _;
 
 use crate::{
     make_macro_walker,
@@ -12,7 +9,7 @@ use crate::{
         help::{
             help_parser,
             options::{
-                param_parser,
+                flag_param,
                 switch_parser,
             },
         },
@@ -59,7 +56,7 @@ fn collect_description_lines(lines: &[GroffLine], start: usize) -> (String, usiz
 pub fn parse_tag_to_entry(tag: &str, desc: String) -> Option<ManpageEntry> {
     let rendered = strip_groff_escapes(tag);
     let result: nom::IResult<&str, (OwnedSwitch, Option<OwnedParam>)> =
-        (switch_parser, opt(param_parser)).parse(rendered.trim());
+        (switch_parser, flag_param).parse(rendered.trim());
     match result {
         Ok((_, (switch, param))) => {
             Some(ManpageEntry {
@@ -399,11 +396,43 @@ fn collect_pp_rs_desc(lines: &[GroffLine], start: usize) -> (String, usize) {
     (acc.join(" "), i)
 }
 
+/// a flag opening a sentence, as in `--all with any of the other options is not
+/// recommended`. real option rows put two spaces or a line break before their
+/// description, or start after a finished line.
+fn is_prose_line(text: &str, previous: &str) -> bool {
+    let prev = previous.trim();
+    if prev.is_empty() || prev.starts_with('-') || prev.ends_with(['.', ':', ';']) {
+        return false;
+    }
+    let line = text.trim_start();
+    if !line.starts_with('-') {
+        return false;
+    }
+    let Ok((rest, _)) = (switch_parser, flag_param).parse(line) else {
+        return false;
+    };
+    rest.strip_prefix(' ').is_some_and(|tail| {
+        tail.starts_with(|ch: char| ch.is_ascii_lowercase()) && tail.split_whitespace().count() >= 3
+    })
+}
+
 /// deroff fallback. strip all groff markup, feed plain text to the help parser.
 pub fn strategy_deroff(lines: &[GroffLine]) -> Vec<ManpageEntry> {
     let mut buffer = String::with_capacity(256);
     for line in lines {
         match line {
+            GroffLine::Text(text)
+                if is_prose_line(
+                    &strip_groff_escapes(text),
+                    buffer
+                        .trim_end_matches('\n')
+                        .rsplit('\n')
+                        .next()
+                        .unwrap_or_default(),
+                ) =>
+            {
+                buffer.push('\n');
+            },
             GroffLine::Text(text) => {
                 buffer.push_str(text);
                 buffer.push('\n');

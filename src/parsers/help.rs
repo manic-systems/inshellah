@@ -14,7 +14,6 @@ use nom::{
     IResult,
     Parser as _,
     character::complete::space0,
-    combinator::opt,
 };
 
 use crate::{
@@ -24,7 +23,7 @@ use crate::{
             description::description,
             helpers::get_indent,
             options::{
-                param_parser,
+                flag_param,
                 switch_parser,
             },
             positionals::{
@@ -52,7 +51,7 @@ type EntryParts<'src> = (
 make_parser!(entry<'src> -> ManpageEntry,
     (
         space0,
-        (switch_parser, opt(param_parser)),
+        (switch_parser, flag_param),
         description,
     )
     => |(_, (switch, param), (first, cont))
@@ -105,7 +104,7 @@ fn classify_section_line(line: &str) -> Option<HelpSection> {
         return None;
     }
     let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.starts_with('-') {
         return None;
     }
     let without_colon = trimmed.trim_end_matches(':').trim();
@@ -132,7 +131,7 @@ fn classify_section_line(line: &str) -> Option<HelpSection> {
     if command_header && !lower.contains("option") && !lower.contains("flag") {
         return Some(HelpSection::Commands);
     }
-    if lower.contains("argument")
+    if (lower.contains("argument") && !lower.contains("option"))
         || lower == "args"
         || lower == "positionals"
         || lower == "positional arguments"

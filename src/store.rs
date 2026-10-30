@@ -582,11 +582,9 @@ fn param_from_json(value: &Value) -> Option<OwnedParam> {
         .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(choice_from_json).collect())
         .unwrap_or_default();
-    Some(OwnedParam {
-        kind,
-        name,
-        choices,
-    })
+    let mut param = OwnedParam::new(kind, name);
+    param.choices = choices;
+    Some(param)
 }
 
 fn choice_from_json(value: &Value) -> Option<ParamChoice> {

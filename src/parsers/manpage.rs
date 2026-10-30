@@ -52,11 +52,24 @@ pub struct ParamChoice {
     pub desc:  String,
 }
 
+/// how far a param can be trusted, a better source may replace the weaker ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamOrigin {
+    Exact,
+    /// the flag takes a value but its name is unknown.
+    Placeholder,
+    /// a word read as a type that may be sentence text, so the flag may not
+    /// take a value at all.
+    ProseGuess,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedParam {
     pub kind:    ParamKind,
     pub name:    String,
     pub choices: Vec<ParamChoice>,
+    /// never stored.
+    pub origin:  ParamOrigin,
 }
 
 impl OwnedParam {
@@ -65,7 +78,18 @@ impl OwnedParam {
             kind,
             name,
             choices: Vec::new(),
+            origin: ParamOrigin::Exact,
         }
+    }
+
+    #[must_use]
+    pub const fn with_origin(mut self, origin: ParamOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    pub fn is_exact(&self) -> bool {
+        self.origin == ParamOrigin::Exact
     }
 }
 
