@@ -96,6 +96,7 @@ pub struct Trace {
     pub spans:    Vec<String>,
     pub bin:      Option<PathBuf>,
     pub dropped:  Vec<Stale>,
+    pub dirs:     Vec<PathBuf>,
     pub path:     Vec<String>,
     pub node:     Option<String>,
     pub slot:     Option<String>,
@@ -103,10 +104,16 @@ pub struct Trace {
     pub protocol: Option<Protocol>,
 }
 
-/// a cache dir whose entries came from another binary.
+pub enum StaleReason {
+    BinaryChanged,
+    OtherBuild,
+}
+
+/// a cache dir whose entries came from another binary or inshellah build.
 pub struct Stale {
     pub dir:    PathBuf,
     pub stored: ExeIdentity,
+    pub reason: StaleReason,
 }
 
 /// the deepest cached command for the typed path.
@@ -177,6 +184,7 @@ pub fn decide(
         .clone()
         .or_else(|| find_in_path(&cmd_name));
     let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, &mut trace);
+    trace.dirs.clone_from(&dirs);
 
     if let Some(candidates) =
         dynamic_value_completions(&cmd_name, &rest, explicit_cmd_path.as_deref(), timeout_ms)
@@ -362,7 +370,9 @@ fn resolve_node<'ctx>(ctx: &Resolve<'ctx>) -> (CommandPath<'ctx>, Option<Node>) 
     (cmd_path, found)
 }
 
-/// dirs matching the traced binary, purging stale user-cache entries.
+/// dirs matching the traced binary, purging stale user-cache entries. system
+/// dirs are rebuilt by nix, so only the user cache cares which inshellah wrote
+/// an entry.
 fn dirs_for_binary(
     dirs: Vec<PathBuf>,
     user_dir: &Path,
@@ -374,14 +384,27 @@ fn dirs_for_binary(
     };
     dirs.into_iter()
         .filter(|dir| {
-            let Some(stored) = read_exe(dir, cmd_name).filter(|stored| *stored != identity) else {
+            let writable = dir == user_dir;
+            let why_stale = |stored: &ExeIdentity| {
+                if !stored.same_binary(&identity) {
+                    Some(StaleReason::BinaryChanged)
+                } else if writable && *stored != identity {
+                    Some(StaleReason::OtherBuild)
+                } else {
+                    None
+                }
+            };
+            let Some((stored, reason)) = read_exe(dir, cmd_name)
+                .and_then(|stored| why_stale(&stored).map(|why| (stored, why)))
+            else {
                 return true;
             };
             trace.dropped.push(Stale {
                 dir: dir.clone(),
                 stored,
+                reason,
             });
-            dir == user_dir && purge_command(dir, cmd_name).is_ok()
+            writable && purge_command(dir, cmd_name).is_ok()
         })
         .collect()
 }

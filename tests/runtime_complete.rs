@@ -29,11 +29,16 @@ use inshellah::{
         ParamKind,
     },
     store::{
+        ExeIdentity,
         filename_of_command,
+        read_exe,
+        write_exe,
         write_native,
         write_result,
     },
 };
+
+#[path = "common/temp_dir.rs"] mod temp_dir;
 
 fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -1839,4 +1844,226 @@ fn complete_max_completions_caps_results() {
     );
 
     fs::remove_dir_all(cache_dir.parent().unwrap()).expect("remove temp dir");
+}
+
+mod build_stamp {
+    use super::*;
+    use crate::temp_dir::TempDir;
+
+    const HELP_COMMAND: &str = "fresh";
+    const CACHED_COMMAND: &str = "cachedonly";
+
+    struct Setup {
+        _root:    TempDir,
+        bin:      PathBuf,
+        user_dir: PathBuf,
+        sys_dir:  PathBuf,
+    }
+
+    fn setup() -> Setup {
+        let root = TempDir::new("inshellah-build-stamp");
+        let bin_dir = root.path().join("bin");
+        let user_dir = root.path().join("user");
+        let sys_dir = root.path().join("system");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        fs::create_dir_all(&user_dir).expect("user dir");
+        fs::create_dir_all(&sys_dir).expect("system dir");
+        write_executable(
+            &bin_dir,
+            "stamped",
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf 'Usage: stamped \
+                 COMMAND\\n\\nCommands:\\n  {HELP_COMMAND}    scraped\\n'; exit 0; fi\nexit 2\n"
+            ),
+        );
+        Setup {
+            _root: root,
+            bin: bin_dir.join("stamped"),
+            user_dir,
+            sys_dir,
+        }
+    }
+
+    fn seed_cache(dir: &Path) {
+        let cached = ManpageResult {
+            entries:            Vec::new(),
+            subcommands:        vec![ManpageSubcommand::new(
+                CACHED_COMMAND.to_owned(),
+                "from the seeded cache".to_owned(),
+            )],
+            positional_choices: Vec::new(),
+            positionals:        Vec::new(),
+            description:        String::new(),
+        };
+        write_result(dir, "stamped", "help", &cached).expect("seed cache");
+    }
+
+    fn seed(dir: &Path, bin: &Path, build: Option<&str>) {
+        seed_cache(dir);
+        let current = ExeIdentity::of(bin).expect("identity").to_string();
+        let (unstamped, _) = current.rsplit_once('\t').expect("build field");
+        let stamp = build.map_or_else(
+            || unstamped.to_owned(),
+            |written_by| format!("{unstamped}\t{written_by}"),
+        );
+        let stored: ExeIdentity = stamp.parse().expect("stamp parses");
+        write_exe(dir, "stamped", &stored).expect("seed exe");
+    }
+
+    fn complete(setup: &Setup) -> String {
+        let dirs = format!("{}:{}", setup.user_dir.display(), setup.sys_dir.display());
+        let bin_dir = setup.bin.parent().expect("bin dir");
+        let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+            .args([
+                "complete",
+                "--dir",
+                &dirs,
+                "--timeout-ms",
+                "2000",
+                "stamped",
+                "",
+            ])
+            .env("PATH", path_with_bin(bin_dir))
+            .output()
+            .expect("run inshellah complete");
+        assert!(
+            output.status.success(),
+            "stderr = {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("stdout")
+    }
+
+    fn offers(stdout: &str, command: &str) -> bool {
+        stdout.contains(&format!(r#""value":"{command}""#))
+    }
+
+    #[test]
+    fn user_entry_from_another_build_is_rescraped() {
+        for build in [Some("other"), None] {
+            let setup = setup();
+            seed(&setup.user_dir, &setup.bin, build);
+            let seeded = read_exe(&setup.user_dir, "stamped").expect("seeded exe");
+            let stdout = complete(&setup);
+            assert!(offers(&stdout, HELP_COMMAND), "{build:?}: {stdout}");
+            assert!(!offers(&stdout, CACHED_COMMAND), "{build:?}: {stdout}");
+            let stored = read_exe(&setup.user_dir, "stamped").expect("rewritten exe");
+            assert_ne!(stored, seeded, "{build:?}");
+        }
+    }
+
+    #[test]
+    fn user_entry_from_this_build_is_served() {
+        let setup = setup();
+        complete(&setup);
+        seed_cache(&setup.user_dir);
+        let stdout = complete(&setup);
+        assert!(offers(&stdout, CACHED_COMMAND), "{stdout}");
+        assert!(!offers(&stdout, HELP_COMMAND), "{stdout}");
+    }
+
+    #[test]
+    fn explain_names_why_a_user_entry_is_stale_and_keeps_the_cache_line() {
+        let setup = setup();
+        seed(&setup.user_dir, &setup.bin, Some("other"));
+        let dirs = format!("{}:{}", setup.user_dir.display(), setup.sys_dir.display());
+        let bin_dir = setup.bin.parent().expect("bin dir");
+        let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+            .args([
+                "explain",
+                "--dir",
+                &dirs,
+                "--timeout-ms",
+                "2000",
+                "stamped",
+                "",
+            ])
+            .env("PATH", path_with_bin(bin_dir))
+            .output()
+            .expect("run inshellah explain");
+        let stdout = String::from_utf8(output.stdout).expect("stdout");
+        let user = setup.user_dir.display();
+        assert!(
+            stdout.contains(&format!(
+                "stale     {user} dropped, written by another inshellah build"
+            )),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("cache     stamped from {user}")),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn sibling_manpages_indexed_by_a_scrape_are_stamped_with_their_binary() {
+        let root = TempDir::new("inshellah-sibling-stamp");
+        let bin_dir = root.path().join("bin");
+        let man_dir = root.path().join("share/man/man1");
+        let cache_dir = root.path().join("cache");
+        fs::create_dir_all(&man_dir).expect("man dir");
+        fs::create_dir_all(&cache_dir).expect("cache dir");
+        write_stub_executable(&bin_dir, "sib");
+        write_stub_executable(&bin_dir, "sib-keygen");
+        fs::write(
+            man_dir.join("sib.1"),
+            r".TH SIB 1
+.SH NAME
+sib \- demo command
+.SH SYNOPSIS
+\fBsib\fR [\fB\-\-verbose\fR] \fICOMMAND\fR [\fIARGS\fR]
+.SH OPTIONS
+.TP
+.B \-\-verbose
+verbose
+",
+        )
+        .expect("write sib manpage");
+        fs::write(
+            man_dir.join("sib-keygen.1"),
+            r".TH SIB-KEYGEN 1
+.SH NAME
+sib-keygen \- key tool
+.SH OPTIONS
+.TP
+.B \-\-bits
+key size
+",
+        )
+        .expect("write sib-keygen manpage");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+            .args(["complete", "--dir"])
+            .arg(&cache_dir)
+            .args(["--timeout-ms", "1000", "sib", ""])
+            .env("PATH", path_with_bin(&bin_dir))
+            .output()
+            .expect("run inshellah complete");
+
+        assert!(
+            output.status.success(),
+            "stderr = {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            cache_dir
+                .join(format!("{}.json", filename_of_command("sib-keygen")))
+                .is_file(),
+            "the sibling page was not indexed"
+        );
+        assert!(
+            read_exe(&cache_dir, "sib-keygen").is_some(),
+            "the sibling entry has no binary stamp"
+        );
+    }
+
+    #[test]
+    fn system_entry_from_another_build_is_served() {
+        let setup = setup();
+        seed(&setup.sys_dir, &setup.bin, Some("other"));
+        let stdout = complete(&setup);
+        assert!(offers(&stdout, CACHED_COMMAND), "{stdout}");
+        assert!(!offers(&stdout, HELP_COMMAND), "{stdout}");
+        assert!(read_exe(&setup.sys_dir, "stamped").is_some());
+    }
 }
