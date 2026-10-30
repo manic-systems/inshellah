@@ -53,6 +53,7 @@ use crate::{
             ManpageResult,
             ManpageSubcommand,
             OwnedSwitch,
+            ParamOrigin,
             parse_manpage_string,
             parse_manpage_with_subs,
             read_manpage_file,
@@ -1044,25 +1045,57 @@ fn switches_overlap(left: &OwnedSwitch, right: &OwnedSwitch) -> bool {
     }
 }
 
+// two Both entries sharing a short char can be different flags, mkfs.bfs
+// `-V, --version` against `-v, --vname`.
+fn same_flag(existing: &OwnedSwitch, incoming: &OwnedSwitch) -> bool {
+    match (existing, incoming) {
+        (OwnedSwitch::Both(_, left), OwnedSwitch::Both(_, right)) => {
+            left.eq_ignore_ascii_case(right)
+        },
+        _ => switches_overlap(existing, incoming),
+    }
+}
+
+// help that still talks about the guessed word is describing a value by that
+// name.
+fn mentions_word(text: &str, word: &str) -> bool {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .any(|token| token.eq_ignore_ascii_case(word))
+}
+
 fn merge_entry_details(existing: &mut ManpageEntry, incoming: &ManpageEntry) -> bool {
     let mut changed = existing.desc.is_empty() && !incoming.desc.is_empty();
     if changed {
         existing.desc.clone_from(&incoming.desc);
     }
-    if let Some(incoming_param) = &incoming.param
-        && !incoming_param.choices.is_empty()
-    {
-        match &mut existing.param {
-            Some(param) if param.choices.is_empty() => {
-                param.choices.clone_from(&incoming_param.choices);
-                changed = true;
-            },
-            Some(_) => {},
-            None => {
-                existing.param = Some(incoming_param.clone());
-                changed = true;
-            },
+    if !same_flag(&existing.switch, &incoming.switch) {
+        return changed;
+    }
+    let Some(incoming_param) = incoming.param.as_ref() else {
+        if existing.param.as_ref().is_some_and(|param| {
+            param.origin == ParamOrigin::ProseGuess && !mentions_word(&incoming.desc, &param.name)
+        }) {
+            existing.param = None;
+            changed = true;
         }
+        return changed;
+    };
+    match &mut existing.param {
+        Some(param)
+            if !param.is_exact() && incoming_param.is_exact() && param.choices.is_empty() =>
+        {
+            *param = incoming_param.clone();
+            changed = true;
+        },
+        Some(param) if param.choices.is_empty() && !incoming_param.choices.is_empty() => {
+            param.choices.clone_from(&incoming_param.choices);
+            changed = true;
+        },
+        None if incoming_param.is_exact() => {
+            existing.param = Some(incoming_param.clone());
+            changed = true;
+        },
+        Some(_) | None => {},
     }
     changed
 }
@@ -1525,6 +1558,11 @@ fn resolve_subtree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parsers::manpage::{
+        OwnedParam,
+        ParamKind,
+        ParamOrigin,
+    };
 
     #[test]
     fn manpage_names_must_match_installed_binary_or_subcommand_parent() {
@@ -1541,5 +1579,108 @@ mod tests {
             "git-add",
             &binary_names
         ));
+    }
+
+    fn flag_entry(short: char, long: &str, param: Option<OwnedParam>) -> ManpageEntry {
+        ManpageEntry {
+            switch: OwnedSwitch::Both(short, long.to_owned()),
+            param,
+            desc: String::new(),
+        }
+    }
+
+    fn mandatory(name: &str) -> OwnedParam {
+        OwnedParam::new(ParamKind::Mandatory, name.to_owned())
+    }
+
+    fn placeholder(name: &str) -> OwnedParam {
+        mandatory(name).with_origin(ParamOrigin::Placeholder)
+    }
+
+    fn param_name(entry: &ManpageEntry) -> Option<&str> {
+        entry.param.as_ref().map(|param| param.name.as_str())
+    }
+
+    #[test]
+    fn help_param_fills_a_manpage_entry_that_lost_its_value() {
+        let mut manpage = flag_entry('t', "type", None);
+        let help = flag_entry('t', "type", Some(mandatory("TYPE")));
+        assert!(merge_entry_details(&mut manpage, &help));
+        assert_eq!(param_name(&manpage), Some("TYPE"));
+
+        let mut kept = flag_entry('t', "type", Some(mandatory("KIND")));
+        assert!(!merge_entry_details(
+            &mut kept,
+            &flag_entry('t', "type", None)
+        ));
+        assert_eq!(param_name(&kept), Some("KIND"));
+    }
+
+    #[test]
+    fn a_guessed_help_param_is_not_adopted() {
+        let mut prose = flag_entry('t', "type", None);
+        let help = flag_entry(
+            't',
+            "type",
+            Some(mandatory("ignore").with_origin(ParamOrigin::ProseGuess)),
+        );
+        assert!(!merge_entry_details(&mut prose, &help));
+        assert!(prose.param.is_none());
+    }
+
+    #[test]
+    fn help_without_a_value_drops_a_prose_guess_but_not_a_placeholder() {
+        let mut prose = flag_entry(
+            'a',
+            "all",
+            Some(mandatory("with").with_origin(ParamOrigin::ProseGuess)),
+        );
+        let help = flag_entry('a', "all", None);
+        assert!(merge_entry_details(&mut prose, &help));
+        assert!(prose.param.is_none());
+
+        let mut named = flag_entry(
+            'A',
+            "append",
+            Some(mandatory("chain").with_origin(ParamOrigin::ProseGuess)),
+        );
+        let mut chain_help = flag_entry('A', "append", None);
+        chain_help.desc = "Append to chain".to_owned();
+        merge_entry_details(&mut named, &chain_help);
+        assert_eq!(param_name(&named), Some("chain"));
+
+        let mut valued = flag_entry('r', "root", Some(placeholder("value")));
+        assert!(!merge_entry_details(
+            &mut valued,
+            &flag_entry('r', "root", None)
+        ));
+        assert_eq!(param_name(&valued), Some("value"));
+    }
+
+    #[test]
+    fn a_different_long_sharing_the_short_does_not_lend_its_param() {
+        let mut version = flag_entry('V', "version", None);
+        let vname = flag_entry('V', "vname", Some(mandatory("NAME")));
+        assert!(!merge_entry_details(&mut version, &vname));
+        assert!(version.param.is_none());
+
+        let mut upper = flag_entry('t', "TYPE", None);
+        assert!(merge_entry_details(
+            &mut upper,
+            &flag_entry('t', "type", Some(mandatory("KIND")))
+        ));
+    }
+
+    #[test]
+    fn help_param_replaces_a_placeholder_one() {
+        let mut manpage = flag_entry('r', "root", Some(placeholder("value")));
+        let help = flag_entry('r', "root", Some(mandatory("PATH")));
+        assert!(merge_entry_details(&mut manpage, &help));
+        assert_eq!(param_name(&manpage), Some("PATH"));
+
+        let mut still_guessed = flag_entry('r', "root", Some(placeholder("value")));
+        let guess = flag_entry('r', "root", Some(placeholder("dir")));
+        assert!(!merge_entry_details(&mut still_guessed, &guess));
+        assert_eq!(param_name(&still_guessed), Some("value"));
     }
 }
