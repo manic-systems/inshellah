@@ -120,6 +120,24 @@ fn flag_line_ending_in_a_colon_is_not_a_section_header() {
 }
 
 #[test]
+fn entry_descriptions_with_header_words_stay_entries() {
+    let result = parse(
+        "Commands:
+  query        print stored completion data
+  dump         list indexed commands
+  diff         report flag and subcommand gaps
+  purge        delete the cache
+",
+    );
+    let names: Vec<&str> = result
+        .subcommands
+        .iter()
+        .map(|sub| sub.name.as_str())
+        .collect();
+    assert_eq!(names, ["query", "dump", "diff", "purge"]);
+}
+
+#[test]
 fn git_negatable_long_with_an_option_value_is_kept() {
     let result = parse(
         "    -s, --[no-]strategy <strategy>
@@ -311,4 +329,24 @@ fn flag_opening_a_description_is_not_a_short_alias() {
         OwnedSwitch::Long("null".to_owned())
     );
     assert!(entry(&result, "null").param.is_none());
+}
+
+#[test]
+fn punctuation_short_flags_pair_with_their_long_names() {
+    let result = parse(
+        "Options:
+    -., --hidden
+        Search hidden files and directories.
+    -?, --help
+        Show help.
+",
+    );
+    assert_eq!(
+        entry(&result, "hidden").switch,
+        OwnedSwitch::Both('.', "hidden".to_owned())
+    );
+    assert_eq!(
+        entry(&result, "help").switch,
+        OwnedSwitch::Both('?', "help".to_owned())
+    );
 }
