@@ -113,6 +113,11 @@ fn classify_section_line(line: &str) -> Option<HelpSection> {
     if lower.starts_with("usage") {
         return Some(HelpSection::Unknown);
     }
+    // a column gap marks a `name   description` entry, whose description can
+    // hold header words like "commands" or "flag".
+    if trimmed.contains("  ") || trimmed.contains('\t') {
+        return None;
+    }
     if lower.starts_with("valid arguments")
         || lower.contains(" is one of the following")
         || lower.contains(" defaults to")

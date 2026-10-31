@@ -124,8 +124,9 @@ use nom::{
     },
 };
 
+// ripgrep spells its hidden-files flag `-.`, and some tools take `-?` for help.
 make_parser!(short_switch -> char,
-    preceded(char('-'), satisfy(char::is_alphanumeric)));
+    preceded(char('-'), satisfy(|ch: char| ch.is_alphanumeric() || matches!(ch, '.' | '?'))));
 
 // first char must be alphanumeric to reject `----------` separator lines in
 // `less --help` (and zstdless/bzless wrappers), else the dash run becomes a
