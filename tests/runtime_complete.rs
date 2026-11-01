@@ -8,13 +8,9 @@ use std::{
         Path,
         PathBuf,
     },
-    process::{
-        self,
-        Command,
-    },
+    process::Command,
     time::{
         Duration,
-        SystemTime,
         UNIX_EPOCH,
     },
 };
@@ -40,13 +36,7 @@ use inshellah::{
 
 #[path = "common/temp_dir.rs"] mod temp_dir;
 
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
-}
+use temp_dir::TempDir;
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
     write_executable(bin_dir, name, "#!/bin/sh\nexit 0\n");
@@ -101,7 +91,8 @@ fn completion_values(stdout: &[u8]) -> Vec<String> {
 
 #[test]
 fn complete_scrapes_missing_subcommand_when_parent_is_cached() {
-    let root = unique_temp_dir("inshellah-runtime-complete");
+    let tmp = TempDir::new("inshellah-runtime-complete");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -187,15 +178,14 @@ exit 2
             .is_file(),
         "subcommand cache was not written"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_descends_through_subcommand_alias() {
     // a typed alias (`cl` for clone) must resolve to the canonical child so its
     // --help is scraped and its flags complete, like typing the full name.
-    let root = unique_temp_dir("inshellah-alias-descent");
+    let tmp = TempDir::new("inshellah-alias-descent");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -268,13 +258,12 @@ exit 2
         .expect("run listing");
     let listing = String::from_utf8(listing_out.stdout).expect("stdout");
     assert!(listing.contains("(aka cl)"), "listing: {listing}");
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_does_not_cache_timed_out_partial_help() {
-    let root = unique_temp_dir("inshellah-partial-help-timeout");
+    let tmp = TempDir::new("inshellah-partial-help-timeout");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -324,13 +313,12 @@ exit 2
         !cache_dir.join("slowhelp.json").exists(),
         "partial timed-out help was cached"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_lookup_skips_global_flag_values_before_subcommands() {
-    let root = unique_temp_dir("inshellah-global-flag-value");
+    let tmp = TempDir::new("inshellah-global-flag-value");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     write_stub_executable(&bin_dir, "demo");
@@ -388,13 +376,12 @@ fn complete_lookup_skips_global_flag_values_before_subcommands() {
         !stdout.contains(r#""value":"--config""#),
         "resolved parent instead of child: {stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_dynamic_git_uses_explicit_executable_path() {
-    let root = unique_temp_dir("inshellah-explicit-git-dynamic");
+    let tmp = TempDir::new("inshellah-explicit-git-dynamic");
+    let root = tmp.path();
     let explicit_dir = root.join("explicit");
     let path_dir = root.join("path");
     let cache_dir = root.join("cache");
@@ -459,8 +446,6 @@ exit 2
         !stdout.contains("path-origin"),
         "dynamic provider invoked PATH git: {stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -469,7 +454,8 @@ exit 2
     reason = "`${NIX_GET_COMPLETIONS:-}` is shell parameter expansion in a fake nix script"
 )]
 fn complete_nix_value_position_includes_dynamic_candidates_when_static_matches() {
-    let root = unique_temp_dir("inshellah-nix-static-dynamic");
+    let tmp = TempDir::new("inshellah-nix-static-dynamic");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&cache_dir).expect("cache dir");
@@ -527,8 +513,6 @@ exit 0
         "stdout = {}",
         String::from_utf8_lossy(&output.stdout)
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -537,7 +521,8 @@ exit 0
     reason = "`${NIX_GET_COMPLETIONS:-}` is shell parameter expansion in a fake nix script"
 )]
 fn complete_long_flag_false_positive_falls_through_to_dynamic() {
-    let root = unique_temp_dir("inshellah-long-flag-dynamic");
+    let tmp = TempDir::new("inshellah-long-flag-dynamic");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&cache_dir).expect("cache dir");
@@ -585,13 +570,12 @@ exit 0
         "stdout = {stdout}"
     );
     assert!(!stdout.contains("no-write-lock-file"), "stdout = {stdout}");
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_does_not_scan_path_at_command_position() {
-    let root = unique_temp_dir("inshellah-command-position-complete");
+    let tmp = TempDir::new("inshellah-command-position-complete");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -619,13 +603,12 @@ fn complete_does_not_scan_path_at_command_position() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert_eq!(stdout.trim(), "null", "stdout = {stdout}");
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_ignores_cached_command_missing_from_path() {
-    let root = unique_temp_dir("inshellah-missing-path-command");
+    let tmp = TempDir::new("inshellah-missing-path-command");
+    let root = tmp.path();
     let cache_dir = root.join("cache");
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
@@ -656,13 +639,12 @@ fn complete_ignores_cached_command_missing_from_path() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert_eq!(stdout.trim(), "null", "stdout = {stdout}");
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_uses_boundary_aware_fuzzy_ranking() {
-    let root = unique_temp_dir("inshellah-fuzzy-complete");
+    let tmp = TempDir::new("inshellah-fuzzy-complete");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     write_stub_executable(&bin_dir, "demo");
@@ -702,13 +684,12 @@ fn complete_uses_boundary_aware_fuzzy_ranking() {
         load_pos < clone_pos,
         "expected boundary match to outrank substring match, stdout = {stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_returns_flags_only_after_hyphen() {
-    let root = unique_temp_dir("inshellah-flag-prefix-complete");
+    let tmp = TempDir::new("inshellah-flag-prefix-complete");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     write_stub_executable(&bin_dir, "demo");
@@ -763,8 +744,6 @@ fn complete_returns_flags_only_after_hyphen() {
         flag_stdout.contains(r#""value":"--verbose""#),
         "stdout = {flag_stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -776,7 +755,8 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
     // "p" (poweroff, preset, ...) — the user has already typed `status`.
     // it must return null so the downstream dynamic completer (unit names)
     // can take over.
-    let root = unique_temp_dir("inshellah-shallow-fallback");
+    let tmp = TempDir::new("inshellah-shallow-fallback");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     write_stub_executable(&bin_dir, "fakectl");
@@ -834,8 +814,6 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
         top_stdout.contains(r#""value":"poweroff""#) && top_stdout.contains(r#""value":"preset""#),
         "partial at the right depth should still match parent subs; stdout = {top_stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
@@ -844,7 +822,8 @@ fn complete_drops_exact_subcommand_match() {
     // returns null so a downstream dynamic completer (systemctl unit names,
     // git remote names, etc.) can take over instead of echoing the
     // already-typed word back.
-    let root = unique_temp_dir("inshellah-exact-subcommand-drop");
+    let tmp = TempDir::new("inshellah-exact-subcommand-drop");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     write_stub_executable(&bin_dir, "demo");
@@ -898,13 +877,12 @@ fn complete_drops_exact_subcommand_match() {
             && partial_stdout.contains(r#""value":"start""#),
         "partial should still match both; stdout = {partial_stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_resolves_absolute_path_after_elevation_wrapper() {
-    let root = unique_temp_dir("inshellah-absolute-elevation-complete");
+    let tmp = TempDir::new("inshellah-absolute-elevation-complete");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -949,8 +927,6 @@ exit 2
         stdout.contains(r#""value":"--verbose""#),
         "stdout = {stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 const FAKE_ADB: &str = r#"#!/bin/sh
@@ -1009,7 +985,8 @@ exit 2
 
 #[test]
 fn complete_adb_dynamic_values_use_live_devices_and_packages() {
-    let root = unique_temp_dir("inshellah-adb-dynamic-complete");
+    let tmp = TempDir::new("inshellah-adb-dynamic-complete");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -1101,14 +1078,13 @@ fn complete_adb_dynamic_values_use_live_devices_and_packages() {
         "null",
         "stdout = {shell_flag_stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 /// write a single-command cache directory exposing the given long flags,
 /// returning the cache dir. callers drive `inshellah complete demo ...`.
-fn flag_demo_cache(name: &str, flags: &[&str]) -> PathBuf {
-    let root = unique_temp_dir(name);
+fn flag_demo_cache(name: &str, flags: &[&str]) -> (TempDir, PathBuf) {
+    let tmp = TempDir::new(name);
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     write_stub_executable(&bin_dir, "demo");
@@ -1130,7 +1106,7 @@ fn flag_demo_cache(name: &str, flags: &[&str]) -> PathBuf {
         description:        String::new(),
     };
     write_result(&cache_dir, "demo", "help", &result).expect("cache");
-    cache_dir
+    (tmp, cache_dir)
 }
 
 fn flag_demo_path(cache_dir: &Path) -> String {
@@ -1139,7 +1115,8 @@ fn flag_demo_path(cache_dir: &Path) -> String {
 
 #[test]
 fn purge_clears_user_cache_but_not_system_dirs() {
-    let root = unique_temp_dir("inshellah-purge");
+    let tmp = TempDir::new("inshellah-purge");
+    let root = tmp.path();
     let user_dir = root.join("cache");
     let system_dir = root.join("system");
     fs::create_dir_all(&user_dir).expect("user dir");
@@ -1182,13 +1159,12 @@ fn purge_clears_user_cache_but_not_system_dirs() {
             .exists(),
         "system dir must not be purged"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_dir_overlay_uses_user_before_system() {
-    let root = unique_temp_dir("inshellah-dir-overlay");
+    let tmp = TempDir::new("inshellah-dir-overlay");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let user_dir = root.join("user");
     let system_dir = root.join("system");
@@ -1238,13 +1214,12 @@ fn complete_dir_overlay_uses_user_before_system() {
         !stdout.contains(r#""value":"--system""#),
         "stdout = {stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_empty_native_file_does_not_shadow_json() {
-    let root = unique_temp_dir("inshellah-empty-native");
+    let tmp = TempDir::new("inshellah-empty-native");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     write_stub_executable(&bin_dir, "demo");
@@ -1287,13 +1262,12 @@ fn complete_empty_native_file_does_not_shadow_json() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains(r#""value":"--json""#), "stdout = {stdout}");
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_discovers_underscored_subcommand_from_encoded_cache() {
-    let root = unique_temp_dir("inshellah-underscore-subcommand");
+    let tmp = TempDir::new("inshellah-underscore-subcommand");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     write_stub_executable(&bin_dir, "demo");
@@ -1331,13 +1305,12 @@ fn complete_discovers_underscored_subcommand_from_encoded_cache() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains(r#""value":"foo_bar""#), "stdout = {stdout}");
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn runtime_manpage_resolution_supplements_from_help() {
-    let root = unique_temp_dir("inshellah-manpage-help-runtime");
+    let tmp = TempDir::new("inshellah-manpage-help-runtime");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let man_dir = root.join("share/man/man1");
     let cache_dir = root.join("cache");
@@ -1439,13 +1412,12 @@ from man
             .any(|positional| positional["name"] == "input"),
         "cache = {cache}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn index_manpage_results_are_supplemented_from_help() {
-    let root = unique_temp_dir("inshellah-manpage-help-index");
+    let tmp = TempDir::new("inshellah-manpage-help-index");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let man_dir = root.join("share/man/man1");
     let cache_dir = root.join("cache");
@@ -1492,7 +1464,7 @@ man flag
 
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("index")
-        .arg(&root)
+        .arg(root)
         .arg("--dir")
         .arg(&cache_dir)
         .arg("--timeout-ms")
@@ -1536,13 +1508,11 @@ man flag
             .any(|sc| sc["name"] == "from_help"),
         "cache = {cache}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_flag_on_empty_env_surfaces_flags_after_space() {
-    let cache_dir = flag_demo_cache("inshellah-flag-on-empty", &["verbose"]);
+    let (_tmp, cache_dir) = flag_demo_cache("inshellah-flag-on-empty", &["verbose"]);
 
     // baseline: empty token without the env knob yields no flags.
     let baseline = Command::new(env!("CARGO_BIN_EXE_inshellah"))
@@ -1572,13 +1542,11 @@ fn complete_flag_on_empty_env_surfaces_flags_after_space() {
         stdout.contains(r#""value":"--verbose""#),
         "stdout = {stdout}"
     );
-
-    fs::remove_dir_all(cache_dir.parent().unwrap()).expect("remove temp dir");
 }
 
 #[test]
 fn complete_custom_trigger_char_surfaces_flags() {
-    let cache_dir = flag_demo_cache("inshellah-custom-trigger", &["verbose"]);
+    let (_tmp, cache_dir) = flag_demo_cache("inshellah-custom-trigger", &["verbose"]);
 
     // "+" is not a trigger by default — treated as an argument prefix.
     let baseline = Command::new(env!("CARGO_BIN_EXE_inshellah"))
@@ -1608,15 +1576,14 @@ fn complete_custom_trigger_char_surfaces_flags() {
         stdout.contains(r#""value":"--verbose""#),
         "stdout = {stdout}"
     );
-
-    fs::remove_dir_all(cache_dir.parent().unwrap()).expect("remove temp dir");
 }
 
 #[test]
 fn complete_rescrapes_stale_user_cache_past_ttl() {
     // a user-cache entry older than INSHELLAH_CACHE_TTL_SECS is re-resolved on
     // the next touch; a fresh-or-disabled ttl serves the stale set unchanged.
-    let root = unique_temp_dir("inshellah-stale-rescrape");
+    let tmp = TempDir::new("inshellah-stale-rescrape");
+    let root = tmp.path();
     let bin_dir = root.join("bin");
     let cache_dir = root.join("cache");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -1724,13 +1691,12 @@ exit 2
         rewritten.contains("fresh") && !rewritten.contains("staleonly"),
         "cache should be rewritten with the fresh set; cache = {rewritten}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn index_fails_when_nushell_command_discovery_is_unavailable() {
-    let root = unique_temp_dir("inshellah-index-no-nu");
+    let tmp = TempDir::new("inshellah-index-no-nu");
+    let root = tmp.path();
     let prefix = root.join("prefix");
     let bin_dir = prefix.join("bin");
     let cache_dir = root.join("cache");
@@ -1760,13 +1726,12 @@ fn index_fails_when_nushell_command_discovery_is_unavailable() {
         "stderr = {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn index_skips_commands_reported_by_nushell_discovery() {
-    let root = unique_temp_dir("inshellah-index-nu-skip");
+    let tmp = TempDir::new("inshellah-index-nu-skip");
+    let root = tmp.path();
     let prefix = root.join("prefix");
     let bin_dir = prefix.join("bin");
     let cache_dir = root.join("cache");
@@ -1804,13 +1769,11 @@ fn index_skips_commands_reported_by_nushell_discovery() {
         cache_dir.join("nushell-native-commands").exists(),
         "discovered command set should be stored"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn complete_max_completions_caps_results() {
-    let cache_dir = flag_demo_cache("inshellah-max-completions", &[
+    let (_tmp, cache_dir) = flag_demo_cache("inshellah-max-completions", &[
         "verbose", "version", "verify", "verbatim",
     ]);
 
@@ -1843,13 +1806,10 @@ fn complete_max_completions_caps_results() {
         uncapped_count, 4,
         "expected 4 candidates, stdout = {uncapped_stdout}"
     );
-
-    fs::remove_dir_all(cache_dir.parent().unwrap()).expect("remove temp dir");
 }
 
 mod build_stamp {
     use super::*;
-    use crate::temp_dir::TempDir;
 
     const HELP_COMMAND: &str = "fresh";
     const CACHED_COMMAND: &str = "cachedonly";
@@ -2071,7 +2031,7 @@ key size
 
 #[test]
 fn complete_does_not_cache_a_subcommand_whose_help_echoes_the_parent() {
-    let root = temp_dir::TempDir::new("inshellah-echo-help");
+    let root = TempDir::new("inshellah-echo-help");
     let bin_dir = root.path().join("bin");
     let cache_dir = root.path().join("cache");
     fs::create_dir_all(&cache_dir).expect("cache dir");

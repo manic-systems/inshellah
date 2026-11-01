@@ -21,14 +21,7 @@ use std::{
         Path,
         PathBuf,
     },
-    process::{
-        self,
-        Command,
-    },
-    time::{
-        SystemTime,
-        UNIX_EPOCH,
-    },
+    process::Command,
 };
 
 use inshellah::{
@@ -44,17 +37,12 @@ use inshellah::{
 };
 
 mod common;
+#[path = "common/temp_dir.rs"] mod temp_dir;
+
+use temp_dir::TempDir;
 
 // note: ManpageResult.positionals is Vec<(String, Positional)>; the fixtures
 // here use no positionals, so an empty Vec suffices.
-
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
-}
 
 fn switch_long(name: &str) -> OwnedSwitch {
     OwnedSwitch::Long(name.to_owned())
@@ -219,8 +207,9 @@ const CASES: &[(&str, &[&str])] = &[
 
 #[test]
 fn golden_completion_matrix() {
-    let root = unique_temp_dir("inshellah-golden-completion");
-    let (user, system, bin) = build_fixture(&root);
+    let tmp = TempDir::new("inshellah-golden-completion");
+    let root = tmp.path();
+    let (user, system, bin) = build_fixture(root);
     for (name, spans) in CASES {
         // fresh user cache per case so on-the-fly resolves are deterministic
         let case_user = root.join(format!("user-{name}"));
@@ -232,5 +221,4 @@ fn golden_completion_matrix() {
         let actual = run_complete(&case_user, &system, &bin, spans);
         common::check_golden("completion", name, "json", &actual);
     }
-    fs::remove_dir_all(&root).expect("remove temp dir");
 }

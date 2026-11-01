@@ -1,31 +1,18 @@
 #![cfg(test)]
 
 use std::{
-    env,
     fs,
-    path::PathBuf,
-    process::{
-        self,
-        Command,
-    },
-    time::{
-        SystemTime,
-        UNIX_EPOCH,
-    },
+    process::Command,
 };
 
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
-}
+#[path = "common/temp_dir.rs"] mod temp_dir;
+
+use temp_dir::TempDir;
 
 #[test]
 fn manpage_command_uses_synopsis_name() {
-    let root = unique_temp_dir("inshellah-manpage-cli");
-    fs::create_dir_all(&root).expect("temp dir");
+    let tmp = TempDir::new("inshellah-manpage-cli");
+    let root = tmp.path();
     let manpage = root.join("btrfs-check.8");
     fs::write(
         &manpage,
@@ -59,14 +46,12 @@ try to repair the filesystem
         !stdout.contains("export extern \"btrfs-check\""),
         "stdout = {stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn manpage_command_strips_git_style_subcommand_prefixes() {
-    let root = unique_temp_dir("inshellah-manpage-cli");
-    fs::create_dir_all(&root).expect("temp dir");
+    let tmp = TempDir::new("inshellah-manpage-cli");
+    let root = tmp.path();
     let manpage = root.join("git.1");
     fs::write(
         &manpage,
@@ -107,14 +92,12 @@ Add file contents to the index.
         !stdout.contains("export extern \"git git-add\""),
         "stdout = {stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn manpage_command_falls_back_when_synopsis_starts_with_prose() {
-    let root = unique_temp_dir("inshellah-manpage-cli");
-    fs::create_dir_all(&root).expect("temp dir");
+    let tmp = TempDir::new("inshellah-manpage-cli");
+    let root = tmp.path();
     let manpage = root.join("ld.so.8");
     fs::write(
         &manpage,
@@ -157,14 +140,12 @@ Set argv[0] to the value string.
         !stdout.contains("export extern \"The\""),
         "stdout = {stdout}"
     );
-
-    fs::remove_dir_all(root).expect("remove temp dir");
 }
 
 #[test]
 fn manpage_with_only_synopsis_positionals_prints_nothing() {
-    let root = unique_temp_dir("inshellah-manpage-cli");
-    fs::create_dir_all(&root).expect("temp dir");
+    let tmp = TempDir::new("inshellah-manpage-cli");
+    let root = tmp.path();
     let manpage = root.join("jq.1");
     fs::write(&manpage, ".SH SYNOPSIS\njq <filter> <file>\n").expect("write manpage");
 
@@ -175,7 +156,6 @@ fn manpage_with_only_synopsis_positionals_prints_nothing() {
         .expect("run inshellah manpage");
 
     let stdout = String::from_utf8(output.stdout).expect("stdout");
-    fs::remove_dir_all(root).expect("remove temp dir");
     assert!(output.status.success());
     assert_eq!(stdout, "");
 }

@@ -19,19 +19,11 @@ use std::{
     env,
     fs,
     os::unix::fs::PermissionsExt as _,
-    path::{
-        Path,
-        PathBuf,
-    },
-    process::{
-        self,
-        Command,
-    },
-    time::{
-        SystemTime,
-        UNIX_EPOCH,
-    },
+    path::Path,
+    process::Command,
 };
+
+#[path = "common/temp_dir.rs"] mod temp_dir;
 
 use inshellah::{
     parsers::manpage::{
@@ -40,20 +32,13 @@ use inshellah::{
     },
     store::write_result,
 };
+use temp_dir::TempDir;
 
 fn nu_available() -> bool {
     Command::new("nu")
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
-}
-
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
 }
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
@@ -85,7 +70,8 @@ fn nu_tokenizer_to_real_binary_seam() {
         return;
     }
 
-    let root = unique_temp_dir("inshellah-seam");
+    let tmp = TempDir::new("inshellah-seam");
+    let root = tmp.path();
     // completer.nu calls `^inshellah complete ...$spans` with no --dir, so it
     // reads the default store at $XDG_CACHE_HOME/inshellah. Seed that.
     let cache = root.join("inshellah");
@@ -143,7 +129,7 @@ fn nu_tokenizer_to_real_binary_seam() {
                 old_path.to_string_lossy()
             ),
         )
-        .env("XDG_CACHE_HOME", &root)
+        .env("XDG_CACHE_HOME", root)
         .env_remove("INSHELLAH_FLAG_TRIGGERS")
         .env_remove("INSHELLAH_FLAG_ON_EMPTY")
         .env_remove("INSHELLAH_MAX_COMPLETIONS")
@@ -156,6 +142,4 @@ fn nu_tokenizer_to_real_binary_seam() {
         output.status.success() && stdout.contains("SEAM OK"),
         "seam test failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
     );
-
-    fs::remove_dir_all(&root).expect("remove temp dir");
 }

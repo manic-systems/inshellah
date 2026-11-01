@@ -8,31 +8,19 @@
 #![cfg(test)]
 
 use std::{
-    env,
     fs,
-    path::PathBuf,
-    process::{
-        self,
-        Command,
-    },
-    time::{
-        Instant,
-        SystemTime,
-        UNIX_EPOCH,
-    },
+    process::Command,
+    time::Instant,
 };
 
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
-}
+#[path = "common/temp_dir.rs"] mod temp_dir;
+
+use temp_dir::TempDir;
 
 #[test]
 fn index_fanout_is_bounded_by_per_root_budget() {
-    let root = unique_temp_dir("inshellah-fanout");
+    let tmp = TempDir::new("inshellah-fanout");
+    let root = tmp.path();
     let bindir = root.join("prefix/bin");
     let cache = root.join("cache");
     fs::create_dir_all(&bindir).expect("bindir");
@@ -127,6 +115,4 @@ while [ "$i" -le 8 ]; do echo "  lvl${n}sub$i   level $n child $i"; i=$((i+1)); 
         elapsed.as_secs() < 20,
         "index took too long ({elapsed:?}); budget may not be engaging"
     );
-
-    fs::remove_dir_all(&root).expect("remove temp dir");
 }
