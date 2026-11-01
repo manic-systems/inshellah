@@ -177,6 +177,8 @@ impl ManpageResult {
                     .join(" ");
             }
         }
+        let negations = self_negations(&self.entries);
+        self.entries.extend(negations);
         let entries = mem::take(&mut self.entries);
         self.entries = dedup_entries(merge_short_long_pairs(entries));
         for entry in &mut self.entries {
@@ -218,6 +220,61 @@ pub(crate) fn clamp_description(desc: &mut String) {
     let trimmed = desc.trim_end().len();
     desc.truncate(trimmed);
     desc.push('\u{2026}');
+}
+
+/// rg and other clap tools name a flag's opposite only inside its own
+/// description, as in "this flag can be disabled with --no-crlf". naming
+/// itself is what makes it safe, a flag mentioned by another entry may belong
+/// to a different command.
+fn self_negations(entries: &[ManpageEntry]) -> Vec<ManpageEntry> {
+    let known: HashSet<&str> = entries.iter().filter_map(long_name).collect();
+    let mut added = HashSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let long = long_name(entry)?;
+            let opposite = long
+                .strip_prefix("no-")
+                .map_or_else(|| format!("no-{long}"), str::to_owned);
+            (!known.contains(opposite.as_str())
+                && names_flag(&entry.desc, &opposite)
+                && added.insert(opposite.clone()))
+            .then(|| negation(opposite, long))
+        })
+        .collect()
+}
+
+/// git's `--[no-]progress` spells both forms in one switch.
+pub(crate) fn bracket_negation(line: &str, entry: &ManpageEntry) -> Option<ManpageEntry> {
+    let long = long_name(entry)?;
+    names_flag(line, &format!("[no-]{long}")).then(|| negation(format!("no-{long}"), long))
+}
+
+fn negation(opposite: String, long: &str) -> ManpageEntry {
+    ManpageEntry {
+        switch: OwnedSwitch::Long(opposite),
+        param:  None,
+        desc:   format!("negates --{long}"),
+    }
+}
+
+fn long_name(entry: &ManpageEntry) -> Option<&str> {
+    match &entry.switch {
+        OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => Some(long),
+        OwnedSwitch::Short(_) => None,
+    }
+}
+
+fn names_flag(desc: &str, long: &str) -> bool {
+    let token = format!("--{long}");
+    let is_flag_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '-' | '_');
+    desc.match_indices(&token).any(|(at, _)| {
+        let before = desc.get(..at).and_then(|head| head.chars().next_back());
+        let after = desc
+            .get(at + token.len()..)
+            .and_then(|tail| tail.chars().next());
+        !before.is_some_and(is_flag_char) && !after.is_some_and(is_flag_char)
+    })
 }
 
 fn entry_key(entry: &ManpageEntry) -> String {
@@ -684,6 +741,44 @@ mod tests {
             param: None,
             desc: desc.to_owned(),
         }
+    }
+
+    #[test]
+    fn self_named_opposites_become_entries() {
+        let mut result = ManpageResult {
+            entries: vec![
+                entry(
+                    OwnedSwitch::Both('m', "mmap".to_owned()),
+                    "search using memory maps. this flag can be disabled with --no-mmap.",
+                ),
+                entry(
+                    OwnedSwitch::Long("no-unicode".to_owned()),
+                    "disable unicode mode. re-enable with --unicode",
+                ),
+                entry(
+                    OwnedSwitch::Long("crlf".to_owned()),
+                    "see --no-crlf-strict and --no-pcre2",
+                ),
+                entry(
+                    OwnedSwitch::Long("color".to_owned()),
+                    "disable with --no-color",
+                ),
+                entry(OwnedSwitch::Long("no-color".to_owned()), "no colours"),
+            ],
+            ..ManpageResult::default()
+        };
+        result.normalize();
+        let keys: Vec<String> = result.entries.iter().map(entry_key).collect();
+        assert_eq!(keys, [
+            "--mmap",
+            "--no-unicode",
+            "--crlf",
+            "--color",
+            "--no-color",
+            "--no-mmap",
+            "--unicode"
+        ]);
+        assert_eq!(result.entries[5].desc, "negates --mmap");
     }
 
     #[test]
