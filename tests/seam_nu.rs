@@ -27,6 +27,10 @@ use std::{
         self,
         Command,
     },
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
+    },
     time::{
         SystemTime,
         UNIX_EPOCH,
@@ -49,11 +53,13 @@ fn nu_available() -> bool {
 }
 
 fn unique_temp_dir(name: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    env::temp_dir().join(format!("{name}-{}-{nanos}-{n}", process::id()))
 }
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
