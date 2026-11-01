@@ -82,3 +82,37 @@ fn parser_keeps_negatable_params() {
         "reject-shallow should not parse prose as a param"
     );
 }
+
+#[test]
+fn bracketed_negations_keep_both_forms() {
+    let text = "usage: git clone [<options>] [--] <repo> [<dir>]
+
+    -j, --[no-]jobs <n>   number of submodules cloned in parallel
+    --[no-]progress       force progress reporting
+    --checkout            see --[no-]checkout-all
+";
+    let (_, result) = help_parser(text).expect("parse");
+    let longs: Vec<&str> = result
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            match &entry.switch {
+                OwnedSwitch::Long(long) | OwnedSwitch::Both(_, long) => Some(long.as_str()),
+                OwnedSwitch::Short(_) => None,
+            }
+        })
+        .collect();
+    assert_eq!(longs, [
+        "jobs",
+        "no-jobs",
+        "progress",
+        "no-progress",
+        "checkout"
+    ]);
+    let no_jobs = result
+        .entries
+        .iter()
+        .find(|entry| matches!(&entry.switch, OwnedSwitch::Long(long) if long == "no-jobs"))
+        .expect("no-jobs entry");
+    assert!(no_jobs.param.is_none());
+}

@@ -38,6 +38,7 @@ use crate::{
             ManpageSubcommand,
             OwnedParam,
             OwnedSwitch,
+            bracket_negation,
         },
     },
 };
@@ -177,7 +178,9 @@ fn build_help_result(original: &str) -> ManpageResult {
             && let Ok((next, parsed)) = entry(rem)
             && parser_made_progress(rem, next)
         {
+            let negation = bracket_negation(line, &parsed);
             entries.push(parsed);
+            entries.extend(negation);
             rem = next;
             continue;
         }
