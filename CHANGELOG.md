@@ -16,6 +16,10 @@
 - user cache entries written by another inshellah build, including every 0.2.0 cache, are dropped and resolved again on first use. caches built with `inshellah index` into the user dir go the same way, so rerun `index` on those prefixes after updating. `7090b28`
 - `complete` answers nushell with a `{completions: [...], options: {cache: false}}` record wherever it used to print a bare list, so nushell stops replaying stale git refs, pids and other live values across prompts once it honours the option. scripts that read `complete` output as a list need to take `completions` from the record.
 
+#### nushell shim
+
+- the nushell completer moved from `nix/inshellah-completer.nu` to `shells/inshellah.nu`. if you source it from a checkout, point your config at the new path, or write a copy out with `inshellah init nushell` instead. `e714b3d`
+
 #### nixos module
 
 - `dynamicTimeoutMs`, `dynamicLimit`, `maxCompletions`, `cacheTtlSecs` and `completeTimeoutMs` reject negative values at evaluation. negative values used to be ignored or replaced by the default at runtime. a negative `timeoutMs` or `workers = 0` already failed the build and now fails at evaluation. `ee0111c`

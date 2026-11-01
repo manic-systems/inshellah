@@ -25,7 +25,11 @@ shim is preferred because it treats invalid JSON as "let nushell fall back"
 instead of throwing during completion:
 
 ```nu
-source /path/to/inshellah-completer.nu
+# once, writes the completer next to config.nu
+inshellah init nushell | save -f ~/.config/nushell/inshellah.nu
+
+# ~/.config/nushell/config.nu
+source ~/.config/nushell/inshellah.nu
 ```
 
 that's it. tab-completion now works for every command indexed.
@@ -43,7 +47,7 @@ with no static or live candidates.
 ```
 inshellah index PREFIX... [--dir PATH] [--ignore FILE] [--help-only FILE]
                           [--prefix PATH[:PATH...]] [--workers N]
-                          [--timeout-ms N]
+                          [--timeout-ms N] [--shell SHELL[,SHELL...]]
     index completions into a directory of json/nu files.
     PREFIX is a directory containing bin/ and share/man/.
     default dir: $XDG_CACHE_HOME/inshellah
@@ -53,16 +57,22 @@ inshellah index PREFIX... [--dir PATH] [--ignore FILE] [--help-only FILE]
     --prefix PATHS    extra scrape prefixes, colon-separated
     --workers N       worker-thread count
     --timeout-ms N    per-subprocess timeout in ms (default: 1200)
+    --shell SHELLS    which shells this index is for (default: nushell).
+                      when it is only nushell, binaries that share a name
+                      with a nushell builtin are skipped
 
 inshellah merge PROFILE --dir DIR --sources FILE [--ignore FILE]
                       [--help-only FILE] [--workers N] [--timeout-ms N]
+                      [--shell SHELL[,SHELL...]]
     merge per-package indexes for a profile whose bin/ links into them.
     FILE lists `PACKAGE INDEX` lines in priority order. manpages under
     PROFILE/share/man are then applied profile-wide. the nix module runs
     this at build time.
 
 inshellah complete CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
-    nushell custom completer. outputs JSON completion candidates.
+                   [--shell SHELL] [--line LINE] [--wordbreaks CHARS]
+    shell completer. prints JSON candidates for nushell, or the line
+    protocol from shells.md for bash, zsh and fish.
     falls back to on-the-fly --help resolution if a command isn't
     indexed yet — the result is cached and subsequent presses are
     instant.
@@ -70,6 +80,7 @@ inshellah complete CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
     user cache; additional paths are read-only system directories.
 
 inshellah explain CMD [ARGS...] [--dir PATH[:PATH...]] [--timeout-ms N]
+                  [--line LINE] [--wordbreaks CHARS]
     show how `complete` answers a command line and why.
 
 inshellah query CMD [SUB...] [--dir PATH[:PATH...]]
@@ -103,6 +114,15 @@ inshellah manpage-dir DIR
 
 inshellah completions
     generate nushell completions for inshellah itself.
+
+inshellah init SHELL
+    print the snippet that hooks SHELL (nushell, bash, zsh or fish) up
+    to inshellah.
+
+inshellah fish-stubs [--dir PATH[:PATH...]]
+    drop a fish completion stub for every command on PATH into the fish
+    dir inside the user cache and print that path. the fish hook calls
+    this for you.
 ```
 
 ## what gets handled
