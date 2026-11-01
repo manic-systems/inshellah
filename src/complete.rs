@@ -5,6 +5,12 @@
 use std::{
     cmp::Reverse,
     env,
+    fmt::{
+        self,
+        Display,
+        Formatter,
+        Write as _,
+    },
     fs,
     iter,
     path::PathBuf,
@@ -62,6 +68,20 @@ impl Response {
             Self::Candidates(candidates)
         }
     }
+
+    /// the line protocol posix shell shims read. a `defer`, `values` or
+    /// `values+files` header, then one `value\tdescription` per candidate.
+    pub const fn lines(&self) -> Lines<'_> {
+        self.lines_for("")
+    }
+
+    /// `lines`, with the command being completed after a tab on the header.
+    pub const fn lines_for<'resp>(&'resp self, command: &'resp str) -> Lines<'resp> {
+        Lines {
+            response: self,
+            command,
+        }
+    }
 }
 
 impl Serialize for Candidate {
@@ -88,6 +108,36 @@ impl Serialize for Options {
         let mut options = serializer.serialize_struct("Options", 1)?;
         options.serialize_field("cache", &false)?;
         options.end()
+    }
+}
+
+pub struct Lines<'resp> {
+    response: &'resp Response,
+    command:  &'resp str,
+}
+
+impl Display for Lines<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let (header, candidates) = match self.response {
+            Response::Defer => ("defer", &[][..]),
+            Response::WithFiles(candidates) if candidates.is_empty() => ("defer", &[][..]),
+            Response::Candidates(candidates) => ("values", candidates.as_slice()),
+            Response::WithFiles(candidates) => ("values+files", candidates.as_slice()),
+        };
+        f.write_str(header)?;
+        if !self.command.is_empty() && !self.command.contains(char::is_control) {
+            write!(f, "\t{}", self.command)?;
+        }
+        for candidate in candidates {
+            if candidate.value.is_empty() || candidate.value.contains(char::is_control) {
+                continue;
+            }
+            write!(f, "\n{}\t", candidate.value)?;
+            for ch in candidate.description.chars() {
+                f.write_char(if ch.is_control() { ' ' } else { ch })?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -507,6 +557,32 @@ mod tests {
             serde_json::to_string(&Candidate::new("a\"b", "line\nnext")).unwrap(),
             r#"{"value":"a\"b","description":"line\nnext"}"#
         );
+    }
+
+    #[test]
+    fn lines_keep_one_candidate_per_line() {
+        let candidates = vec![
+            Candidate::new("--all", "show\tall\nfiles"),
+            Candidate::new("bad\nvalue", ""),
+            Candidate::new("plain", ""),
+        ];
+        assert_eq!(
+            Response::Candidates(candidates.clone()).lines().to_string(),
+            "values\n--all\tshow all files\nplain\t"
+        );
+        assert!(
+            Response::WithFiles(candidates)
+                .lines()
+                .to_string()
+                .starts_with("values+files\n")
+        );
+        assert_eq!(
+            Response::Candidates(Vec::new()).lines().to_string(),
+            "values"
+        );
+        assert_eq!(Response::WithFiles(Vec::new()).lines().to_string(), "defer");
+        assert_eq!(Response::Defer.lines().to_string(), "defer");
+        assert_eq!(Response::Defer.lines_for("git").to_string(), "defer\tgit");
     }
 
     fn result_with_subs(names: &[&str]) -> ManpageResult {

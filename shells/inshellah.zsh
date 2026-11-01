@@ -1,0 +1,62 @@
+# inshellah completions for zsh. load with
+#   eval "$(inshellah init zsh)"
+
+_inshellah() {
+    [[ $compstate[context] == command ]] && ((CURRENT > 1)) || return 1
+    local first=
+    [[ $service == -first- ]] && first=1
+    local cmd=${(Q)words[1]}
+    local -a reply=(defer)
+    if ! (($+builtins[$cmd] || $+functions[$cmd] || ${reswords[(I)$cmd]})); then
+        reply=("${(@f)$(command inshellah complete --shell zsh -- "${(@Q)words[1,CURRENT-1]}" "${(Q)PREFIX}" 2>/dev/null)}")
+    fi
+    local mode=${reply[1]:-defer}
+    if [[ $mode == defer ]]; then
+        [[ -n $first ]] && return 1
+        _default "$@"
+        return
+    fi
+    [[ -n $first ]] && _compskip=all
+
+    local -a values descs displays expl
+    local entry
+    local width=0
+    for entry in "${(@)reply[2,-1]}"; do
+        values+=("${entry%%$'\t'*}")
+        descs+=("${entry#*$'\t'}")
+        ((${#values[-1]} > width)) && width=${#values[-1]}
+    done
+    _description -V inshellah expl inshellah
+    local ret=1
+    if [[ -n ${(j::)descs} ]]; then
+        local i
+        for ((i = 1; i <= $#values; i++)); do
+            displays+=("${(r:width:)values[i]}  -- $descs[i]")
+        done
+        compadd "${expl[@]}" -l -d displays -a values && ret=0
+    else
+        compadd "${expl[@]}" -a values && ret=0
+    fi
+    if [[ $mode == values+files ]]; then
+        _files && ret=0
+    elif ((ret && $#values)); then
+        [[ -n $first ]] && { unset _compskip; return 1 }
+        _default "$@"
+        return
+    fi
+    return ret
+}
+
+# a compinit that runs after the first prompt, as deferred plugin managers do,
+# resets both contexts, so every prompt checks the registration. under
+# takeover `-default-` still catches the command behind nohup, env and the like.
+_inshellah_register() {
+    (($+functions[compdef])) || return 0
+    [[ $_comps[-default-] == _inshellah ]] || compdef _inshellah -default-
+    if [[ -n ${INSHELLAH_TAKEOVER-} && $_comps[-first-] != _inshellah ]]; then
+        compdef _inshellah -first-
+    fi
+}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _inshellah_register

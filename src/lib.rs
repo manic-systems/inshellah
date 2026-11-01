@@ -7,6 +7,7 @@ pub mod indexer;
 pub mod parsers;
 pub mod pool;
 pub mod resolver;
+pub mod shell;
 pub mod store;
 pub mod subprocess;
 pub mod types;
