@@ -307,9 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_filter_drops_exact_subcommand_matches() {
+    fn fuzzy_filter_keeps_exact_subcommand_matches() {
         let items = vec![Candidate::new("show", "remote subcommand")];
-        assert!(filter_candidates(items, "show", Matching::Value).is_none());
+        let filtered = filter_candidates(items, "show", Matching::Value).expect("non-empty");
+        assert_eq!(filtered[0].value, "show");
     }
 
     #[test]

@@ -24,9 +24,11 @@ use inshellah::{
     complete::{
         Candidate,
         Response,
+        attached_directory_candidates,
         choice_candidates,
         entry_for_flag,
         generate_candidates,
+        path_candidates,
     },
     config::Config,
     dynamic::{
@@ -130,6 +132,7 @@ pub enum Reason {
     NotOnPath,
     ValueProvider,
     FlagChoices,
+    FlagPaths,
     ProviderWithFiles,
     Provider,
     ProviderOverFiles,
@@ -145,6 +148,10 @@ impl Display for Reason {
             Self::NotOnPath => "the command is not on PATH",
             Self::ValueProvider => "a live provider answers this command before the cache",
             Self::FlagChoices => "the flag takes one of a known set of values",
+            Self::FlagPaths => {
+                "the flag takes a path attached with =, listed here for shells that do not split \
+                 there"
+            },
             Self::ProviderWithFiles => "provider candidates sit beside nushell's file completion",
             Self::Provider => "the cache had nothing here, a live provider answered",
             Self::ProviderOverFiles => "a live provider answered a file-like position",
@@ -225,10 +232,10 @@ pub fn decide(
 
     let slot = cmd_path.slot;
     trace.slot = Some(slot.to_string());
-    if let Some(candidates) = flag_value_choices(found.as_ref(), slot, &last_token, cfg) {
+    if let Some((candidates, reason)) = flag_value_choices(found.as_ref(), slot, &last_token, cfg) {
         return Decision {
             response: Response::Candidates(candidates),
-            reason: Reason::FlagChoices,
+            reason,
             trace,
         };
     }
@@ -564,13 +571,14 @@ fn merge_completion_candidates(
     out
 }
 
-/// value choices for `--flag val` and `--flag=val`.
+/// value choices for `--flag val` and `--flag=val`, and the paths of a path
+/// flag typed as `--flag=val`.
 fn flag_value_choices(
     found: Option<&Node>,
     slot: ArgSlot<'_>,
     last_token: &str,
     cfg: &Config,
-) -> Option<Vec<Candidate>> {
+) -> Option<(Vec<Candidate>, Reason)> {
     let (flag, typed, prefix) = match slot {
         ArgSlot::FlagValue(flag) => (flag, last_token, String::new()),
         ArgSlot::Free if last_token.starts_with("--") => {
@@ -580,12 +588,20 @@ fn flag_value_choices(
         ArgSlot::Free | ArgSlot::AfterDoubleDash => return None,
     };
     let param = entry_for_flag(&found?.result, flag)?.param.as_ref()?;
+    let takes_path = nushell_type_of_param(&param.name) == "path";
     if param.choices.is_empty() {
-        return None;
+        if !takes_path || prefix.is_empty() || typed.starts_with(['~', '$']) {
+            return None;
+        }
+        let paths = if matches!(param.name.as_str(), "DIR" | "dir" | "DIRECTORY") {
+            attached_directory_candidates(typed, &prefix, cfg)
+        } else {
+            path_candidates(typed, &prefix, cfg)
+        };
+        return (!paths.is_empty()).then_some((paths, Reason::FlagPaths));
     }
     let candidates = choice_candidates(&param.choices, typed, &prefix, cfg);
-    let takes_path = nushell_type_of_param(&param.name) == "path";
-    (!candidates.is_empty() || !takes_path).then_some(candidates)
+    (!candidates.is_empty() || !takes_path).then_some((candidates, Reason::FlagChoices))
 }
 
 /// the protocol a provider-less traced binary answers, scanned once and cached.

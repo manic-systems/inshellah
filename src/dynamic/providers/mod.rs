@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 use crate::{
-    complete::Candidate,
+    complete::{
+        Candidate,
+        directory_candidates,
+    },
     dynamic::{
         Answer,
         Files,
@@ -25,6 +28,7 @@ pub mod systemd;
 
 type CompleteFn = fn(&Words<'_>, &DynCtx<'_>) -> Option<Vec<Candidate>>;
 type FilesFn = fn(&Words<'_>, &DynCtx<'_>) -> Files;
+type AnswerFn = fn(&Words<'_>, &DynCtx<'_>) -> Option<Answer>;
 
 /// where a provider sits relative to static completion. `Value` preempts static
 /// flags; `Fallback` answers only when static produced nothing.
@@ -62,6 +66,11 @@ struct FunctionProvider {
     complete:    CompleteFn,
     /// narrows `files` for a slot that can never be a path.
     files_at:    Option<FilesFn>,
+    /// flags whose value is a directory, which the engine lists itself.
+    dir_flags:   &'static [&'static str],
+    /// replaces `complete` and `files_at` for a backend that says itself
+    /// whether a path fits.
+    answer_fn:   Option<AnswerFn>,
 }
 
 impl Provider for FunctionProvider {
@@ -83,6 +92,15 @@ impl Provider for FunctionProvider {
 
     fn answer(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Answer> {
         let words = self.words(spans, ctx);
+        if let Some(answer) = self.answer_fn {
+            return answer(&words, ctx);
+        }
+        if let Some(candidates) = self.directories(&words, ctx) {
+            return Some(Answer {
+                candidates,
+                files: Files::Replace,
+            });
+        }
         let candidates = (self.complete)(&words, ctx)?;
         let files = self.files_at.map_or(self.files, |at| at(&words, ctx));
         Some(Answer { candidates, files })
@@ -90,6 +108,23 @@ impl Provider for FunctionProvider {
 }
 
 impl FunctionProvider {
+    fn directories(&self, words: &Words<'_>, ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
+        let flag = words.value_slot(ctx)?;
+        let global = self.globals == Globals::Anywhere || words.arg_count() == 0;
+        let attached = words
+            .spans()
+            .last()
+            .is_some_and(|last| last.starts_with("--") && last.contains('='));
+        let typed = words.current();
+        if !self.dir_flags.contains(&flag) || !global || typed.starts_with('$') {
+            return None;
+        }
+        if attached && typed.starts_with('~') {
+            return None;
+        }
+        Some(directory_candidates(typed, ctx.limit))
+    }
+
     fn words<'span>(&self, spans: &'span [String], ctx: &DynCtx<'_>) -> Words<'span> {
         let known = |flag: &str, flags: &[String]| flags.iter().any(|known| known == flag);
         let global_scope = |leading: bool| leading || self.globals == Globals::Anywhere;
@@ -115,6 +150,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Leading,
         complete:    adb::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["nix"],
@@ -125,6 +162,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Leading,
         complete:    nix::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   Some(nix::answer),
     },
     FunctionProvider {
         commands:    &[
@@ -150,6 +189,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    systemd::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["ssh", "sftp"],
@@ -160,6 +201,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Leading,
         complete:    ssh::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["scp"],
@@ -170,6 +213,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    ssh::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["docker"],
@@ -180,6 +225,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Leading,
         complete:    containers::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["podman"],
@@ -190,6 +237,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    containers::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["kubectl"],
@@ -200,6 +249,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    kubectl::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["git"],
@@ -210,6 +261,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Leading,
         complete:    git::complete,
         files_at:    Some(git::files),
+        dir_flags:   &["-C", "--git-dir", "--work-tree"],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["jj"],
@@ -220,6 +273,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Leading,
         complete:    jj::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["npm", "pnpm", "yarn"],
@@ -230,6 +285,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    project::complete,
         files_at:    None,
+        dir_flags:   &["--prefix", "-C", "--dir", "--cwd"],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["make"],
@@ -240,6 +297,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    project::complete,
         files_at:    None,
+        dir_flags:   &["-C", "--directory"],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["just"],
@@ -250,6 +309,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    project::complete,
         files_at:    None,
+        dir_flags:   &["-d", "--working-directory"],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["cargo"],
@@ -260,6 +321,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    project::complete,
         files_at:    None,
+        dir_flags:   &["-C"],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["zig"],
@@ -270,6 +333,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    project::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
     FunctionProvider {
         commands:    &["kill", "pkill"],
@@ -280,6 +345,8 @@ const PROVIDERS: &[FunctionProvider] = &[
         globals:     Globals::Anywhere,
         complete:    process::complete,
         files_at:    None,
+        dir_flags:   &[],
+        answer_fn:   None,
     },
 ];
 

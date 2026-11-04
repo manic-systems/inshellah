@@ -123,7 +123,11 @@ impl<'span> Words<'span> {
     }
 
     pub fn current(&self) -> &'span str {
-        self.spans.last().map_or("", String::as_str)
+        let last = self.spans.last().map_or("", String::as_str);
+        match last.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => value,
+            _ => last,
+        }
     }
 
     /// positional `idx`, counting the first word after the command as 0.
@@ -315,8 +319,8 @@ where
     subprocess::run_quiet_ended(args, ctx.ms_left(), customize)
 }
 
-/// drop exact-match subcommand/external candidates so a typed-out word isn't
-/// echoed back, masking downstream completers.
+/// score and order candidates against the typed word. an exact match stays so
+/// the shell can finish it and add a space.
 pub fn filter_candidates(
     items: Vec<Candidate>,
     prefix: &str,
@@ -337,12 +341,6 @@ pub fn filter_candidates(
             },
         };
         if score <= 0 {
-            continue;
-        }
-        let desc_lc = item.description.to_ascii_lowercase();
-        let exact_command = item.value == prefix
-            && (desc_lc.contains("subcommand") || desc_lc == "external command");
-        if exact_command {
             continue;
         }
         scored.push((score, idx, item));
