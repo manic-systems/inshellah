@@ -195,6 +195,21 @@ _inshellah_wrap_minimal() {
     done
 }
 
+# under takeover, the commands bash-completion registers up front to unwrap
+# another one, such as nohup and xargs, ask inshellah about the whole line
+# before bash-completion loads the inner command's own spec
+_inshellah_wrap_unwrappers() {
+    local name orig
+    for name in _comp_command _comp_root_command _command _root_command; do
+        declare -F "$name" >/dev/null || continue
+        [[ $(declare -f "$name") == *_inshellah_* ]] && continue
+        _inshellah_wraps=$((${_inshellah_wraps:-0} + 1))
+        orig=_inshellah_orig$_inshellah_wraps
+        eval "$orig$(declare -f "$name")"
+        eval "$name() { ! _inshellah_takeover || ! _inshellah_answer \"\$@\" || return 0; $orig$name \"\$@\"; }"
+    done
+}
+
 # another `complete -D` handler, such as fzf's `**` trigger, still gets the
 # lines inshellah defers. bash-completion's loader is called directly instead.
 _inshellah_register() {
@@ -210,6 +225,7 @@ _inshellah_register() {
     fi
     complete -D -o bashdefault -o default -F _inshellah_complete
     _inshellah_wrap_minimal
+    _inshellah_wrap_unwrappers
 }
 
 # bash-completion may load after this hook, nix-darwin sources it last, so

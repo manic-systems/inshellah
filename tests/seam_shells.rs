@@ -200,6 +200,22 @@ for value in 1 true ' Yes ' ON 0 off '' maybe; do
     INSHELLAH_TAKEOVER=$value _inshellah_takeover && state=on || state=off
     echo "takeover '$value' => $state"
 done
+_comp_command() { COMPREPLY=(bc); }
+_inshellah_wrap_unwrappers
+_inshellah_wrap_unwrappers
+unwrap() {
+    COMP_LINE=$1 COMP_POINT=${#1}
+    read -ra COMP_WORDS <<<"$1"
+    COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+    COMPREPLY=()
+    _comp_command nohup "${COMP_WORDS[COMP_CWORD]}" x
+    printf '%s|' "unwrap $1" "${COMPREPLY[@]}"
+    echo
+}
+unwrap 'nohup demotool al'
+unwrap 'nohup nosuchtool al'
+INSHELLAH_TAKEOVER=1 unwrap 'nohup demotool al'
+INSHELLAH_TAKEOVER=1 unwrap 'nohup nosuchtool al'
 "#;
 
 #[test]
@@ -239,6 +255,10 @@ takeover '0' => off
 takeover 'off' => off
 takeover '' => off
 takeover 'maybe' => off
+unwrap nohup demotool al|bc|
+unwrap nohup nosuchtool al|bc|
+unwrap nohup demotool al|alpha|
+unwrap nohup nosuchtool al|bc|
 "#,
     );
 }
