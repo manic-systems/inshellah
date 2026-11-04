@@ -71,6 +71,8 @@ use inshellah::{
     },
 };
 
+use super::wrappers::wrapped_command;
+
 const ELEVATION_COMMANDS: &[&str] = &["sudo", "doas", "pkexec", "su", "run0"];
 
 pub fn run(
@@ -439,43 +441,38 @@ pub fn mandirs_with_bin_prefix(mandirs: &[PathBuf], bin_path: Option<&Path>) -> 
     all_mandirs
 }
 
-/// skip past elevation wrappers (sudo, doas) to the real command.
+/// skip past wrappers (sudo, doas, env, nice, ...) to the real command.
 fn strip_elevation(spans: &[String], dirs: &[PathBuf]) -> (Vec<String>, Option<PathBuf>) {
-    let mut explicit_cmd_path: Option<PathBuf> = None;
-    let mut real_spans: Vec<String> = match spans.split_first() {
-        Some((first, rest)) if ELEVATION_COMMANDS.contains(&first.as_str()) => {
-            let mut target_spans = None;
-            for (idx, span) in rest.iter().enumerate() {
-                if let Some(path) = executable_span_path(span)
-                    && let Some(name) = command_name_for_path(&path)
-                {
-                    let mut target = rest[idx..].to_vec();
-                    target[0] = name;
-                    explicit_cmd_path = Some(path);
-                    target_spans = Some(target);
-                    break;
-                }
-                if !span.is_empty()
-                    && !span.starts_with('-')
-                    && (lookup(dirs, span).is_some() || find_in_path(span).is_some())
-                {
-                    target_spans = Some(rest[idx..].to_vec());
-                    break;
-                }
-            }
-            target_spans.unwrap_or_else(|| spans.to_vec())
-        },
-        _ => spans.to_vec(),
-    };
-    if explicit_cmd_path.is_none()
-        && let Some(first) = real_spans.first()
-        && let Some(path) = executable_span_path(first)
-        && let Some(name) = command_name_for_path(&path)
-    {
-        real_spans[0] = name;
-        explicit_cmd_path = Some(path);
+    let mut real_spans = spans.to_vec();
+    while let Some(at) = wrapped_command_index(&real_spans, dirs) {
+        real_spans.drain(..at);
     }
-    (real_spans, explicit_cmd_path)
+    let explicit = real_spans.first().and_then(|first| {
+        let path = executable_span_path(first)?;
+        Some((command_name_for_path(&path)?, path))
+    });
+    match explicit {
+        Some((name, path)) => {
+            real_spans[0] = name;
+            (real_spans, Some(path))
+        },
+        None => (real_spans, None),
+    }
+}
+
+fn wrapped_command_index(spans: &[String], dirs: &[PathBuf]) -> Option<usize> {
+    let (first, rest) = spans.split_first()?;
+    if !ELEVATION_COMMANDS.contains(&first.as_str()) {
+        return wrapped_command(spans);
+    }
+    rest.iter()
+        .position(|span| {
+            (executable_span_path(span).is_some_and(|path| command_name_for_path(&path).is_some()))
+                || (!span.is_empty()
+                    && !span.starts_with('-')
+                    && (lookup(dirs, span).is_some() || find_in_path(span).is_some()))
+        })
+        .map(|idx| idx + 1)
 }
 
 pub fn mandirs_for_system_dirs(system_dirs: &[PathBuf]) -> Vec<PathBuf> {

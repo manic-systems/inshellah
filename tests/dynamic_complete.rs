@@ -1209,3 +1209,23 @@ fn provider_value_flags_consume_the_next_word_without_a_cached_entry() {
 fn stdout_has_subcommands(stdout: &str) -> bool {
     parse_output(stdout).is_some_and(|cands| Harness::values(&cands).contains(&"checkout".into()))
 }
+
+#[test]
+fn command_wrappers_are_unwrapped_to_the_command_they_run() {
+    let harness = Harness::new("dyn-wrappers");
+    for line in [
+        &["nohup", "git", "remote", "show", ""][..],
+        &["env", "-u", "HOME", "FOO=1", "git", "remote", "show", ""],
+        &["nice", "-n", "5", "git", "remote", "show", ""],
+        &["timeout", "--signal=KILL", "5", "git", "remote", "show", ""],
+        &["xargs", "-n", "1", "git", "remote", "show", ""],
+        &["sudo", "env", "FOO=1", "nice", "git", "remote", "show", ""],
+    ] {
+        let (stdout, ..) = harness.run(line, &[]);
+        let cands = parse_output(&stdout).unwrap_or_else(|| panic!("{line:?} gave {stdout}"));
+        assert!(
+            Harness::values(&cands).contains(&"origin".to_owned()),
+            "{line:?} gave {stdout}"
+        );
+    }
+}
