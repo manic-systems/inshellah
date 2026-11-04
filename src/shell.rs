@@ -34,6 +34,11 @@ impl Display for Shell {
 /// bash's default `COMP_WORDBREAKS`.
 pub const BASH_WORDBREAKS: &str = " \t\n\"'><=;|&(:";
 
+/// reserved words after which a new command starts.
+const COMMAND_PREFIXES: [&str; 11] = [
+    "time", "!", "{", "if", "then", "elif", "else", "while", "until", "do", "coproc",
+];
+
 /// a bash command line up to the cursor, split into the words of the command
 /// being typed. the last word is the one under the cursor, possibly empty.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -45,6 +50,9 @@ pub struct BashLine {
     pub quote:    Option<char>,
     /// the cursor sits on a redirection target.
     pub redirect: bool,
+    /// text readline replaces along with the last word, put back in front of
+    /// every candidate.
+    pub lead:     String,
 }
 
 #[derive(Default)]
@@ -95,6 +103,23 @@ impl BashLine {
                 },
                 (Some('"'), '\\') if chars.peek().is_some_and(|next| "\"\\$`".contains(*next)) => {
                     lex.word.extend(chars.next());
+                },
+                (Some('"'), '$' | '`') if ch == '`' || chars.peek() == Some(&'(') => {
+                    let mut ahead = chars.clone();
+                    let open = ahead.next_if_eq(&'(').unwrap_or(ch);
+                    let (body, closed) = substitution(&mut ahead, open);
+                    if closed {
+                        chars = ahead;
+                        lex.word.push(ch);
+                        if open == '(' {
+                            lex.word.push(open);
+                        }
+                        lex.word.push_str(&body);
+                    } else if let Some(inner) = Self::in_quotes(&lex, open, &body, wordbreaks) {
+                        return inner;
+                    } else {
+                        lex.word.push(ch);
+                    }
                 },
                 (Some(_), other) => lex.word.push(other),
                 (None, ' ' | '\t' | '\n') => lex.end_word(),
@@ -161,24 +186,40 @@ impl BashLine {
             lex.words.push(mem::take(&mut lex.word));
         }
         let mut words = lex.words;
+        while words.len() > 1 && COMMAND_PREFIXES.contains(&words[0].as_str()) {
+            let timed = words.remove(0) == "time";
+            if timed && words.len() > 1 && words[0] == "-p" {
+                words.remove(0);
+            }
+        }
         let assignments = words
             .iter()
             .take(words.len().saturating_sub(1))
             .take_while(|word| is_assignment(word))
             .count();
         words.drain(..assignments);
-        if words.len() > 1 && words[0] == "time" {
-            words.remove(0);
-            if words.len() > 1 && words[0] == "-p" {
-                words.remove(0);
-            }
-        }
         Self {
             words,
             kept,
             quote,
             redirect,
+            lead: String::new(),
         }
+    }
+
+    /// the command typed in a substitution still open inside double quotes.
+    /// readline keeps all the quoted text as one word there, so `lead` carries
+    /// what precedes the command's last word back in.
+    fn in_quotes(lex: &Lexer, open: char, body: &str, wordbreaks: &str) -> Option<Self> {
+        let mut line = Self::parse(body, wordbreaks);
+        if line.redirect {
+            return None;
+        }
+        let tail = line.words.last()?.get(line.kept.len()..)?;
+        let head = body.strip_suffix(tail)?;
+        let opener = if open == '(' { "$(" } else { "`" };
+        line.lead = format!("{}{opener}{head}", lex.word.get(lex.kept..)?);
+        Some(line)
     }
 
     /// `value` as readline should insert it over the replaced tail of the
@@ -204,7 +245,7 @@ impl BashLine {
             }
             out.push(ch);
         }
-        Some(out)
+        Some(format!("{}{out}", self.lead))
     }
 }
 
@@ -307,6 +348,16 @@ mod tests {
     }
 
     #[test]
+    fn reserved_words_start_a_command() {
+        assert_eq!(words("if frob --col"), ["frob", "--col"]);
+        assert_eq!(words("while ! git sw"), ["git", "sw"]);
+        assert_eq!(words("{ git sw"), ["git", "sw"]);
+        assert_eq!(words("x; then time -p git sw"), ["git", "sw"]);
+        assert_eq!(words("do FOO=1 git sw"), ["git", "sw"]);
+        assert_eq!(words("if"), ["if"]);
+    }
+
+    #[test]
     fn redirections_are_skipped() {
         assert_eq!(words("cmd > out.txt --fl"), ["cmd", "--fl"]);
         assert_eq!(words("cmd 2>/dev/null --fl"), ["cmd", "--fl"]);
@@ -344,6 +395,18 @@ mod tests {
         assert_eq!(words("diff <(git log --on"), ["git", "log", "--on"]);
         assert_eq!(words("echo `git st"), ["git", "st"]);
         assert_eq!(words("echo $(a | git "), ["git", ""]);
+        assert_eq!(words("echo \"$(frob --col"), ["frob", "--col"]);
+        assert_eq!(words("x=\"$(git sw"), ["git", "sw"]);
+        assert_eq!(words("echo \"`git st"), ["git", "st"]);
+        let nested = parse("echo \"x$(frob --color=al");
+        assert_eq!(nested.words, ["frob", "--color=al"]);
+        assert_eq!(nested.lead, "x$(frob --color=");
+        assert_eq!(
+            nested.insertion("--color=always").as_deref(),
+            Some("x$(frob --color=always")
+        );
+        assert_eq!(words("echo \"$(a) b\" --fl"), ["echo", "$(a) b", "--fl"]);
+        assert_eq!(words("echo \"\\$(a"), ["echo", "$(a"]);
     }
 
     #[test]

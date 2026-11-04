@@ -171,8 +171,12 @@ fn for_bash(response: Response, line: &BashLine) -> Response {
         Response::Candidates(candidates) if candidates.is_empty() => {
             Response::Candidates(candidates)
         },
-        Response::Candidates(candidates) => Response::or_defer(insert(candidates)),
-        Response::WithFiles(candidates) => Response::WithFiles(insert(candidates)),
+        Response::WithFiles(candidates) if line.lead.is_empty() => {
+            Response::WithFiles(insert(candidates))
+        },
+        Response::Candidates(candidates) | Response::WithFiles(candidates) => {
+            Response::or_defer(insert(candidates))
+        },
     }
 }
 
