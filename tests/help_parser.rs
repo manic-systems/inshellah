@@ -221,7 +221,7 @@ fn bracketed_equals_values_stay_optional() {
     let choices: Vec<_> = diff
         .choices
         .iter()
-        .map(|found| found.value.as_str())
+        .map(|choice| choice.value.as_str())
         .collect();
     assert_eq!(choices, ["yes", "no"]);
     assert_eq!(param_of(&result, "unit").kind, ParamKind::Mandatory);
@@ -355,7 +355,13 @@ fn choice_values(result: &ManpageResult, long: &str) -> Vec<String> {
     entry(result, long)
         .param
         .as_ref()
-        .map(|param| param.choices.iter().map(|found| found.value.clone()).collect())
+        .map(|param| {
+            param
+                .choices
+                .iter()
+                .map(|found| found.value.clone())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -372,14 +378,12 @@ fn wrapped_possible_values_keep_dotted_and_alternate_spellings() {
                                    default, iso, \"+<CUSTOM_FORMAT>\"]
 ",
     );
-    assert_eq!(
-        choice_values(&result, "sort"),
-        ["name", ".name", "ext", "size", "none"]
-    );
-    assert_eq!(
-        choice_values(&result, "time"),
-        ["mod", "modified", "acc", "accessed"]
-    );
+    assert_eq!(choice_values(&result, "sort"), [
+        "name", ".name", "ext", "size", "none"
+    ]);
+    assert_eq!(choice_values(&result, "time"), [
+        "mod", "modified", "acc", "accessed"
+    ]);
     assert_eq!(choice_values(&result, "time-style"), ["default", "iso"]);
 }
 
@@ -398,10 +402,17 @@ fn quoted_alternative_labels_under_a_colon_header_are_choices() {
           This option can be specified more than once.
 ",
     );
-    assert_eq!(
-        choice_values(&result, "type"),
-        ["f", "file", "d", "dir", "directory", "l", "symlink", "x", "executable"]
-    );
+    assert_eq!(choice_values(&result, "type"), [
+        "f",
+        "file",
+        "d",
+        "dir",
+        "directory",
+        "l",
+        "symlink",
+        "x",
+        "executable"
+    ]);
 }
 
 #[test]
@@ -433,7 +444,12 @@ fn lowercase_placeholder_before_a_long_form_that_repeats_it() {
         OwnedSwitch::Both('F', "format".to_owned())
     );
     assert!(entry(&result, "format").param.is_some());
-    assert!(result.entries.iter().all(|found| long_of(found) != Some("regexp")));
+    assert!(
+        result
+            .entries
+            .iter()
+            .all(|found| long_of(found) != Some("regexp"))
+    );
 }
 
 #[test]
@@ -455,7 +471,118 @@ The BOOL argument is mostly harmless.
 ",
     );
     assert_eq!(choice_values(&result, "color"), ["always", "auto", "never"]);
-    assert_eq!(choice_values(&result, "classify"), ["always", "auto", "never"]);
+    assert_eq!(choice_values(&result, "classify"), [
+        "always", "auto", "never"
+    ]);
     assert!(choice_values(&result, "block-size").is_empty());
     assert!(choice_values(&result, "hyperlink").is_empty());
+}
+
+#[test]
+fn usage_line_flags_fill_in_what_the_options_section_lacks() {
+    let result = parse(
+        "usage: git [-v | --version] [-h | --help] [-C <path>] [-c <name>=<value>]
+           [--exec-path[=<path>]] [--html-path]
+           [-p | --paginate | -P | --no-pager] [--git-dir=<path>]
+           [--term-{new,bad}=<term>] [-xyz] <command> [<args>]
+
+Options:
+  -h, --help   show help
+",
+    );
+    assert_eq!(
+        entry(&result, "version").switch,
+        OwnedSwitch::Both('v', "version".to_owned())
+    );
+    assert_eq!(
+        entry(&result, "no-pager").switch,
+        OwnedSwitch::Both('P', "no-pager".to_owned())
+    );
+    assert_eq!(param_name(&result, "git-dir"), Some("path"));
+    assert_eq!(param_name(&result, "exec-path"), Some("path"));
+    let help = result
+        .entries
+        .iter()
+        .filter(|found| long_of(found) == Some("help"))
+        .count();
+    assert_eq!(help, 1);
+    let dash_c = result
+        .entries
+        .iter()
+        .find(|found| found.switch == OwnedSwitch::Short('C'))
+        .expect("-C kept");
+    assert_eq!(
+        dash_c.param.as_ref().map(|param| param.name.as_str()),
+        Some("path")
+    );
+    assert!(result.entries.iter().all(|found| {
+        !matches!(
+            &found.switch,
+            OwnedSwitch::Long(long) if long.starts_with("term")
+        ) && found.switch != OwnedSwitch::Short('x')
+    }));
+}
+
+#[test]
+fn usage_only_short_flags_keep_the_word_after_them_as_their_param() {
+    let result = parse(
+        "Usage: ip6tables-restore [-c] [-w secs] [-T table] [-M command] [file]\n\t   [ \
+         --wait=<seconds>\n\t   [ --table=<TABLE> ]\n",
+    );
+    let param_of = |short: char| {
+        result
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.switch, OwnedSwitch::Short(found) if found == short))
+            .and_then(|entry| entry.param.as_ref())
+            .map(|param| param.name.as_str())
+    };
+    assert_eq!(param_of('w'), Some("secs"));
+    assert_eq!(param_of('T'), Some("table"));
+    assert_eq!(param_of('M'), Some("command"));
+    assert_eq!(param_of('c'), None);
+    assert_eq!(param_name(&result, "wait"), Some("seconds"));
+    assert_eq!(param_name(&result, "table"), Some("TABLE"));
+}
+
+#[test]
+fn bracketed_short_switch_clusters_expand_and_junk_does_not() {
+    let result = parse("Usage: fsck.btrfs [-aApy] [<device>...]\n");
+    for short in ['a', 'A', 'p', 'y'] {
+        assert!(
+            result
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.switch, OwnedSwitch::Short(found) if found == short)),
+            "-{short} missing in {:?}",
+            result.entries
+        );
+    }
+    for junk in [
+        "Usage: fmt [-WIDTH] [OPTION]... [FILE]...\n",
+        "Usage: psfxtable [-i infont] [-nt]\n",
+    ] {
+        let parsed = parse(junk);
+        assert!(
+            !parsed
+                .entries
+                .iter()
+                .any(|entry| { matches!(entry.switch, OwnedSwitch::Short('W' | 'D' | 'n' | 't')) }),
+            "{junk}: {:?}",
+            parsed.entries
+        );
+    }
+}
+
+#[test]
+fn flag_and_value_name_squeezed_together_is_not_a_cluster() {
+    let parsed = parse("Usage: gzip [-acfhLV] [-Ssuffix] [name...]\n");
+    assert!(
+        !parsed
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.switch, OwnedSwitch::Short('u' | 'i' | 'x'))),
+        "{:?}",
+        parsed.entries
+    );
 }

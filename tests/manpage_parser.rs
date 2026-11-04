@@ -688,3 +688,19 @@ fn lowercase_placeholder_between_short_and_long_keeps_both_names() {
         result.entries
     );
 }
+
+#[test]
+fn lowercase_placeholder_repeated_in_long_form_names_the_param() {
+    let groff = ".TH NANO 1\n.SH NAME\nnano \\- editor\n.SH OPTIONS\n.TP\n.BI \\-r \" number\\fR, \
+                 \" \\-\\-fill= number\nSet the width. If the value is 0 or less, wrapping \
+                 occurs.\n";
+    let result = parse_manpage_string(groff);
+    let entry = result
+        .entries
+        .iter()
+        .find(|entry| entry.switch == OwnedSwitch::Both('r', "fill".to_owned()))
+        .expect("fill entry");
+    let param = entry.param.as_ref().expect("param");
+    assert_eq!(param.name, "number");
+    assert!(param.choices.is_empty(), "{:?}", param.choices);
+}

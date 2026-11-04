@@ -8,10 +8,7 @@ use crate::{
     parsers::{
         help::{
             help_parser,
-            options::{
-                flag_param,
-                switch_parser,
-            },
+            options::switch_and_param,
         },
         manpage::{
             ManpageEntry,
@@ -56,7 +53,7 @@ fn collect_description_lines(lines: &[GroffLine], start: usize) -> (String, usiz
 pub fn parse_tag_to_entry(tag: &str, desc: String) -> Option<ManpageEntry> {
     let rendered = strip_groff_escapes(tag);
     let result: nom::IResult<&str, (OwnedSwitch, Option<OwnedParam>)> =
-        (switch_parser, flag_param).parse(rendered.trim());
+        switch_and_param.parse(rendered.trim());
     match result {
         Ok((_, (switch, param))) => {
             Some(ManpageEntry {
@@ -408,7 +405,7 @@ fn is_prose_line(text: &str, previous: &str) -> bool {
     if !line.starts_with('-') {
         return false;
     }
-    let Ok((rest, _)) = (switch_parser, flag_param).parse(line) else {
+    let Ok((rest, _)) = switch_and_param.parse(line) else {
         return false;
     };
     rest.strip_prefix(' ').is_some_and(|tail| {
