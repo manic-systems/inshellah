@@ -67,7 +67,7 @@ in zsh, the hook checks its registration at every prompt and again as you type, 
 
 in zsh, long descriptions are cut to fit the terminal width with a trailing `...`, so every candidate stays on one line. wide characters such as cjk and emoji are measured by display width.
 
-in zsh, directory candidates such as the value of `--output=pdir/` keep the cursor right after the slash with no space appended, so you can keep typing the path. the hook sets its own shell options for every function it runs, so options like `ksharrays` in your config do not break it. under takeover the answer from `-first-` is reused by `-default-` for the same words, so a single tab press runs `inshellah complete` once.
+in zsh, directory candidates such as the value of `--output=pdir/` keep the cursor right after the slash with no space appended, so you can keep typing the path. the hook sets its own shell options for the functions it runs, so options like `ksharrays` in your config do not break it. the completer itself runs with the same options compsys gives every completion function, so a glob that matches nothing inside `_files` or your own `-first-` completer stays quiet. candidates that start with `~` are inserted unquoted so the shell still expands them. under takeover the answer from `-first-` is reused by `-default-` for the same words and by every matcher-list or completer pass of the same tab press, so a single tab press runs `inshellah complete` once.
 
 in bash, `kill` is a builtin that inshellah normally leaves to the shell. under
 takeover, or when bash-completion has no spec for it, inshellah's own `kill`

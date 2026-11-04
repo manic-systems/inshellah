@@ -8,7 +8,6 @@ _inshellah_takeover() {
 }
 
 _inshellah_pass() {
-    emulate -L zsh
     [[ -n ${_inshellah_prev_first-} ]] || return 1
     unset _compskip
     $_inshellah_prev_first "$@"
@@ -16,9 +15,11 @@ _inshellah_pass() {
 
 _inshellah() {
     emulate -L zsh
-    local first=
+    (($+_comp_options)) && setopt ${_comp_options[@]}
+    local first= again=
+    ((${_matcher_num-1} > 1 || ${_completer_num-1} > 1)) && again=1
     if [[ $service == -first- ]]; then
-        _inshellah_memo_key=
+        [[ -n $again ]] || _inshellah_memo_key=
         _inshellah_takeover || { _inshellah_pass "$@"; return }
         [[ $compstate[context] == command ]] && ((CURRENT > 1)) || { _inshellah_pass "$@"; return }
         first=1
@@ -29,7 +30,7 @@ _inshellah() {
     local -a reply=(defer)
     if ! (($+builtins[$cmd] || $+functions[$cmd] || ${reswords[(I)$cmd]})); then
         local key=${(pj:\0:)words[1,CURRENT-1]}$'\0'$PREFIX
-        if [[ -z $first && $_inshellah_memo_key == $key ]]; then
+        if [[ $_inshellah_memo_key == $key && (-z $first || -n $again) ]]; then
             reply=("${(@)_inshellah_memo}")
         else
             reply=("${(@f)$(command inshellah complete --shell zsh -- "${(@Q)words[1,CURRENT-1]}" "${(Q)PREFIX}" 2>/dev/null)}")
@@ -37,8 +38,6 @@ _inshellah() {
         if [[ -n $first ]]; then
             typeset -g _inshellah_memo_key=$key
             typeset -ga _inshellah_memo=("${(@)reply}")
-        else
-            _inshellah_memo_key=
         fi
     fi
     local mode=${reply[1]:-defer}
@@ -59,8 +58,8 @@ _inshellah() {
     done
     _description -V inshellah expl inshellah
     local ret=1
-    local -a dirs dirdisplays plain plaindisplays
-    local i line
+    local -a v_plain d_plain v_dirs d_dirs v_tplain d_tplain v_tdirs d_tdirs
+    local i line kind tilde
     local hasdescs=
     [[ -n ${(j::)descs} ]] && hasdescs=1
     for ((i = 1; i <= $#values; i++)); do
@@ -73,21 +72,24 @@ _inshellah() {
                 line+=...
             fi
         fi
-        if [[ $values[i] == */ ]]; then
-            dirs+=("$values[i]")
-            dirdisplays+=("$line")
-        else
-            plain+=("$values[i]")
-            plaindisplays+=("$line")
+        kind=plain
+        [[ $values[i] == */ ]] && kind=dirs
+        if [[ $values[i] == \~* && -z $compstate[quote] ]]; then
+            tilde=${values[i]%%/*}
+            kind=t$kind
+            values[i]=$tilde${(q)values[i]#$tilde}
         fi
+        eval "v_$kind+=(\"\$values[i]\")" "d_$kind+=(\"\$line\")"
     done
-    if [[ -n $hasdescs ]]; then
-        (($#plain)) && compadd "${expl[@]}" -l -d plaindisplays -a plain && ret=0
-        (($#dirs)) && compadd "${expl[@]}" -S '' -l -d dirdisplays -a dirs && ret=0
-    else
-        (($#plain)) && compadd "${expl[@]}" -a plain && ret=0
-        (($#dirs)) && compadd "${expl[@]}" -S '' -a dirs && ret=0
-    fi
+    local -a flags vals
+    for kind in plain dirs tplain tdirs; do
+        flags=()
+        [[ $kind == *dirs ]] && flags+=(-S "")
+        [[ $kind == t* ]] && flags+=(-Q)
+        [[ -n $hasdescs ]] && flags+=(-l -d d_$kind)
+        vals=("${(@P)${:-v_$kind}}")
+        (($#vals)) && compadd "${expl[@]}" "${flags[@]}" -a v_$kind && ret=0
+    done
     if [[ $mode == values+files ]]; then
         _files && ret=0
     elif ((ret && $#values)); then

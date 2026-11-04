@@ -265,8 +265,9 @@ compadd() {
 }
 _description() { eval "$3=()" }
 _files() { print -rn -- ' +files' }
-_default() { print -rn -- 'default' }
-_prev() { print -rn -- 'prev' }
+_comp_options=(nullglob)
+_default() { local g; g=(/nonexistent*); print -rn -- 'default' }
+_prev() { local g; g=(/nonexistent*); print -rn -- 'prev' }
 setup() {
     emulate -L zsh
     compstate[context]=${ctx:-command}
@@ -305,8 +306,10 @@ cd $HOME
 comp 'dirtool --out=pd'
 comp 'dirtool --out=pdir/'
 COLUMNS=24 comp 'widetool '
-setopt ksharrays
+setopt ksharrays nomatch kshglob shwordsplit nounset
 comp 'demotool alpha r'
+comp 'demotool alpha run '
+_inshellah_prev_first=_prev service=-first- comp 'demotool al'
 comp 'dirtool --out=pd'
 service=-first- INSHELLAH_TAKEOVER=1 comp 'demotool al'
 typeset -A _comps
@@ -349,6 +352,8 @@ dirtool --out=pdir/ => --out=pdir/sub/ S[] {--out=pdir/sub/  -- directory}
 widetool  => alpha|beta {alpha  -- \u{65e5}\u{672c}\u{8a9e}\u{306e}\u{8aac}...|beta   -- short}
 demotool alpha r => run|reset {run    -- run it|reset  -- reset it}
 dirtool --out=pd => --out=pdir/ S[] {--out=pdir/  -- directory}
+demotool alpha run  => default
+demotool al => prev
 demotool al => alpha {alpha  -- first}
 registered _inshellah _inshellah
 ",
