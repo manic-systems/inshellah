@@ -290,6 +290,7 @@ _files() { print -rn -- ' +files' }
 _comp_options=(nullglob)
 _default() { local g; g=(/nonexistent*); print -rn -- 'default' }
 _prev() { local g; g=(/nonexistent*); print -rn -- 'prev' }
+memos() { emulate -L zsh; local -a k=(${(k)_inshellah_memo}); print -r -- "memo $#k" }
 setup() {
     emulate -L zsh
     compstate[context]=${ctx:-command}
@@ -299,6 +300,7 @@ setup() {
     PREFIX=$words[-1]
 }
 comp() {
+    _inshellah_reset
     setup "$1"
     print -rn -- "$1 => "
     _inshellah
@@ -334,10 +336,20 @@ comp 'demotool alpha run '
 _inshellah_prev_first=_prev service=-first- comp 'demotool al'
 comp 'dirtool --out=pd'
 service=-first- INSHELLAH_TAKEOVER=1 comp 'demotool al'
+INSHELLAH_TAKEOVER=1 service=-first- comp 'kill -s TERM'
+INSHELLAH_TAKEOVER=1 service=-first- comp 'command kill -s TERM'
+INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'command pwd -'
+INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'pwd -'
+_inshellah_prev_first=_prev service=-first- comp 'kill -s TERM'
+INSHELLAH_TAKEOVER=1 service=-first- comp 'demotool al'
+memos
+_inshellah_reset
+memos
 typeset -A _comps
 compdef() { _comps[$2]=$1 }
 _inshellah_register
-print -r -- "registered ${_comps[-first-]} ${_comps[-default-]}"
+_inshellah_register
+print -r -- "registered ${_comps[-first-]} ${_comps[-default-]} ${(j:,:)compprefuncs}"
 "#;
 
 #[test]
@@ -377,7 +389,17 @@ demotool alpha run  => default
 demotool al => prev
 dirtool --out=pd => --out=pdir/ S[] {--out=pdir/  -- directory}
 demotool al => alpha {alpha  -- first}
-registered _inshellah _inshellah
+kill -s TERM => TERM|TTOU|TSTP|TTIN {TERM  -- terminate|TTOU  -- background write to the \
+         terminal|TSTP  -- stop from the terminal|TTIN  -- background read from the terminal}
+command kill -s TERM => TERM|TTOU|TSTP|TTIN {TERM  -- terminate|TTOU  -- background write to the \
+         terminal|TSTP  -- stop from the terminal|TTIN  -- background read from the terminal}
+command pwd - => prev
+pwd - => prev
+kill -s TERM => prev
+demotool al => alpha {alpha  -- first}
+memo 1
+memo 0
+registered _inshellah _inshellah _inshellah_reset
 ",
     );
 }

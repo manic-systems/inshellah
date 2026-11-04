@@ -7,6 +7,12 @@ _inshellah_takeover() {
     [[ ${(L)INSHELLAH_TAKEOVER-} == [[:space:]]#(1|true|yes|on)[[:space:]]# ]]
 }
 
+typeset -gA _inshellah_memo
+
+_inshellah_reset() {
+    _inshellah_memo=()
+}
+
 _inshellah_pass() {
     [[ -n ${_inshellah_prev_first-} ]] || return 1
     unset _compskip
@@ -16,10 +22,8 @@ _inshellah_pass() {
 _inshellah() {
     emulate -L zsh
     (($+_comp_options)) && setopt ${_comp_options[@]}
-    local first= again=
-    ((${_matcher_num-1} > 1 || ${_completer_num-1} > 1)) && again=1
+    local first=
     if [[ $service == -first- ]]; then
-        [[ -n $again ]] || _inshellah_memo_key=
         _inshellah_takeover || { _inshellah_pass "$@"; return }
         [[ $compstate[context] == command ]] && ((CURRENT > 1)) || { _inshellah_pass "$@"; return }
         first=1
@@ -28,16 +32,21 @@ _inshellah() {
     fi
     local cmd=${(Q)words[1]}
     local -a reply=(defer)
-    if ! (($+builtins[$cmd] || $+functions[$cmd] || ${reswords[(I)$cmd]})); then
-        local key=${(pj:\0:)words[1,CURRENT-1]}$'\0'$PREFIX
-        if [[ $_inshellah_memo_key == $key && (-z $first || -n $again) ]]; then
-            reply=("${(@)_inshellah_memo}")
+    local skip=
+    if ((${reswords[(I)$cmd]} || $+functions[$cmd])); then
+        skip=1
+    elif (($+builtins[$cmd])); then
+        local eff=$cmd
+        [[ $cmd == (command|exec) ]] && ((CURRENT > 2)) && eff=${(Q)words[2]}
+        [[ -n $first && $eff == kill ]] || skip=1
+    fi
+    if [[ -z $skip ]]; then
+        local key=${(pj:\x01:)words[1,CURRENT-1]}$'\x01'$PREFIX
+        if (($+_inshellah_memo[(e)$key])); then
+            reply=("${(@f)_inshellah_memo[(e)$key]}")
         else
             reply=("${(@f)$(command inshellah complete --shell zsh -- "${(@Q)words[1,CURRENT-1]}" "${(Q)PREFIX}" 2>/dev/null)}")
-        fi
-        if [[ -n $first ]]; then
-            typeset -g _inshellah_memo_key=$key
-            typeset -ga _inshellah_memo=("${(@)reply}")
+            _inshellah_memo[(e)$key]=${(F)reply}
         fi
     fi
     local mode=${reply[1]:-defer}
@@ -74,7 +83,8 @@ _inshellah() {
         fi
         kind=plain
         [[ $values[i] == */ ]] && kind=dirs
-        if [[ $values[i] == \~* && -z $compstate[quote] ]]; then
+        if [[ $values[i] == \~* ]]; then
+            [[ -n $compstate[quote] ]] && continue
             tilde=${values[i]%%/*}
             kind=t$kind
             values[i]=$tilde${(q)values[i]#$tilde}
@@ -106,6 +116,7 @@ _inshellah() {
 _inshellah_register() {
     emulate -L zsh
     (($+functions[compdef])) || return 0
+    (($compprefuncs[(Ie)_inshellah_reset])) || compprefuncs+=(_inshellah_reset)
     [[ $_comps[-default-] == _inshellah ]] || compdef _inshellah -default-
     if [[ $_comps[-first-] != _inshellah ]]; then
         _inshellah_prev_first=$_comps[-first-]
