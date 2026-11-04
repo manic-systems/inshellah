@@ -158,6 +158,20 @@ impl ManpageResult {
             || !self.positional_choices.is_empty()
     }
 
+    /// give still choice-less params the values a sentence elsewhere in `doc`
+    /// states for their metavar.
+    pub fn attach_metavar_choices(&mut self, doc: &str) {
+        for param in self
+            .entries
+            .iter_mut()
+            .filter_map(|entry| entry.param.as_mut())
+        {
+            if param.choices.is_empty() {
+                param.choices = choices::mine_metavar(&param.name, doc);
+            }
+        }
+    }
+
     /// canonicalise so the cache holds one shape. runs once at the end of every
     /// parse path.
     pub fn normalize(&mut self) {

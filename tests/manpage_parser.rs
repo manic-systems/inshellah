@@ -674,3 +674,12 @@ fn single_space_option_row_after_a_finished_line_is_kept() {
         );
     }
 }
+
+#[test]
+fn adjective_sentence_about_a_param_is_not_a_choice_list() {
+    let groff = ".TH T 1\n.SH OPTIONS\n.TP\n\\fB\\-\\-dir\\fR=\\fIPATH\\fR\nwhere PATH can be \
+                 absolute or relative\n";
+    let result = parse_manpage_string(groff);
+    let param = result.entries[0].param.as_ref().expect("param");
+    assert!(param.choices.is_empty(), "{:?}", param.choices);
+}

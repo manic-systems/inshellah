@@ -221,7 +221,7 @@ fn bracketed_equals_values_stay_optional() {
     let choices: Vec<_> = diff
         .choices
         .iter()
-        .map(|choice| choice.value.as_str())
+        .map(|found| found.value.as_str())
         .collect();
     assert_eq!(choices, ["yes", "no"]);
     assert_eq!(param_of(&result, "unit").kind, ParamKind::Mandatory);
@@ -349,4 +349,131 @@ fn punctuation_short_flags_pair_with_their_long_names() {
         entry(&result, "help").switch,
         OwnedSwitch::Both('?', "help".to_owned())
     );
+}
+
+fn choice_values(result: &ManpageResult, long: &str) -> Vec<String> {
+    entry(result, long)
+        .param
+        .as_ref()
+        .map(|param| {
+            param
+                .choices
+                .iter()
+                .map(|found| found.value.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn wrapped_possible_values_keep_dotted_and_alternate_spellings() {
+    let result = parse(
+        "SORTING OPTIONS:
+  -s, --sort <FIELD>             which field to sort by [default: name] [possible values:
+                                   name, .name, ext,
+                                   size, none]
+  -t, --time <FIELD>             which timestamp field to show [possible values:
+                                   mod|modified, acc|accessed]
+      --time-style <STYLE>       how to format timestamps [possible values:
+                                   default, iso, \"+<CUSTOM_FORMAT>\"]
+",
+    );
+    assert_eq!(choice_values(&result, "sort"), [
+        "name", ".name", "ext", "size", "none"
+    ]);
+    assert_eq!(choice_values(&result, "time"), [
+        "mod", "modified", "acc", "accessed"
+    ]);
+    assert_eq!(choice_values(&result, "time-style"), ["default", "iso"]);
+}
+
+#[test]
+fn quoted_alternative_labels_under_a_colon_header_are_choices() {
+    let result = parse(
+        "Options:
+  -t, --type <filetype>
+          Filter the search by type:
+            'f' or 'file':         regular files
+            'd' or 'dir' or 'directory':    directories
+            'l' or 'symlink':      symbolic links
+
+            'x' or 'executable':   executables
+
+          This option can be specified more than once.
+",
+    );
+    assert_eq!(choice_values(&result, "type"), [
+        "f",
+        "file",
+        "d",
+        "dir",
+        "directory",
+        "l",
+        "symlink",
+        "x",
+        "executable"
+    ]);
+}
+
+#[test]
+fn quoted_label_lists_past_the_first_line_are_not_choices() {
+    let result = parse(
+        "Options:
+  -S, --size <size>
+          Limit results based on the size of files.
+          Allowed unit values:
+              'b':  bytes
+              'k':  kilobytes
+",
+    );
+    assert!(choice_values(&result, "size").is_empty());
+}
+
+#[test]
+fn lowercase_placeholder_before_a_long_form_that_repeats_it() {
+    let result = parse(
+        "Options:
+  -F format, --format=format
+        Specify the file format.
+  -e word, --regexp=other
+        Pattern.
+",
+    );
+    assert_eq!(
+        entry(&result, "format").switch,
+        OwnedSwitch::Both('F', "format".to_owned())
+    );
+    assert!(entry(&result, "format").param.is_some());
+    assert!(
+        result
+            .entries
+            .iter()
+            .all(|found| long_of(found) != Some("regexp"))
+    );
+}
+
+#[test]
+fn doc_wide_metavar_sentence_gives_choices_to_the_matching_param() {
+    let result = parse(
+        "Usage: ls [OPTION]... [FILE]...
+
+  -F, --classify[=WHEN]
+         append indicator to entries WHEN
+      --color[=WHEN]
+         color the output WHEN; more info below
+      --block-size=SIZE
+         scale sizes by SIZE
+      --hyperlink[=BOOL]
+         hyperlink file names
+
+The WHEN argument defaults to 'always' and can also be 'auto' or 'never'.
+The BOOL argument is mostly harmless.
+",
+    );
+    assert_eq!(choice_values(&result, "color"), ["always", "auto", "never"]);
+    assert_eq!(choice_values(&result, "classify"), [
+        "always", "auto", "never"
+    ]);
+    assert!(choice_values(&result, "block-size").is_empty());
+    assert!(choice_values(&result, "hyperlink").is_empty());
 }

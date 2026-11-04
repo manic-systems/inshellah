@@ -428,6 +428,27 @@ fn short_param_comma_long(input: &str) -> IResult<&str, Switch<'_>> {
     Ok((rem, Switch::Both(short, long)))
 }
 
+// xz writes `-F format, --format=format`. a lowercase word is only a
+// placeholder when the long form repeats it as its value.
+fn short_lowercase_param_comma_long(input: &str) -> IResult<&str, Switch<'_>> {
+    let (rem, (short, _, word, (), long)) = (
+        short_switch,
+        space1,
+        take_while1(|ch: char| ch.is_ascii_lowercase()),
+        comma,
+        long_switch,
+    )
+        .parse(input)?;
+    let repeated = rem
+        .strip_prefix('=')
+        .and_then(|tail| tail.strip_prefix(word))
+        .is_some_and(|after| !after.starts_with(is_option_char));
+    if !repeated {
+        return Err(NomErr::Error(NomError::new(input, ErrorKind::Verify)));
+    }
+    Ok((rem, Switch::Both(short, long)))
+}
+
 switch_pair!(long_comma_short,
     long_switch, comma, short_switch => |long, short| Switch::Both(short, long));
 
@@ -464,6 +485,7 @@ make_parser!(switch_parser_borrowed<'src> -> Switch<'src>,
         short_comma_long,
         short_space_long,
         short_param_comma_long,
+        short_lowercase_param_comma_long,
         long_slash_short,
         long_comma_short,
         long_space_short,
