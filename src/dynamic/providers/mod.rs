@@ -368,6 +368,16 @@ pub fn takes_value(cmd: &str, flag: &str, leading: bool) -> bool {
         })
 }
 
+/// the completions of a command the shell runs as a builtin, which the cached
+/// manpage of a binary of the same name does not describe.
+pub fn builtin(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
+    let provider = PROVIDERS
+        .iter()
+        .find(|provider| provider.commands().contains(&"kill"))?;
+    (spans.first().map(String::as_str) == Some("kill"))
+        .then(|| process::builtin_kill(&provider.words(spans, ctx), ctx))
+}
+
 pub fn kind_of(cmd: &str) -> Option<&'static str> {
     PROVIDERS
         .iter()

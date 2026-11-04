@@ -14,6 +14,7 @@ use crate::{
     complete::Candidate,
     config::Config,
     dynamic::adapters::Protocol,
+    shell::Shell,
 };
 
 pub mod adapters;
@@ -22,6 +23,7 @@ mod shared;
 
 use shared::{
     DynCtx,
+    Matching,
     filter_candidates,
 };
 
@@ -147,6 +149,7 @@ pub fn dynamic_value_completions(
         explicit_cmd_path,
         slot: Slot::from_spans(&spans),
         flags: CachedFlags::default(),
+        shell: Shell::Nushell,
     };
     let listed = providers::value_completions(&spans, &ctx)?;
     Some(without_untriggered_flags(
@@ -154,6 +157,34 @@ pub fn dynamic_value_completions(
         rest.last().map_or("", String::as_str),
         cfg,
     ))
+}
+
+/// bash and zsh run `kill` themselves, with flags the cached `kill` binary
+/// does not have.
+pub fn builtin_completions(
+    spans: &[String],
+    shell: Shell,
+    timeout_ms: u64,
+    cfg: &Config,
+) -> Option<Vec<Candidate>> {
+    if !matches!(shell, Shell::Bash | Shell::Zsh) {
+        return None;
+    }
+    let deadline = (timeout_ms != 0).then(|| Instant::now() + Duration::from_millis(timeout_ms));
+    let ctx = DynCtx {
+        deadline,
+        limit: 0,
+        cmd_name: spans.first()?,
+        explicit_cmd_path: None,
+        slot: Slot::from_spans(spans),
+        flags: CachedFlags::default(),
+        shell,
+    };
+    let listed = providers::builtin(spans, &ctx)?;
+    let last = spans.last().map_or("", String::as_str);
+    let filtered =
+        filter_candidates(listed, last, Matching::ValueOrDescription).unwrap_or_default();
+    Some(without_untriggered_flags(filtered, last, cfg))
 }
 
 /// clap lists flags beside values, which must not show on a token that does
@@ -185,6 +216,7 @@ pub fn dynamic_complete_with_path(
         Slot::from_spans(spans),
         CachedFlags::default(),
         None,
+        Shell::Nushell,
         cfg,
     )
     .into_answer()
@@ -197,6 +229,7 @@ pub fn dynamic_complete_candidates_with_path(
     slot: Slot<'_>,
     flags: CachedFlags<'_>,
     protocol: Option<Protocol>,
+    shell: Shell,
     cfg: &Config,
 ) -> Reply {
     if spans.is_empty() {
@@ -214,6 +247,7 @@ pub fn dynamic_complete_candidates_with_path(
         explicit_cmd_path,
         slot,
         flags,
+        shell,
     };
     let reply = match (providers::dispatch(spans, &ctx), protocol) {
         (Some(answer), _) => Reply::Answered(answer),

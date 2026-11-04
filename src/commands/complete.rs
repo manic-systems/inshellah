@@ -41,6 +41,7 @@ use inshellah::{
             Detection,
             Protocol,
         },
+        builtin_completions,
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
         provider_kind,
@@ -133,7 +134,16 @@ pub fn run(
     let response = if parsed.as_ref().is_some_and(|bash| bash.redirect) {
         Response::Defer
     } else {
-        decide(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg).response
+        decide(
+            &spans,
+            &user_dir,
+            &system_dirs,
+            &mandirs,
+            timeout_ms,
+            shell,
+            &cfg,
+        )
+        .response
     };
     let mut out = io::stdout().lock();
     match shell {
@@ -260,6 +270,7 @@ pub fn decide(
     system_dirs: &[PathBuf],
     mandirs: &[PathBuf],
     timeout_ms: u64,
+    shell: Shell,
     cfg: &Config,
 ) -> Decision {
     let mut all_dirs: Vec<PathBuf> = Vec::with_capacity(system_dirs.len() + 1);
@@ -287,13 +298,12 @@ pub fn decide(
     let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, &mut trace);
     trace.dirs.clone_from(&dirs);
 
-    if let Some(response) = value_provider(
-        &spans,
-        explicit_cmd_path.as_deref(),
-        timeout_ms,
-        cfg,
-        &mut trace,
-    ) {
+    let builtin = builtin_provider(raw_spans, shell, timeout_ms, cfg, &mut trace);
+    let provided = builtin.or_else(|| {
+        let path = explicit_cmd_path.as_deref();
+        value_provider(&spans, path, timeout_ms, cfg, &mut trace)
+    });
+    if let Some(response) = provided {
         return Decision {
             response,
             reason: Reason::ValueProvider,
@@ -379,6 +389,7 @@ pub fn decide(
             },
             FlagLists::of(lookup(&dirs, &cmd_name).as_ref(), found.as_ref()).cached(),
             trace.protocol,
+            shell,
             cfg,
         )
     };
@@ -393,6 +404,22 @@ pub fn decide(
         reason,
         trace,
     }
+}
+
+/// `kill` typed as the first word is the shell's own builtin.
+fn builtin_provider(
+    raw_spans: &[String],
+    shell: Shell,
+    timeout_ms: u64,
+    cfg: &Config,
+    trace: &mut Trace,
+) -> Option<Response> {
+    if raw_spans.first()? != "kill" {
+        return None;
+    }
+    let candidates = builtin_completions(raw_spans, shell, timeout_ms, cfg)?;
+    trace.dynamic = Some(candidates.len());
+    Some(Response::or_defer(candidates))
 }
 
 fn value_provider(

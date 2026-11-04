@@ -71,7 +71,12 @@ in zsh, directory candidates such as the value of `--output=pdir/` keep the curs
 
 in bash, `kill` is a builtin that inshellah normally leaves to the shell. under
 takeover, or when bash-completion has no spec for it, inshellah's own `kill`
-provider answers instead. reserved words that start a command, like `time`,
+provider answers instead. that provider offers the builtin's own flags
+(`-s`, `-n`, `-l`, and `-L` in bash) and not the binary's, completes signal
+names after them and for `-SIGTERM` style words, and lists pids otherwise.
+fish and the binary get signal names after `-s`, `--signal`, `-l` and
+`--list`, while nushell's own `kill` takes a signal number and keeps getting
+only pids. reserved words that start a command, like `time`,
 `if`, `while`, `!` and `{`, never stop inshellah from completing the command
 after them, and neither does a `$(` or backtick substitution opened inside
 double quotes. file candidates are not offered there. a line that begins with

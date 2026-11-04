@@ -360,6 +360,15 @@ impl Harness {
     }
 
     fn run(&self, spans: &[&str], extra_env: &[(&str, &str)]) -> (String, String, bool) {
+        self.run_for(None, spans, extra_env)
+    }
+
+    fn run_for(
+        &self,
+        shell: Option<&str>,
+        spans: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> (String, String, bool) {
         for path in self.aux_files.values() {
             fs::write(path, "").expect("reset aux file");
         }
@@ -368,6 +377,9 @@ impl Harness {
         // short --help budget so the static resolve doesn't sit on fakes
         // that don't respond to --help.
         cmd.arg("--timeout-ms").arg("200");
+        if let Some(name) = shell {
+            cmd.arg("--shell").arg(name);
+        }
         for span in spans {
             cmd.arg(span);
         }
@@ -752,6 +764,63 @@ fn systemctl_option_values_from_the_cache_do_not_leak_unit_candidates() {
 }
 
 // === kill/pkill ===
+
+fn shell_values(harness: &Harness, shell: &str, spans: &[&str]) -> Vec<String> {
+    let (stdout, ..) = harness.run_for(Some(shell), spans, &[]);
+    stdout
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split('\t').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn the_builtin_kill_of_bash_and_zsh_has_its_own_flags_and_signals() {
+    let harness = Harness::new("dyn-kill-builtin");
+    seed_command(&harness, "kill", &[], &["--timeout", "-q"], &["-a", "-p"]);
+    for shell in ["bash", "zsh"] {
+        assert_eq!(shell_values(&harness, shell, &["kill", "-"]), [
+            "-s", "-n", "-l", "-L"
+        ]);
+        for flag in ["-s", "-n", "-l"] {
+            let signals = shell_values(&harness, shell, &["kill", flag, "TE"]);
+            assert_eq!(signals[0], "TERM", "{shell} {flag}");
+        }
+        let group = shell_values(&harness, shell, &["kill", "-S"]);
+        assert!(group.contains(&"-SIGTERM".to_owned()), "{group:?}");
+        assert!(group.contains(&"-STOP".to_owned()), "{group:?}");
+        assert!(!group.iter().any(|value| value == "-HUP"), "{group:?}");
+        assert_eq!(shell_values(&harness, shell, &["kill", "-TE"]), [
+            "-TERM", "-SIGTERM"
+        ]);
+        assert_eq!(shell_values(&harness, shell, &["kill", ""]), ["101", "202"]);
+        assert_eq!(
+            shell_values(&harness, shell, &["kill", "-s", "TERM", ""]),
+            ["101", "202"]
+        );
+    }
+}
+
+#[test]
+fn kill_signal_flag_values_are_signals_for_the_binary_but_not_nushell() {
+    let harness = Harness::new("dyn-kill-binary");
+    for flag in ["-s", "--signal"] {
+        let values = shell_values(&harness, "fish", &["kill", flag, "TE"]);
+        assert_eq!(values[0], "TERM", "{flag}");
+    }
+    let attached = shell_values(&harness, "fish", &["kill", "--signal=TE"]);
+    assert_eq!(attached[0], "--signal=TERM");
+    let (nushell, ..) = harness.run(&["kill", "-s", ""], &[]);
+    assert!(
+        !nushell.contains("TERM"),
+        "nushell's -s is a number, got {nushell}"
+    );
+    let (pids, ..) = harness.run(&["kill", ""], &[]);
+    assert_eq!(Harness::values(&parse_output(&pids).expect("pids")), [
+        "101", "202"
+    ]);
+}
 
 // === kubectl ===
 

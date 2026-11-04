@@ -202,7 +202,7 @@ with `null`.
 | `make` / `just` | targets and recipes |
 | `cargo` | workspace targets for `--bin`, `--example`, and related slots |
 | `zig` | build.zig steps |
-| `kill` / `pkill` | pid and command pairs |
+| `kill` / `pkill` | pid and command pairs, and signal names for `kill` |
 | cobra programs | the program's own `__complete` |
 | clap `CompleteEnv` programs | the program's own completer via `COMPLETE=fish` |
 

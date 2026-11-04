@@ -76,6 +76,9 @@ enum Cli {
         /// --help resolve timeout in milliseconds
         #[pound(long, value_name = "MS")]
         timeout_ms: Option<u64>,
+        /// the shell the answer is for
+        #[pound(long, default = { Shell::Nushell })]
+        shell:      Shell,
         #[pound(flatten)]
         line:       commands::complete::Line,
         /// the command line being completed
@@ -197,10 +200,11 @@ fn main() {
         Cli::Explain {
             dirs,
             timeout_ms: timeout_override,
+            shell,
             line,
             spans,
         } => {
-            if let Err(err) = commands::explain::run(dirs, timeout_override, line, spans) {
+            if let Err(err) = commands::explain::run(dirs, timeout_override, shell, line, spans) {
                 eprintln!("explain failed: {err}");
                 process::exit(1);
             }

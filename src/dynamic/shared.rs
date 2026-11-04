@@ -16,6 +16,7 @@ use crate::{
         CachedFlags,
         Slot,
     },
+    shell::Shell,
     subprocess::{
         self,
         Run,
@@ -36,6 +37,7 @@ pub struct DynCtx<'span> {
     pub explicit_cmd_path: Option<&'span Path>,
     pub slot:              Slot<'span>,
     pub flags:             CachedFlags<'span>,
+    pub shell:             Shell,
 }
 
 /// the words before the cursor, split into positionals and flags.
