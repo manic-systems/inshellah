@@ -785,8 +785,33 @@ fn the_builtin_kill_of_bash_and_zsh_has_its_own_flags_and_signals() {
         ]);
         for flag in ["-s", "-n", "-l"] {
             let signals = shell_values(&harness, shell, &["kill", flag, "TE"]);
-            assert_eq!(signals[0], "TERM", "{shell} {flag}");
+            let first = if shell == "zsh" && flag == "-n" {
+                "15"
+            } else {
+                "TERM"
+            };
+            assert_eq!(signals[0], first, "{shell} {flag}");
         }
+        assert_eq!(shell_values(&harness, shell, &["kill", "-s", "SIGTE"]), [
+            "SIGTERM"
+        ]);
+        assert_eq!(shell_values(&harness, shell, &["kill", "-sTE"]), ["-sTERM"]);
+        assert_eq!(shell_values(&harness, shell, &["kill", "-sSIGTE"]), [
+            "-sSIGTERM"
+        ]);
+        if shell == "zsh" {
+            let numbers = shell_values(&harness, shell, &["kill", "-n1"]);
+            assert_eq!(numbers.first().map(String::as_str), Some("-n1"));
+        }
+        if cfg!(target_os = "linux") {
+            let rt = shell_values(&harness, shell, &["kill", "-s", "RTMA"]);
+            assert!(rt.contains(&"RTMAX".to_owned()), "{shell} {rt:?}");
+        }
+        let after_dashes = shell_values(&harness, shell, &["kill", "--", "-"]);
+        assert!(
+            !after_dashes.iter().any(|value| value.starts_with("-s")),
+            "{after_dashes:?}"
+        );
         let group = shell_values(&harness, shell, &["kill", "-S"]);
         assert!(group.contains(&"-SIGTERM".to_owned()), "{group:?}");
         assert!(group.contains(&"-STOP".to_owned()), "{group:?}");
