@@ -197,6 +197,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "${1:-}" in
+  help)
+    printf 'See git help\n\nMain Porcelain Commands\n   stash                   Stash the changes in a dirty working directory away\n   status                  Show the working tree status\n\nExternal commands\n   frob\n'
+    ;;
   remote)
     printf 'origin\nupstream\n'
     ;;
@@ -874,6 +877,37 @@ fn git_top_level_includes_common_verbs() {
     let values = Harness::values(&cands);
     assert!(values.iter().any(|value| value == "remote"));
     assert!(values.iter().any(|value| value == "stash"));
+}
+
+#[test]
+fn git_top_level_verbs_take_their_descriptions_from_git_help() {
+    let harness = Harness::new("dyn-git-verb-descriptions");
+    let (stdout, ..) = harness.run(&["git", "st"], &[]);
+    let cands = parse_output(&stdout).expect("verbs");
+    let described: Vec<(String, String)> = cands
+        .iter()
+        .map(|cand| (cand.value.clone(), cand.description.clone()))
+        .collect();
+    assert!(
+        described.contains(&(
+            "stash".to_owned(),
+            "Stash the changes in a dirty working directory away".to_owned()
+        )),
+        "{described:?}"
+    );
+    assert!(
+        described.contains(&(
+            "status".to_owned(),
+            "Show the working tree status".to_owned()
+        )),
+        "{described:?}"
+    );
+    let (every, ..) = harness.run(&["git", ""], &[]);
+    let all = parse_output(&every).expect("all verbs");
+    assert!(
+        all.iter()
+            .any(|cand| cand.value == "worktree" && cand.description == "git subcommand")
+    );
 }
 
 #[test]

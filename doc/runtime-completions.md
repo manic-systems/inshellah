@@ -52,6 +52,9 @@ a subcommand typed in full without a trailing space, such as `git stash` or
 `systemctl status`, completes to itself and to any longer subcommands that
 share the prefix, so the shell finishes the word and adds the space.
 
+the top level verbs of `git` take their one line descriptions from `git help
+-a`, and keep a generic description for a verb that listing leaves out.
+
 live providers treat an attached value like a separate one. `journalctl
 --unit=dbus-b` lists units the way `-u dbus-b` does, and `git restore
 --source=ma` lists refs, each value keeping its `--unit=` lead.
