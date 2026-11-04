@@ -138,7 +138,7 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
         GitCompletion::RemoteBranches(remote) => git_remote_branches(&git, ctx, remote, prefix),
         GitCompletion::Branches => git_branches(&git, ctx, prefix),
         GitCompletion::Tags => git_tags(&git, ctx, prefix),
-        GitCompletion::Remotes => git_remotes(&git, ctx),
+        GitCompletion::Remotes | GitCompletion::Repository => git_remotes(&git, ctx),
         GitCompletion::Stashes => git_stashes(&git, ctx, prefix),
         GitCompletion::StatusPaths => git_status_paths(&git, ctx),
         GitCompletion::TrackedPaths => git_tracked_paths(&git, ctx),
@@ -164,7 +164,12 @@ pub(super) fn files(words: &Words, ctx: &DynCtx) -> Files {
             | GitCompletion::Submodules
             | GitCompletion::Worktrees,
         ) => Files::Replace,
-        Some(GitCompletion::Refs | GitCompletion::StatusPaths | GitCompletion::TrackedPaths)
+        Some(
+            GitCompletion::Refs
+            | GitCompletion::Repository
+            | GitCompletion::StatusPaths
+            | GitCompletion::TrackedPaths,
+        )
         | None => Files::Alongside,
     }
 }
@@ -181,6 +186,7 @@ enum GitCompletion<'span> {
     Branches,
     Tags,
     Remotes,
+    Repository,
     Stashes,
     StatusPaths,
     TrackedPaths,
@@ -208,7 +214,7 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         return Some(GitCompletion::Refs);
     }
     if sub == "push" && prev == "--repo" {
-        return Some(GitCompletion::Remotes);
+        return Some(GitCompletion::Repository);
     }
     if sub == "checkout" && ["-b", "-B", "--orphan"].contains(&prev) {
         return None;
@@ -235,6 +241,9 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         _ => None,
     };
     if let Some((values, description)) = nested {
+        if boundary {
+            return None;
+        }
         if args_after_sub == 0 {
             return Some(GitCompletion::Static {
                 values,
@@ -248,7 +257,7 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         "fetch" if words.has(&["--all"]) => None,
         "fetch" if words.has(&["-m", "--multiple"]) => Some(GitCompletion::Remotes),
         "fetch" | "push" | "pull" if args_after_sub == 0 && words.value(&["--repo"]).is_none() => {
-            Some(GitCompletion::Remotes)
+            Some(GitCompletion::Repository)
         },
         "push" if words.current().contains(':') => {
             let remote = words.value(&["--repo"]).unwrap_or_else(|| words.arg(1));

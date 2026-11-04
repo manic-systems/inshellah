@@ -36,6 +36,36 @@ their own flags and operands skipped. these are `nohup`, `env` (flags and
 that run no command (`command -v`, `chrt -p`, `taskset -p`, `ionice -p`) and
 `env -S`, whose argument is a command line in one word, are left alone.
 
+a flag value attached with `=` stays in the word, so `--output=pa` reaches
+inshellah whole. when the flag takes a path (a `FILE`, `PATH` or `DIR`
+placeholder), inshellah lists the matching files and directories itself, only the directories for a `DIR` or `DIRECTORY` placeholder, and
+keeps the `--output=` lead on every value so the shell can replace the word
+that was typed. directories end in `/`. a value given as a separate word,
+`--output pa`, is left to the shell's own file completion.
+
+an attached value that starts with `~` or `$` is not listed. no shell expands
+either one inside `--output=`, so a listed path would resolve against the
+working directory while the shell shows it as the home directory. the
+position is deferred to the shell instead.
+
+a subcommand typed in full without a trailing space, such as `git stash` or
+`systemctl status`, completes to itself and to any longer subcommands that
+share the prefix, so the shell finishes the word and adds the space.
+
+live providers treat an attached value like a separate one. `journalctl
+--unit=dbus-b` lists units the way `-u dbus-b` does, and `git restore
+--source=ma` lists refs, each value keeping its `--unit=` lead.
+
+`nix` says itself whether a position takes paths, so `nix flake` and `nix
+store` answer with the subcommands alone, while a position that takes
+installables keeps the shell's files beside nix's candidates.
+
+the value of a directory flag, such as `git -C`, `git --git-dir`, `make -C`,
+`just -d` and `npm --prefix`, is answered with only the directories, so
+the shell does not add plain files beside them. when no directory matches, the
+position is deferred to the shell. a typed `~` is expanded for a separate value
+and left alone for an attached one.
+
 ## setup
 
 ```nu

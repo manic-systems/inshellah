@@ -4,13 +4,16 @@
 
 use std::{
     cmp::Reverse,
+    env,
     fmt::{
         self,
         Display,
         Formatter,
         Write as _,
     },
+    fs,
     iter,
+    path::PathBuf,
 };
 
 use crate::{
@@ -298,11 +301,71 @@ pub fn choice_candidates(
     scored.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
+/// the files and directories a typed path leads to, directories ending in `/`.
+///
+/// each value is led by `prefix` (`--flag=` when attached), since shells that
+/// do not split at the `=` replace the whole word.
+pub fn path_candidates(typed: &str, prefix: &str, cfg: &Config) -> Vec<Candidate> {
+    list_paths(typed, prefix, cfg.max_completions, false)
+}
+
+/// like `path_candidates` but only the directories.
+pub fn attached_directory_candidates(typed: &str, prefix: &str, cfg: &Config) -> Vec<Candidate> {
+    list_paths(typed, prefix, cfg.max_completions, true)
+}
+
+/// like `path_candidates` but only the directories, up to `limit` of them when
+/// it is not zero.
+pub fn directory_candidates(typed: &str, limit: usize) -> Vec<Candidate> {
+    list_paths(typed, "", limit, true)
+}
+
+fn list_paths(typed: &str, prefix: &str, limit: usize, dirs_only: bool) -> Vec<Candidate> {
+    let split_at = typed.rfind('/').map_or(0, |slash| slash + 1);
+    let (dir_part, name_prefix) = typed.split_at(split_at);
+    let dir = match (dir_part, typed.strip_prefix("~/")) {
+        ("", _) => PathBuf::from("."),
+        (_, Some(_)) => {
+            let Some(home) = env::var_os("HOME") else {
+                return Vec::new();
+            };
+            PathBuf::from(home).join(dir_part.trim_start_matches("~/"))
+        },
+        _ => PathBuf::from(dir_part),
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, bool)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let hidden = name.starts_with('.') && !name_prefix.starts_with('.');
+            let is_dir = entry.path().is_dir();
+            (name.starts_with(name_prefix) && !hidden && (is_dir || !dirs_only))
+                .then_some((name, is_dir))
+        })
+        .collect();
+    found.sort();
+    if limit > 0 {
+        found.truncate(limit);
+    }
+    found
+        .into_iter()
+        .map(|(name, is_dir)| {
+            let slash = if is_dir { "/" } else { "" };
+            let description = if is_dir { "directory" } else { "file" };
+            Candidate::new(format!("{prefix}{dir_part}{name}{slash}"), description)
+        })
+        .collect()
+}
+
 /// subcommands emit only when `matched_depth >= resolve_depth`.
 ///
 /// i.e. the match is a full prefix of what was typed. typing past the deepest
 /// cached command stays silent so nushell's dynamic completer can take over. a
-/// token equal to a candidate is dropped so it isn't echoed back.
+/// token equal to a candidate is kept, so a fully typed subcommand still
+/// completes and gets its trailing space.
 pub fn generate_candidates(
     result: &ManpageResult,
     matched_depth: usize,
@@ -331,13 +394,6 @@ pub fn generate_candidates(
         // slot.
         let choices = subs.iter().chain(result.positional_choices.iter());
         for sc in choices {
-            // exact match on the name or any alias hands off to a dynamic
-            // completer, mirroring the switch path.
-            if !last_token.is_empty()
-                && (last_token == sc.name || sc.aliases.iter().any(|alias| alias == last_token))
-            {
-                continue;
-            }
             // emit the best-scoring form (name or alias) as the value; the rest
             // become `(aka ...)`, like a switch's short/long pair.
             let mut best: Option<(i32, &str)> = None;
@@ -425,6 +481,8 @@ pub fn generate_candidates(
 
 #[cfg(test)]
 mod tests {
+    use std::process;
+
     use super::*;
 
     #[test]
@@ -437,6 +495,23 @@ mod tests {
         assert_eq!(fuzzy_score("bl", "branch-list"), 100);
         assert_eq!(fuzzy_score("bl", "blacklist"), 922);
         assert_eq!(fuzzy_score("bl", "table"), 40);
+    }
+
+    #[test]
+    fn path_candidates_keep_the_prefix_and_mark_directories() {
+        let root = env::temp_dir().join(format!("inshellah-paths-{}", process::id()));
+        fs::create_dir_all(root.join("mydir")).expect("dir");
+        fs::write(root.join("myfile"), "").expect("file");
+        fs::write(root.join(".mine"), "").expect("hidden");
+        fs::write(root.join("other"), "").expect("other");
+        let typed = format!("{}/my", root.display());
+        let values: Vec<String> = path_candidates(&typed, "--f=", &Config::default())
+            .into_iter()
+            .map(|candidate| candidate.value)
+            .collect();
+        drop(fs::remove_dir_all(&root));
+        let at = |name: &str| format!("--f={}/{name}", root.display());
+        assert_eq!(values, vec![at("mydir/"), at("myfile")]);
     }
 
     #[test]
@@ -477,11 +552,17 @@ mod tests {
     }
 
     #[test]
-    fn exact_token_is_dropped_to_unmask_downstream() {
-        let result = result_with_subs(&["status"]);
+    fn exact_token_is_kept_beside_longer_matches() {
+        let result = result_with_subs(&["stash", "status", "stage"]);
         let cfg = Config::default();
-        let out = generate_candidates(&result, 1, 1, "status", &[], false, &cfg);
-        assert!(out.is_empty());
+        let out = generate_candidates(&result, 1, 1, "stash", &[], false, &cfg);
+        let values: Vec<&str> = out
+            .iter()
+            .map(|candidate| candidate.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["stash"]);
+        let partial = generate_candidates(&result, 1, 1, "sta", &[], false, &cfg);
+        assert_eq!(partial.len(), 3);
     }
 
     fn result_with_flags(entries: Vec<ManpageEntry>) -> ManpageResult {
