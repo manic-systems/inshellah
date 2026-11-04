@@ -39,11 +39,28 @@ end
 # completions back for the length of one lookup
 function __inshellah_fish_own -a cmd
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
+    set -l extras (__inshellah_extras $cmd)
     complete -e -c $cmd
-    printf '%s\n' $$orig | source
+    printf '%s\n' $$orig $extras | source
     complete -C "$(commandline -cp)"
     complete -e -c $cmd
     __inshellah_install $cmd
+    set -q extras[1]; and printf '%s\n' $extras | source
+end
+
+# fish lists a command's completions newest first, and -k cares about the
+# order they were registered in
+function __inshellah_snapshot -a cmd
+    set -l now (complete -c $cmd)
+    set -q now[1]; and printf '%s\n' $now[-1..1]
+end
+
+function __inshellah_extras -a cmd
+    set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
+    for line in (__inshellah_snapshot $cmd)
+        string match -q -- '*(__inshellah_complete)*' $line; and continue
+        contains -- $line $$orig; or printf '%s\n' $line
+    end
 end
 
 function __inshellah_install -a cmd
@@ -55,7 +72,7 @@ end
 function __inshellah_wraps
     for line in $argv
         string match -rq -- '__fish_complete_\w*subcommand|__fish_complete_command' $line
-        and not string match -rq -- 'using_command|seen_subcommand_from' $line
+        and not string match -rq -- 'using_command|seen_subcommand_from|number_of_cmd_args|\btest\b' $line
         and return 0
     end
     return 1
@@ -73,12 +90,15 @@ function __inshellah_apply -a cmd
         and not builtin -q -- $cmd
         and not functions -q -- $cmd
         and not __inshellah_wraps $$orig
+        set -l extras (__inshellah_extras $cmd)
         complete -e -c $cmd
         __inshellah_install $cmd
+        set -q extras[1]; and printf '%s\n' $extras | source
         set -ga __inshellah_taken $cmd
     else if not __inshellah_takeover; and set -q at[1]
+        set -l extras (__inshellah_extras $cmd)
         complete -e -c $cmd
-        printf '%s\n' $$orig | source
+        printf '%s\n' $$orig $extras | source
         set -e __inshellah_taken[$at]
     end
 end
@@ -110,14 +130,15 @@ end
 function __inshellah_load -a cmd
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
     if contains -- $cmd $__inshellah_loaded
+        set -l extras (__inshellah_extras $cmd)
         complete -e -c $cmd
-        printf '%s\n' $$orig | source
+        printf '%s\n' $$orig $extras | source
         set -l at (contains -i -- $cmd $__inshellah_taken)
         set -q at[1]; and set -e __inshellah_taken[$at]
     else
         set -ga __inshellah_loaded $cmd
         __inshellah_source_native $cmd
-        set -g $orig (complete -c $cmd)
+        set -g $orig (__inshellah_snapshot $cmd)
     end
     if test (count $$orig) -gt 0
         __inshellah_apply $cmd
@@ -154,7 +175,8 @@ function __inshellah_place
             break
         end
     end
-    set -g fish_complete_path $before $__inshellah_stub_dir $after
+    set -l path $before $__inshellah_stub_dir $after
+    test "$path" = "$fish_complete_path"; or set -g fish_complete_path $path
 end
 
 set -g __inshellah_stub_dir (command inshellah fish-stubs 2>/dev/null)

@@ -61,7 +61,7 @@ systemd and the rest, set `INSHELLAH_TAKEOVER=1` before the hook loads. takeover
 |---|---|---|
 | bash | sits on `complete -D` and lets bash-completion's loader try first | answers first, falls back to bash-completion's completer when it comes up empty, and clears out any specs bash-completion loads later at the next prompt. anything bash-completion registers before the first prompt still wins |
 | zsh | hooks into `-default-` | also hooks into `-first-` and cuts off other completers once it has an answer. a `-first-` completer you had before is kept and called whenever inshellah steps aside, including while takeover is off |
-| fish | answers only for commands fish has no completion for | answers first, falls back to fish's own completion for that command when it comes up empty, and replaces completions your config registers at runtime. fish's builtins, functions and wrappers like `sudo`, `env` and `xargs` keep fish's own completion, which hands the wrapped command back to inshellah |
+| fish | answers only for commands fish has no completion for | answers first, falls back to fish's own completion for that command when it comes up empty, and replaces completions your config registers at runtime. fish's builtins, functions and wrappers like `sudo`, `env` and `xargs` keep fish's own completion, which hands the wrapped command back to inshellah. a command whose first argument is its own, like `ssh` with its host, is not a wrapper and gets taken over. completions you register with `complete -c` after a command loaded survive takeover being turned on or off |
 
 in zsh, the hook checks its registration at every prompt and again as you type, so a `compinit` that a plugin manager defers until after the first prompt does not lose it. pressing tab before any key or prompt follows that deferred `compinit` still reaches the stock completers.
 
@@ -93,7 +93,11 @@ such as `~/.config/fish/completions/CMD.fish` wins even under takeover. a stub
 loads fish's own completion for its command and, unless takeover is turned on,
 steps aside when there is one or your config registered one with `complete -c`.
 turning takeover on or off puts fish's completions away or back for commands
-that already loaded.
+that already loaded, in the order fish had them, which matters for `complete -k`.
+sourcing your config again leaves `fish_complete_path` alone when the stub dir is
+already in place, so completions that fish loaded stay loaded. a command that
+was typed before its binary appeared on `PATH` can stay without completions for
+a few seconds, since fish remembers that it found no completion file.
 
 ## the line protocol
 

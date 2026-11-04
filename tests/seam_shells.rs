@@ -35,7 +35,7 @@ impl Fixture {
         let cache = dir.path().join("inshellah");
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).expect("bin dir");
-        for tool in ["demotool", "twotool", "fwrap"] {
+        for tool in ["demotool", "twotool", "fwrap", "ordtool"] {
             let stub = bin.join(tool);
             fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub executable");
             fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -297,6 +297,24 @@ set -g INSHELLAH_TAKEOVER " TRUE "
 show "trimmed and case folded" "twotool al"
 set -e INSHELLAH_TAKEOVER
 show "unset is off" "twotool "
+complete -c ordtool -k -f -a zz3
+complete -c ordtool -k -f -a aa1
+complete -c ordtool -k -f -a mm2
+show "order vanilla" "ordtool "
+set -g INSHELLAH_TAKEOVER 1
+show "order under takeover" "ordtool "
+complete -c ordtool -k -f -a RT2
+show "runtime spec after defer" "ordtool "
+set -g INSHELLAH_TAKEOVER 0
+show "runtime spec after flip" "ordtool "
+set -g INSHELLAH_TAKEOVER 1
+set -l before (complete -c twotool | count)
+source $SHIM/inshellah.fish
+show "resourced keeps fish own" "twotool alpha run "
+echo "resourced keeps completions =>" (test (complete -c twotool | count) -eq $before; and echo same; or echo changed)
+echo "ssh like =>" (__inshellah_wraps "complete -c ssh -n 'test (__fish_number_of_cmd_args_wo_opts) -ge 2' -xa '(__fish_complete_subcommand --fcs-skip=2)'"; and echo wraps; or echo plain)
+echo "xargs like =>" (__inshellah_wraps "complete --exclusive xargs -a '(__fish_complete_subcommand)'"; and echo wraps; or echo plain)
+echo "sudo like =>" (__inshellah_wraps "complete --exclusive sudo -a '(__fish_complete_sudo_subcommand)' -n 'not __fish_seen_argument -s e'"; and echo wraps; or echo plain)
 "#;
 
 const FISH_USER_DIR: &str = r#"
@@ -331,6 +349,15 @@ takeover defers to fish => nativechoice
 zero is off => nativechoice
 trimmed and case folded => alpha\tfirst
 unset is off => nativechoice
+order vanilla => mm2|aa1|zz3
+order under takeover => mm2|aa1|zz3
+runtime spec after defer => RT2|mm2|aa1|zz3
+runtime spec after flip => RT2|mm2|aa1|zz3
+resourced keeps fish own => nativechoice
+resourced keeps completions => same
+ssh like => plain
+xargs like => wraps
+sudo like => wraps
 ",
     );
     let user = fixture
