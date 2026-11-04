@@ -175,17 +175,15 @@ fn value_flag<'words>(words: &'words Words, ctx: &'words DynCtx) -> Option<&'wor
 
 fn accounts(db: &str, desc: &str, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let out = run(&["getent".into(), db.into()], ctx)?;
-    let found: Vec<Candidate> = out
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split(':');
-            let name = fields.next()?;
-            let id: u32 = fields.nth(1)?.parse().ok()?;
-            (id == 0 || (1000..u32::from(u16::MAX - 1)).contains(&id))
-                .then(|| Candidate::new(name, desc))
-        })
-        .collect();
+    let found = account_names(&out, desc);
     (!found.is_empty()).then_some(found)
+}
+
+fn account_names(out: &str, desc: &str) -> Vec<Candidate> {
+    out.lines()
+        .filter_map(|line| line.split(':').next().filter(|name| !name.is_empty()))
+        .map(|name| Candidate::new(name, desc))
+        .collect()
 }
 
 pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
@@ -293,6 +291,16 @@ mod tests {
 
     fn values(found: &[Candidate]) -> Vec<&str> {
         found.iter().map(|cand| cand.value.as_str()).collect()
+    }
+
+    #[test]
+    fn every_account_is_offered_whatever_its_id() {
+        let out = "root:x:0:0::/root:/bin/sh\nnobody:x:65534:65534::/:/bin/false\nmessagebus:x:4:\
+                   4::/:\nbolt:x:1000:100::/h:/bin/sh\n:x:5:5\n";
+        let found = account_names(out, "user");
+        assert_eq!(values(&found), ["root", "nobody", "messagebus", "bolt"]);
+        let groups = account_names("wheel:x:1:bolt\nusers:x:100:\n", "group");
+        assert_eq!(values(&groups), ["wheel", "users"]);
     }
 
     #[test]

@@ -43,7 +43,7 @@ inshellah index /usr --shell bash,zsh
 in bash, the hook re-claims `complete -D` when the first prompt draws, so load
 order relative to bash-completion does not matter. wrapped commands like
 `sudo` and `nohup` that bash-completion unwraps still get handed through to
-inshellah. the catch-all spec also carries `-o bashdefault`, so a line the hook defers still gets bash's own command, variable and substitution completion, and under takeover the borrowed bash-completion completer keeps the `-o nospace`, `filenames`, `noquote` and `nosort` options of its spec so a finished word gets one space, not two.
+inshellah. under takeover, bash-completion's `_comp_command` and `_comp_root_command`, which it registers up front for `nohup`, `time`, `nice`, `xargs` and the like, ask inshellah about the whole line first and only fall back to the inner command's bash-completion spec when inshellah defers. with takeover off they are left alone. the catch-all spec also carries `-o bashdefault`, so a line the hook defers still gets bash's own command, variable and substitution completion, and under takeover the borrowed bash-completion completer keeps the `-o nospace`, `filenames`, `noquote` and `nosort` options of its spec so a finished word gets one space, not two.
 
 bash has to be 4.1 or newer. macos still ships 3.2 at `/bin/bash`, so grab a
 newer bash from nix or homebrew there. on older bash versions the hook stays
@@ -80,7 +80,7 @@ table follows the os inshellah was built for, with `STKFLT`, `PWR` and the
 `RTMIN` to `RTMAX` range on linux, and `EMT` and `INFO` on macos.
 the binary gets signal names after `-s`, `--signal`, `-l` and `--list`, and
 pkill gets them after `--signal` and `-SIG` words as well as user and group
-names after `-u`, `-U`, `-G` and their long forms. fish keeps its own `kill`, a
+names after `-u`, `-U`, `-G` and their long forms, every user and group `getent` lists whatever its id, as bash-completion does. fish keeps its own `kill`, a
 function that hands the work to the binary, so fish lists pids after `-l` as it
 does without inshellah, while nushell's own `kill` takes a signal number and keeps getting
 only pids. reserved words that start a command, like `time`,
