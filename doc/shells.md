@@ -74,8 +74,9 @@ takeover, or when bash-completion has no spec for it, inshellah's own `kill`
 provider answers instead. that provider offers the builtin's own flags
 (`-s`, `-n`, `-l`, and `-L` in bash) and not the binary's, completes signal
 names after them and for `-SIGTERM` style words, and lists pids otherwise.
-fish and the binary get signal names after `-s`, `--signal`, `-l` and
-`--list`, while nushell's own `kill` takes a signal number and keeps getting
+the binary gets signal names after `-s`, `--signal`, `-l` and `--list`. fish
+keeps its own `kill`, a function that hands the work to the binary, so fish
+lists pids after `-l` as it does without inshellah, while nushell's own `kill` takes a signal number and keeps getting
 only pids. reserved words that start a command, like `time`,
 `if`, `while`, `!` and `{`, never stop inshellah from completing the command
 after them, and neither does a `$(` or backtick substitution opened inside
@@ -107,7 +108,10 @@ fish does not have a single catch-all completer hook. instead it autoloads
 work with that, the hook runs `inshellah fish-stubs`, which drops a one-line
 stub for every command on `PATH` into the `fish` directory inside the user
 cache and prints that directory path. the hook re-runs it whenever `PATH`
-changes, so entering a `nix shell` picks up the new commands automatically.
+changes, so entering a `nix shell` picks up the new commands automatically. it
+also checks the modification times of the `PATH` dirs before each prompt, which
+is how a binary installed into a dir already on `PATH`, with `nix profile
+install` or `cargo install`, gets completions at the next prompt.
 the stub dir goes ahead of the vendor and shipped completion dirs and behind
 any dir you put first on `fish_complete_path`, so a completion file of your own
 such as `~/.config/fish/completions/CMD.fish` wins even under takeover. a stub
@@ -116,9 +120,8 @@ steps aside when there is one or your config registered one with `complete -c`.
 turning takeover on or off puts fish's completions away or back for commands
 that already loaded, in the order fish had them, which matters for `complete -k`.
 sourcing your config again leaves `fish_complete_path` alone when the stub dir is
-already in place, so completions that fish loaded stay loaded. a command that
-was typed before its binary appeared on `PATH` can stay without completions for
-a few seconds, since fish remembers that it found no completion file.
+already in place, so completions that fish loaded stay loaded. a load that ctrl-c cuts short
+is finished right after, so the command does not stay on fish's own completions.
 
 ## the line protocol
 

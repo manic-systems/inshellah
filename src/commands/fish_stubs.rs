@@ -20,11 +20,12 @@ use super::common::Dirs;
 
 /// bumped whenever `stub_for` changes, so stubs written by an older inshellah
 /// are replaced rather than kept because they exist.
-const STUB_VERSION: &str = "2";
+const STUB_VERSION: &str = "3";
 const VERSION_FILE: &str = ".version";
 
 /// fish has no catch-all completer, so every command on PATH gets a stub that
-/// fish autoloads by name. prints the stub dir. stubs are best effort, a full
+/// fish autoloads by name. prints the stub dir, then the
+/// names of the stubs it just wrote. stubs are best effort, a full
 /// disk or another shell racing the same upgrade still leaves the ones that
 /// exist usable.
 ///
@@ -39,6 +40,7 @@ pub fn run(dirs: Dirs) -> io::Result<()> {
         drop(write_file(&version_file, STUB_VERSION));
     }
     let path = env::var_os("PATH").unwrap_or_default();
+    let mut fresh = Vec::new();
     for bin_dir in env::split_paths(&path).filter(|bin_dir| bin_dir.is_absolute()) {
         let Ok(entries) = fs::read_dir(&bin_dir) else {
             continue;
@@ -52,10 +54,17 @@ pub fn run(dirs: Dirs) -> io::Result<()> {
             if stub.exists() || !is_executable(&entry.path()) {
                 continue;
             }
-            drop(write_file(&stub, &stub_for(name)));
+            if write_file(&stub, &stub_for(name)).is_ok() {
+                fresh.push(name.to_owned());
+            }
         }
     }
-    writeln!(io::stdout().lock(), "{}", dir.display())
+    let mut out = io::stdout().lock();
+    writeln!(out, "{}", dir.display())?;
+    for name in fresh {
+        writeln!(out, "{name}")?;
+    }
+    Ok(())
 }
 
 fn remove_stubs(dir: &Path) {

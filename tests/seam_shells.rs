@@ -36,7 +36,8 @@ impl Fixture {
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).expect("bin dir");
         for tool in [
-            "demotool", "twotool", "fwrap", "ordtool", "dirtool", "widetool",
+            "demotool", "twotool", "fwrap", "ordtool", "dirtool", "widetool", "bigtool",
+            "pendtool",
         ] {
             let stub = bin.join(tool);
             fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub executable");
@@ -399,6 +400,26 @@ echo "resourced keeps completions =>" (test (complete -c twotool | count) -eq $b
 echo "ssh like =>" (__inshellah_wraps "complete -c ssh -n 'test (__fish_number_of_cmd_args_wo_opts) -ge 2' -xa '(__fish_complete_subcommand --fcs-skip=2)'"; and echo wraps; or echo plain)
 echo "xargs like =>" (__inshellah_wraps "complete --exclusive xargs -a '(__fish_complete_subcommand)'"; and echo wraps; or echo plain)
 echo "sudo like =>" (__inshellah_wraps "complete --exclusive sudo -a '(__fish_complete_sudo_subcommand)' -n 'not __fish_seen_argument -s e'"; and echo wraps; or echo plain)
+for i in (seq 3000)
+    complete -c bigtool -l opt$i
+end
+set -g INSHELLAH_TAKEOVER 1
+set -l began (date +%s%N)
+complete -C "bigtool --opt1" >/dev/null
+set -l took (math "("(date +%s%N)" - $began)/1000000")
+echo "big first load =>" (test $took -lt 3000; and echo fast; or echo slow $took)
+echo "big taken =>" (contains bigtool $__inshellah_taken; and echo yes; or echo no)
+complete -c pendtool -f -a mine
+set -g __inshellah_pre_pendtool (__inshellah_snapshot pendtool)
+set -g __inshellah_pending pendtool
+complete -c pendtool -f -a half
+__inshellah_resume
+echo "interrupted load =>" (contains pendtool $__inshellah_taken; and echo taken; or echo lost) (string match -q '*half*' (complete -c pendtool); and echo stale; or echo clean) (count $__inshellah_pending)
+set -l late $PATH[1]/latetool
+printf '#!/bin/sh\n' > $late
+chmod +x $late
+__inshellah_prompt
+echo "late binary =>" (contains latetool $__inshellah_loaded; and echo loaded; or echo missed)
 "#;
 
 const FISH_USER_DIR: &str = r#"
@@ -442,6 +463,10 @@ resourced keeps completions => same
 ssh like => plain
 xargs like => wraps
 sudo like => wraps
+big first load => fast
+big taken => yes
+interrupted load => taken clean 0
+late binary => loaded
 ",
     );
     let user = fixture

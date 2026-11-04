@@ -57,9 +57,20 @@ end
 
 function __inshellah_extras -a cmd
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
-    for line in (__inshellah_snapshot $cmd)
-        string match -q -- '*(__inshellah_complete)*' $line; and continue
-        contains -- $line $$orig; or printf '%s\n' $line
+    set -l kept $$orig
+    set -l left (count $kept)
+    set -l now (__inshellah_snapshot $cmd | string match -v -- '*(__inshellah_complete)*')
+    if test (count $now) -ge $left; and begin; test $left -eq 0; or test "$now[1..$left]" = "$kept"; end
+        set -q now[(math $left + 1)]; and printf '%s\n' $now[(math $left + 1)..-1]
+        return
+    end
+    set -l at 1
+    for line in $now
+        if test $at -le $left; and test "$line" = "$kept[$at]"
+            set at (math $at + 1)
+        else
+            printf '%s\n' $line
+        end
     end
 end
 
@@ -127,8 +138,9 @@ end
 # a command without any completion gets the stub's. changing fish_complete_path
 # makes fish forget what every stub registered, and the stub then runs again,
 # so a second run puts the remembered completions back before applying takeover.
-function __inshellah_load -a cmd
+function __inshellah_load -a cmd adopt
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
+    set -l pre __inshellah_pre_(string escape --style=var -- $cmd)
     if contains -- $cmd $__inshellah_loaded
         set -l extras (__inshellah_extras $cmd)
         complete -e -c $cmd
@@ -136,8 +148,14 @@ function __inshellah_load -a cmd
         set -l at (contains -i -- $cmd $__inshellah_taken)
         set -q at[1]; and set -e __inshellah_taken[$at]
     else
-        set -ga __inshellah_loaded $cmd
-        __inshellah_source_native $cmd
+        if contains -- $cmd $__inshellah_pending
+            complete -e -c $cmd
+            printf '%s\n' $$pre | source
+        else
+            set -ga __inshellah_pending $cmd
+            set -g $pre (__inshellah_snapshot $cmd)
+        end
+        test "$adopt" = adopt; or __inshellah_source_native $cmd
         set -g $orig (__inshellah_snapshot $cmd)
     end
     if test (count $$orig) -gt 0
@@ -145,10 +163,58 @@ function __inshellah_load -a cmd
     else
         __inshellah_install $cmd
     end
+    contains -- $cmd $__inshellah_loaded; or set -ga __inshellah_loaded $cmd
+    set -l pending (contains -i -- $cmd $__inshellah_pending)
+    set -q pending[1]; and set -e __inshellah_pending[$pending]
+    set -e $pre
+end
+
+function __inshellah_path_stamp
+    path mtime -- $PATH | string join ,
+end
+
+# a dir changed within the last second or two can change again without its
+# mtime moving, so it is not recorded and the next prompt looks again
+function __inshellah_path_mark
+    set -g __inshellah_path_seen (__inshellah_path_stamp)
+    for age in (path mtime --relative -- $PATH)
+        test $age -lt 2; and set -g __inshellah_path_seen
+    end
+    true
+end
+
+# fish forgets a name it found no completion file for until its autoload cache
+# expires, so new commands are loaded by hand, or fish is made to forget when
+# there are too many for that
+function __inshellah_refresh
+    set -l out (command inshellah fish-stubs 2>/dev/null)
+    __inshellah_path_mark
+    set -q out[2]; or return
+    if test (count $out) -gt 17
+        set -g fish_complete_path $fish_complete_path
+        return
+    end
+    for name in $out[2..-1]
+        set -l have (complete -c $name)
+        if set -q have[1]
+            __inshellah_load $name adopt
+        else
+            __inshellah_load $name
+        end
+    end
 end
 
 function __inshellah_stubs --on-variable PATH
-    command inshellah fish-stubs >/dev/null 2>&1
+    __inshellah_refresh
+end
+
+# runs before each prompt, so it picks up a command installed into a dir that
+# was already on PATH and finishes a load that ctrl-c cut short
+function __inshellah_prompt --on-event fish_prompt
+    for cmd in $__inshellah_pending
+        __inshellah_load $cmd
+    end
+    test "$(__inshellah_path_stamp)" = "$__inshellah_path_seen"; or __inshellah_refresh
 end
 
 function __inshellah_retake --on-variable INSHELLAH_TAKEOVER
@@ -179,5 +245,13 @@ function __inshellah_place
     test "$path" = "$fish_complete_path"; or set -g fish_complete_path $path
 end
 
-set -g __inshellah_stub_dir (command inshellah fish-stubs 2>/dev/null)
+set -l out (command inshellah fish-stubs 2>/dev/null)
+and set -g __inshellah_stub_dir $out[1]
+and __inshellah_path_mark
 and __inshellah_place
+
+function __inshellah_resume --on-signal SIGINT
+    for cmd in $__inshellah_pending
+        __inshellah_load $cmd
+    end
+end
