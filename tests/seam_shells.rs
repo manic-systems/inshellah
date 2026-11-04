@@ -192,13 +192,13 @@ compadd() {
 _description() { eval "$3=()" }
 _files() { print -rn -- ' +files' }
 _default() { print -rn -- 'default' }
+_prev() { print -rn -- 'prev' }
 comp() {
     compstate[context]=command
     words=("${(@z)1}")
     [[ $1 == *' ' ]] && words+=('')
     CURRENT=$#words
     PREFIX=$words[-1]
-    unset INSHELLAH_TAKEOVER
     print -rn -- "$1 => "
     _inshellah
     print
@@ -213,6 +213,10 @@ comp 'demotool alpha run '
 comp 'pwd -'
 INSHELLAH_TAKEOVER=1 service=-first- comp 'demotool alpha run '
 service=-first- comp 'demotool al'
+INSHELLAH_TAKEOVER=0 service=-first- comp 'demotool al'
+INSHELLAH_TAKEOVER=" On " service=-first- comp 'demotool al'
+INSHELLAH_TAKEOVER=on _inshellah_prev_first=_prev service=-first- comp 'demotool alpha run '
+_inshellah_prev_first=_prev service=-first- comp 'demotool al'
 "#;
 
 #[test]
@@ -234,7 +238,11 @@ demotool --color always  => alpha|beta|has space {alpha      -- first|beta      
 demotool alpha run  => default
 pwd - => default
 demotool alpha run  => 
+demotool al => 
+demotool al => 
 demotool al => alpha {alpha  -- first}
+demotool alpha run  => prev
+demotool al => prev
 ",
     );
 }

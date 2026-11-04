@@ -27,7 +27,7 @@ shown above.
 
 the takeover variable gets checked when you press tab, and bash and fish also
 check it when the hook first loads. if you flip it later in a running shell,
-fish notices right away and bash catches up at the next prompt.
+fish and zsh notice right away and bash catches up at the next prompt.
 
 if you build an index by hand, pass `--shell` with the shells you want it to
 serve. without it, `index` assumes nushell alone and runs `nu` to find out
@@ -52,12 +52,12 @@ out of the box, inshellah stays in the background and only steps in when the
 shell has no completion of its own for a command, since hand-written
 bash-completion, zsh and fish completions usually beat scraped ones. if you
 want inshellah to answer first so you get its live providers for git, nix,
-systemd and the rest, set `INSHELLAH_TAKEOVER=1` before the hook loads.
+systemd and the rest, set `INSHELLAH_TAKEOVER=1` before the hook loads. takeover is on only for `1`, `true`, `yes` or `on`, in any case and ignoring surrounding whitespace, and anything else leaves it off.
 
 | shell | fallback | takeover |
 |---|---|---|
 | bash | sits on `complete -D` and lets bash-completion's loader try first | answers first, falls back to bash-completion's completer when it comes up empty, and clears out any specs bash-completion loads later at the next prompt. anything bash-completion registers before the first prompt still wins |
-| zsh | hooks into `-default-` | also hooks into `-first-` and cuts off other completers once it has an answer |
+| zsh | hooks into `-default-` | also hooks into `-first-` and cuts off other completers once it has an answer. a `-first-` completer you had before is kept and called whenever inshellah steps aside, including while takeover is off |
 | fish | puts its stubs after fish's own completion dirs | puts its stubs in front and overrides completions registered at runtime by your config, while leaving fish's builtins alone |
 
 whenever inshellah comes up empty for a cursor position, the shell drops back

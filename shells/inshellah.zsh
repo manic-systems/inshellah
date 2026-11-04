@@ -1,10 +1,24 @@
 # inshellah completions for zsh. load with
 #   eval "$(inshellah init zsh)"
 
+_inshellah_takeover() {
+    setopt localoptions extendedglob
+    [[ ${(L)INSHELLAH_TAKEOVER-} == [[:space:]]#(1|true|yes|on)[[:space:]]# ]]
+}
+
+_inshellah_pass() {
+    [[ -n ${_inshellah_prev_first-} ]] || return 1
+    unset _compskip
+    $_inshellah_prev_first "$@"
+}
+
 _inshellah() {
     [[ $compstate[context] == command ]] && ((CURRENT > 1)) || return 1
     local first=
-    [[ $service == -first- ]] && first=1
+    if [[ $service == -first- ]]; then
+        _inshellah_takeover || { _inshellah_pass "$@"; return }
+        first=1
+    fi
     local cmd=${(Q)words[1]}
     local -a reply=(defer)
     if ! (($+builtins[$cmd] || $+functions[$cmd] || ${reswords[(I)$cmd]})); then
@@ -12,7 +26,7 @@ _inshellah() {
     fi
     local mode=${reply[1]:-defer}
     if [[ $mode == defer ]]; then
-        [[ -n $first ]] && return 1
+        [[ -n $first ]] && { _inshellah_pass "$@"; return }
         _default "$@"
         return
     fi
@@ -40,7 +54,7 @@ _inshellah() {
     if [[ $mode == values+files ]]; then
         _files && ret=0
     elif ((ret && $#values)); then
-        [[ -n $first ]] && { unset _compskip; return 1 }
+        [[ -n $first ]] && { _inshellah_pass "$@"; return }
         _default "$@"
         return
     fi
@@ -53,7 +67,8 @@ _inshellah() {
 _inshellah_register() {
     (($+functions[compdef])) || return 0
     [[ $_comps[-default-] == _inshellah ]] || compdef _inshellah -default-
-    if [[ -n ${INSHELLAH_TAKEOVER-} && $_comps[-first-] != _inshellah ]]; then
+    if [[ $_comps[-first-] != _inshellah ]]; then
+        _inshellah_prev_first=$_comps[-first-]
         compdef _inshellah -first-
     fi
 }
