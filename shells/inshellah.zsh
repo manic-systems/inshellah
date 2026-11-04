@@ -43,9 +43,11 @@ _inshellah() {
     _description -V inshellah expl inshellah
     local ret=1
     if [[ -n ${(j::)descs} ]]; then
-        local i
+        local i line
         for ((i = 1; i <= $#values; i++)); do
-            displays+=("${(r:width:)values[i]}  -- $descs[i]")
+            line="${(r:width:)values[i]}  -- $descs[i]"
+            ((COLUMNS > 8 && ${#line} >= COLUMNS)) && line="${line[1,COLUMNS-4]}..."
+            displays+=("$line")
         done
         compadd "${expl[@]}" -l -d displays -a values && ret=0
     else

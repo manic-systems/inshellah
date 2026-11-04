@@ -60,6 +60,8 @@ systemd and the rest, set `INSHELLAH_TAKEOVER=1` before the hook loads. takeover
 | zsh | hooks into `-default-` | also hooks into `-first-` and cuts off other completers once it has an answer. a `-first-` completer you had before is kept and called whenever inshellah steps aside, including while takeover is off |
 | fish | puts its stubs after fish's own completion dirs | puts its stubs in front and overrides completions registered at runtime by your config, while leaving fish's builtins alone |
 
+in zsh, long descriptions are cut to fit the terminal width with a trailing `...`, so every candidate stays on one line.
+
 whenever inshellah comes up empty for a cursor position, the shell drops back
 to its normal file completion.
 

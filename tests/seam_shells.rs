@@ -205,6 +205,7 @@ comp() {
 }
 comp 'demotool al'
 comp 'demotool alpha r'
+COLUMNS=12 comp 'demotool alpha r'
 comp 'demotool --'
 comp 'demotool --color='
 comp 'demotool has'
@@ -230,6 +231,7 @@ fn zsh_shim_seam() {
         &out,
         "demotool al => alpha {alpha  -- first}
 demotool alpha r => run|reset {run    -- run it|reset  -- reset it}
+demotool alpha r => run|reset {run    -...|reset  -...}
 demotool -- => --color|--verbose {--color    -- paint the output <WHEN>|--verbose  -- say more}
 demotool --color= => --color=always|--color=never
 demotool has => has space {has space  -- quoted}
