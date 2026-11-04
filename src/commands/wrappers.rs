@@ -197,6 +197,89 @@ const WRAPPERS: &[Wrapper] = &[
         assignments:       false,
         bare_dash:         false,
     },
+    Wrapper {
+        name:              "strace",
+        takes_value:       &[
+            "-a",
+            "-b",
+            "-e",
+            "-E",
+            "-I",
+            "-o",
+            "-O",
+            "-P",
+            "-s",
+            "-S",
+            "-u",
+            "-U",
+            "-X",
+            "--env",
+            "--user",
+            "--argv0",
+            "--detach-on",
+            "--interruptible",
+            "--trace",
+            "--signal",
+            "--status",
+            "--trace-fds",
+            "--trace-path",
+            "--columns",
+            "--abbrev",
+            "--raw",
+            "--read",
+            "--write",
+            "--inject",
+            "--fault",
+            "--output",
+            "--string-limit",
+            "--const-print-style",
+            "--summary-syscall-overhead",
+            "--summary-sort-by",
+            "--summary-columns",
+            "--syscall-limit",
+            "--stack-trace-frame-limit",
+            "--verbose",
+            "--kvm",
+            "--color",
+            "--decode-pids",
+        ],
+        no_command:        &["-p", "--attach", "-h", "--help", "-V", "--version"],
+        operands:          0,
+        replaces_operands: &[],
+        optional_operands: &[],
+        assignments:       false,
+        bare_dash:         false,
+    },
+    Wrapper {
+        name:              "ltrace",
+        takes_value:       &[
+            "-a",
+            "-A",
+            "-D",
+            "-e",
+            "-F",
+            "-l",
+            "-n",
+            "-o",
+            "-s",
+            "-u",
+            "-w",
+            "-x",
+            "--align",
+            "--debug",
+            "--config",
+            "--library",
+            "--indent",
+            "--output",
+            "--where",
+        ],
+        no_command:        &["-p", "-h", "--help", "-V", "--version"],
+        operands:          0,
+        replaces_operands: &[],
+        optional_operands: &[],
+        assignments:       false,
+        bare_dash:         false,
+    },
 ];
 
 fn wrapper_of(word: &str) -> Option<&'static Wrapper> {
@@ -393,6 +476,41 @@ mod tests {
         assert_eq!(at("chrt -p 10 1234 "), None);
         assert_eq!(at("taskset -p 0x1 1234 "), None);
         assert_eq!(at("ionice -p 1234 "), None);
+    }
+
+    #[test]
+    fn strace_skips_its_flag_values() {
+        assert_eq!(at("strace ls "), Some(1));
+        assert_eq!(at("strace -f -o out.txt ls "), Some(4));
+        assert_eq!(at("strace -fo out.txt ls "), Some(3));
+        assert_eq!(at("strace -oout.txt ls "), Some(2));
+        assert_eq!(at("strace -e trace=openat -s 80 -E A=1 ls "), Some(7));
+        assert_eq!(at("strace -c -S calls -U name,calls ls "), Some(6));
+        assert_eq!(at("strace --output out.txt --trace=file ls "), Some(4));
+        assert_eq!(at("strace -ff -tt -T -yy ls "), Some(5));
+        assert_eq!(at("strace --verbose all ls "), Some(3));
+        assert_eq!(at("strace --kvm vcpu ls "), Some(3));
+        assert_eq!(at("strace --color always ls "), Some(3));
+        assert_eq!(at("strace --decode-pids comm ls "), Some(3));
+        assert_eq!(at("strace --verbose=all ls "), Some(2));
+        assert_eq!(at("strace --color=never ls "), Some(2));
+        assert_eq!(at("strace --decode-fds all ls "), Some(2));
+        assert_eq!(at("strace --verbose "), None);
+        assert_eq!(at("strace -p 1 "), None);
+        assert_eq!(at("strace --attach=1 "), None);
+        assert_eq!(at("strace -e trace=file "), None);
+        assert_eq!(at("strace --help "), None);
+    }
+
+    #[test]
+    fn ltrace_skips_its_flag_values() {
+        assert_eq!(at("ltrace ls "), Some(1));
+        assert_eq!(at("ltrace -S -f ls "), Some(3));
+        assert_eq!(at("ltrace -o out.txt -l libc.so* -s 64 ls "), Some(7));
+        assert_eq!(at("ltrace -ttt -n 2 -e malloc ls "), Some(6));
+        assert_eq!(at("ltrace --output=out.txt ls "), Some(2));
+        assert_eq!(at("ltrace -p 1 "), None);
+        assert_eq!(at("ltrace -n "), None);
     }
 
     #[test]
