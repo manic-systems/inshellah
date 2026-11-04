@@ -430,7 +430,7 @@ fn short_param_comma_long(input: &str) -> IResult<&str, Switch<'_>> {
 
 // xz writes `-F format, --format=format`. a lowercase word is only a
 // placeholder when the long form repeats it as its value.
-fn short_lowercase_param_comma_long(input: &str) -> IResult<&str, Switch<'_>> {
+fn lowercase_param_comma_long(input: &str) -> IResult<&str, (Switch<'_>, &str)> {
     let (rem, (short, _, word, (), long)) = (
         short_switch,
         space1,
@@ -446,7 +446,29 @@ fn short_lowercase_param_comma_long(input: &str) -> IResult<&str, Switch<'_>> {
     if !repeated {
         return Err(NomErr::Error(NomError::new(input, ErrorKind::Verify)));
     }
-    Ok((rem, Switch::Both(short, long)))
+    Ok((rem, (Switch::Both(short, long), word)))
+}
+
+fn short_lowercase_param_comma_long(input: &str) -> IResult<&str, Switch<'_>> {
+    lowercase_param_comma_long(input).map(|(rem, (switch, _))| (rem, switch))
+}
+
+/// a switch and its value as one unit. the `-r number, --fill=number` form
+/// names its value twice, so the repeat is the param and not a default.
+///
+/// # Errors
+///
+/// errors when the input does not start with a switch.
+pub fn switch_and_param(input: &str) -> IResult<&str, (OwnedSwitch, Option<OwnedParam>)> {
+    if let Ok((rem, (switch, word))) = lowercase_param_comma_long(input)
+        && let Some(rest) = rem
+            .strip_prefix('=')
+            .and_then(|tail| tail.strip_prefix(word))
+    {
+        let param = Param::Mandatory(word);
+        return Ok((rest, (switch.into(), Some(param.into()))));
+    }
+    (switch_parser, flag_param).parse(input)
 }
 
 switch_pair!(long_comma_short,
@@ -517,33 +539,106 @@ make_parser!(brace_pipe_switch<'src> -> Switch<'src>,
     )
 );
 
+// git's `[-v | --version]` and `[-p | --paginate | -P | --no-pager]`.
 make_parser!(usage_switch_parser<'src> -> Switch<'src>,
-    alt((brace_pipe_switch, switch_parser_borrowed))
+    alt((brace_pipe_switch, brace_pipe_long_short, brace_pipe_short_long, switch_parser_borrowed))
 );
 
 // trailing tokens inside a flag bracket. `[--option name value]` keeps
 // switch=Long("option") param=Mandatory("name"), discards ` value`.
-make_parser!(take_till_bracket<'src> -> &'src str, take_till(|ch: char| ch == ']'));
+make_parser!(take_till_bracket<'src> -> &'src str,
+    take_till(|ch: char| matches!(ch, ']' | '[' | '\n')));
 
-make_parser!(flag_in_bracket<'src> -> (Switch<'src>, Option<Param<'src>>),
+// a switch cut short by `{` or more letters is a template (`--term-{new,bad}`)
+// or a cluster (`-abc`), not a flag name.
+type UsageFlag<'src> = (Switch<'src>, Option<Param<'src>>);
+
+make_parser!(usage_flag<'src> -> UsageFlag<'src>,
+(
+    terminated(
+        usage_switch_parser,
+        peek(alt((value((), satisfy(|ch| ch.is_whitespace() || matches!(ch, '=' | '[' | ']' | '|' | ',' | '<' | '\\'))), eof.map(|_| ()))))
+    ),
+    opt(alt((param_parser_borrowed, bracket_word_param)))
+));
+
+make_parser!(piped_usage_flags<'src> -> Vec<UsageFlag<'src>>,
+    (usage_flag, many0(preceded((space0, char('|'), space0), usage_flag)))
+    => |(first, rest): (UsageFlag<'src>, Vec<_>)| {
+        let mut flags = vec![first];
+        flags.extend(rest);
+        flags
+    }
+);
+
+make_parser!(flag_in_bracket<'src> -> Vec<UsageFlag<'src>>,
     delimited(
         (char('['), space0),
-        (usage_switch_parser, opt(param_parser_borrowed)),
-        (take_till_bracket, char(']'))
+        piped_usage_flags,
+        (take_till_bracket, opt(char(']')))
     )
 );
+
+// a lowercase word closing the bracket after a flag names its value,
+// `[-w secs]` and `[-o opt[,opts...]]`.
+make_parser!(bracket_word_param<'src> -> Param<'src>,
+    delimited(
+        char(' '),
+        verify(
+            take_while1(|ch: char| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_')),
+            |word: &str| word.starts_with(|ch: char| ch.is_ascii_lowercase()),
+        ),
+        peek(satisfy(|ch| matches!(ch, ']' | '[' | '…' | '.')))
+    ) => Param::Mandatory);
+
+// `[-aApy]` bundles single-letter switches. only mixed case is taken since
+// `[-xyz]` and `[-nt]` can equally be single-dash names and `[-WIDTH]` is a
+// placeholder. man pages squeeze `[-S suffix]` into `[-Ssuffix]`, one flag
+// and its value name.
+fn short_cluster(input: &str) -> IResult<&str, Vec<UsageFlag<'_>>> {
+    let (rem, letters) = delimited(
+        (char('['), space0, char('-')),
+        take_while1(|ch: char| ch.is_ascii_alphabetic()),
+        (space0, char(']')),
+    )
+    .parse(input)?;
+    let mixed_case = letters.chars().any(|ch| ch.is_ascii_uppercase())
+        && letters.chars().any(|ch| ch.is_ascii_lowercase());
+    let (first, rest) = letters.split_at(1);
+    let flag_and_word = rest.len() > 1
+        && (rest.chars().all(|ch| ch.is_ascii_lowercase())
+            && first.starts_with(|ch: char| ch.is_ascii_uppercase())
+            || rest.chars().all(|ch| ch.is_ascii_uppercase())
+                && first.starts_with(|ch: char| ch.is_ascii_lowercase()));
+    let lead = letters.chars().take_while(char::is_ascii_lowercase).count();
+    let opaque_word = lead >= 2
+        && letters.get(lead + 1..).is_some_and(|tail| {
+            tail.starts_with(|ch: char| ch.is_ascii_lowercase()) && tail.len() >= 2
+        });
+    if !mixed_case || flag_and_word || opaque_word {
+        return Err(NomErr::Error(NomError::new(input, ErrorKind::Verify)));
+    }
+    Ok((
+        rem,
+        letters
+            .chars()
+            .map(|ch| (Switch::Short(ch), None))
+            .collect(),
+    ))
+}
 
 // collect every flag-bracketed switch and its first param. non-flag tokens
 // (positional brackets, command name, ellipses) skipped one char at a time.
 make_parser!(pub parse_usage_flags<'src> -> Vec<(OwnedSwitch, Option<OwnedParam>)>,
     many0(alt((
-        map(flag_in_bracket, Some),
+        map(alt((flag_in_bracket, short_cluster)), Some),
         // `value(None, ...)` forces Clone on Switch/Param, `map(..., |_| None)`
         // doesn't.
         map(satisfy(|ch| ch != '\n' && ch != '\r'), |_| None),
     )))
-    => |flags: Vec<Option<(Switch<'src>, Option<Param<'src>>)>>|
+    => |flags: Vec<Option<Vec<UsageFlag<'src>>>>|
         flags.into_iter()
+            .flatten()
             .flatten()
             .map(|(switch, param)| (OwnedSwitch::from(switch), param.map(OwnedParam::from)))
             .collect()

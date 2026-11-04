@@ -221,7 +221,7 @@ fn bracketed_equals_values_stay_optional() {
     let choices: Vec<_> = diff
         .choices
         .iter()
-        .map(|found| found.value.as_str())
+        .map(|choice| choice.value.as_str())
         .collect();
     assert_eq!(choices, ["yes", "no"]);
     assert_eq!(param_of(&result, "unit").kind, ParamKind::Mandatory);
@@ -476,4 +476,121 @@ The BOOL argument is mostly harmless.
     ]);
     assert!(choice_values(&result, "block-size").is_empty());
     assert!(choice_values(&result, "hyperlink").is_empty());
+}
+
+#[test]
+fn usage_line_flags_fill_in_what_the_options_section_lacks() {
+    let result = parse(
+        "usage: git [-v | --version] [-h | --help] [-C <path>] [-c <name>=<value>]
+           [--exec-path[=<path>]] [--html-path]
+           [-p | --paginate | -P | --no-pager] [--git-dir=<path>]
+           [--term-{new,bad}=<term>] [-xyz] <command> [<args>]
+
+Options:
+  -h, --help   show help
+",
+    );
+    assert_eq!(
+        entry(&result, "version").switch,
+        OwnedSwitch::Both('v', "version".to_owned())
+    );
+    assert_eq!(
+        entry(&result, "no-pager").switch,
+        OwnedSwitch::Both('P', "no-pager".to_owned())
+    );
+    assert_eq!(param_name(&result, "git-dir"), Some("path"));
+    assert_eq!(param_name(&result, "exec-path"), Some("path"));
+    let help = result
+        .entries
+        .iter()
+        .filter(|found| long_of(found) == Some("help"))
+        .count();
+    assert_eq!(help, 1);
+    let dash_c = result
+        .entries
+        .iter()
+        .find(|found| found.switch == OwnedSwitch::Short('C'))
+        .expect("-C kept");
+    assert_eq!(
+        dash_c.param.as_ref().map(|param| param.name.as_str()),
+        Some("path")
+    );
+    assert!(result.entries.iter().all(|found| {
+        !matches!(
+            &found.switch,
+            OwnedSwitch::Long(long) if long.starts_with("term")
+        ) && found.switch != OwnedSwitch::Short('x')
+    }));
+}
+
+#[test]
+fn usage_only_short_flags_keep_the_word_after_them_as_their_param() {
+    let result = parse(
+        "Usage: ip6tables-restore [-c] [-w secs] [-T table] [-M command] [file]\n\t   [ \
+         --wait=<seconds>\n\t   [ --table=<TABLE> ]\n",
+    );
+    let param_of = |short: char| {
+        result
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.switch, OwnedSwitch::Short(found) if found == short))
+            .and_then(|entry| entry.param.as_ref())
+            .map(|param| param.name.as_str())
+    };
+    assert_eq!(param_of('w'), Some("secs"));
+    assert_eq!(param_of('T'), Some("table"));
+    assert_eq!(param_of('M'), Some("command"));
+    assert_eq!(param_of('c'), None);
+    assert_eq!(param_name(&result, "wait"), Some("seconds"));
+    assert_eq!(param_name(&result, "table"), Some("TABLE"));
+}
+
+#[test]
+fn bracketed_short_switch_clusters_expand_and_junk_does_not() {
+    let result = parse("Usage: fsck.btrfs [-aApy] [<device>...]\n");
+    for short in ['a', 'A', 'p', 'y'] {
+        assert!(
+            result
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.switch, OwnedSwitch::Short(found) if found == short)),
+            "-{short} missing in {:?}",
+            result.entries
+        );
+    }
+    for junk in [
+        "Usage: fmt [-WIDTH] [OPTION]... [FILE]...\n",
+        "Usage: psfxtable [-i infont] [-nt]\n",
+    ] {
+        let parsed = parse(junk);
+        assert!(
+            !parsed
+                .entries
+                .iter()
+                .any(|entry| { matches!(entry.switch, OwnedSwitch::Short('W' | 'D' | 'n' | 't')) }),
+            "{junk}: {:?}",
+            parsed.entries
+        );
+    }
+}
+
+#[test]
+fn flag_and_value_name_squeezed_together_is_not_a_cluster() {
+    let parsed = parse("Usage: gzip [-acfhLV] [-Ssuffix] [name...]\n");
+    assert!(
+        !parsed
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.switch, OwnedSwitch::Short('u' | 'i' | 'x'))),
+        "{:?}",
+        parsed.entries
+    );
+}
+
+#[test]
+fn long_bracket_value_names_stay_and_camel_case_flags_are_not_clusters() {
+    let result = parse("Usage: ssh [-i identity_file] [-noVerify]\n");
+    assert_eq!(result.entries.len(), 1, "{:?}", result.entries);
+    let param = result.entries[0].param.as_ref().expect("param");
+    assert_eq!(param.name, "identity_file");
 }

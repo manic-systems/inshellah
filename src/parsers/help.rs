@@ -14,6 +14,7 @@ use nom::{
     IResult,
     Parser as _,
     character::complete::space0,
+    sequence::preceded,
 };
 
 use crate::{
@@ -23,12 +24,14 @@ use crate::{
             description::description,
             helpers::get_indent,
             options::{
-                flag_param,
-                switch_parser,
+                parse_usage_flags,
+                switch_and_param,
             },
             positionals::{
                 extract_cli11_positionals,
                 extract_usage_positionals,
+                skip_command_name,
+                usage_block,
             },
             subcommands::subcommand_entry,
         },
@@ -52,7 +55,7 @@ type EntryParts<'src> = (
 make_parser!(entry<'src> -> ManpageEntry,
     (
         space0,
-        (switch_parser, flag_param),
+        switch_and_param,
         description,
     )
     => |(_, (switch, param), (first, cont))
@@ -150,6 +153,40 @@ fn classify_section_line(line: &str) -> Option<HelpSection> {
     None
 }
 
+fn switch_names(switch: &OwnedSwitch) -> (Option<char>, Option<&str>) {
+    match switch {
+        OwnedSwitch::Short(short) => (Some(*short), None),
+        OwnedSwitch::Long(long) => (None, Some(long)),
+        OwnedSwitch::Both(short, long) => (Some(*short), Some(long)),
+    }
+}
+
+/// flags only the usage line names, git's `-C <path>` among them.
+fn usage_line_entries(original: &str, listed: &[ManpageEntry]) -> Vec<ManpageEntry> {
+    let Some(block) = usage_block(original) else {
+        return Vec::new();
+    };
+    let Ok((_, flags)) = preceded(skip_command_name, parse_usage_flags).parse(&block) else {
+        return Vec::new();
+    };
+    let mut added: Vec<ManpageEntry> = Vec::new();
+    for (switch, param) in flags {
+        let (short, long) = switch_names(&switch);
+        let known = listed.iter().chain(&added).any(|entry| {
+            let (known_short, known_long) = switch_names(&entry.switch);
+            (short.is_some() && short == known_short) || (long.is_some() && long == known_long)
+        });
+        if !known {
+            added.push(ManpageEntry {
+                switch,
+                param,
+                desc: String::new(),
+            });
+        }
+    }
+    added
+}
+
 fn consume_line(text: &str) -> &str {
     text.split_once('\n').map_or("", |(_, rest)| rest)
 }
@@ -196,6 +233,8 @@ fn build_help_result(original: &str) -> ManpageResult {
 
         rem = consume_line(rem);
     }
+
+    entries.extend(usage_line_entries(original, &entries));
 
     // recursive --help probes dispatch on the lowercase name.
     let subcommands = dedup_subcommands(raw_subcommands)
