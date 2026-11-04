@@ -579,6 +579,15 @@ make_parser!(flag_in_bracket<'src> -> Vec<UsageFlag<'src>>,
     )
 );
 
+// a two letter bracket word, or a short one with a digit, is an example
+// value like `[-t ext4] [-o ro]`. it says the flag takes a value but is not
+// its name.
+fn bracket_word(word: &str) -> Param<'_> {
+    let example =
+        word.len() == 2 || word.len() <= 4 && word.contains(|ch: char| ch.is_ascii_digit());
+    Param::Mandatory(if example { "value" } else { word })
+}
+
 // a lowercase word closing the bracket after a flag names its value,
 // `[-w secs]` and `[-o opt[,opts...]]`.
 make_parser!(bracket_word_param<'src> -> Param<'src>,
@@ -589,7 +598,7 @@ make_parser!(bracket_word_param<'src> -> Param<'src>,
             |word: &str| word.starts_with(|ch: char| ch.is_ascii_lowercase()),
         ),
         peek(satisfy(|ch| matches!(ch, ']' | '[' | '…' | '.')))
-    ) => Param::Mandatory);
+    ) => bracket_word);
 
 // `[-aApy]` bundles single-letter switches. only mixed case is taken since
 // `[-xyz]` and `[-nt]` can equally be single-dash names and `[-WIDTH]` is a
@@ -615,7 +624,11 @@ fn short_cluster(input: &str) -> IResult<&str, Vec<UsageFlag<'_>>> {
         && letters.get(lead + 1..).is_some_and(|tail| {
             tail.starts_with(|ch: char| ch.is_ascii_lowercase()) && tail.len() >= 2
         });
-    if !mixed_case || flag_and_word || opaque_word {
+    let camel_word = first.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && rest.starts_with(|ch: char| ch.is_ascii_uppercase())
+        && rest.len() > 3
+        && rest.chars().skip(1).all(|ch| ch.is_ascii_lowercase());
+    if !mixed_case || flag_and_word || camel_word || opaque_word {
         return Err(NomErr::Error(NomError::new(input, ErrorKind::Verify)));
     }
     Ok((
