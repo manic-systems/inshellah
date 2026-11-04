@@ -32,7 +32,11 @@ impl Display for Shell {
 }
 
 /// bash's default `COMP_WORDBREAKS`.
-pub const BASH_WORDBREAKS: &str = " \t\n\"'><=;|&(:";
+pub const BASH_WORDBREAKS: &str = " \t\n\"'@><=;|&(:";
+
+/// wordbreaks readline keeps at the start of the word instead of dropping,
+/// `rl_special_prefixes` in bash.
+const SPECIAL_PREFIXES: &str = "$@";
 
 /// reserved words after which a new command starts.
 const COMMAND_PREFIXES: [&str; 11] = [
@@ -53,6 +57,9 @@ pub struct BashLine {
     /// text readline replaces along with the last word, put back in front of
     /// every candidate.
     pub lead:     String,
+    /// byte offset in the parsed line where the replaced tail of the last
+    /// word starts.
+    pub raw_kept: usize,
 }
 
 #[derive(Default)]
@@ -64,14 +71,18 @@ struct Lexer {
     /// `kept` before the open quote, back in force once it closes, since
     /// readline only breaks a word at a quote that is still open.
     unquoted_kept: usize,
+    word_raw:      usize,
+    kept_raw:      Option<usize>,
+    unquoted_raw:  Option<usize>,
     target:        bool,
     pending:       bool,
 }
 
 impl Lexer {
-    fn start_word(&mut self) {
+    fn start_word(&mut self, at: usize) {
         if !self.in_word {
             self.in_word = true;
+            self.word_raw = at;
             self.target = mem::take(&mut self.pending);
         }
     }
@@ -86,7 +97,38 @@ impl Lexer {
         self.in_word = false;
         self.target = false;
         self.kept = 0;
+        self.kept_raw = None;
     }
+
+    const fn open_quote(&mut self, after: usize) {
+        self.unquoted_kept = self.kept;
+        self.unquoted_raw = self.kept_raw;
+        self.kept = self.word.len();
+        self.kept_raw = Some(after);
+    }
+}
+
+fn rest(chars: &Peekable<Chars<'_>>) -> usize {
+    chars.clone().map(char::len_utf8).sum()
+}
+
+/// where readline starts the word when it counts a quote as open, going by
+/// quote characters alone as it does.
+fn readline_quote(line: &str) -> Option<usize> {
+    let mut open: Option<(char, usize)> = None;
+    let mut chars = line.char_indices();
+    while let Some((idx, ch)) = chars.next() {
+        match open {
+            Some((quote, _)) if ch == quote => open = None,
+            Some(('\'', _)) => {},
+            _ if ch == '\\' => {
+                chars.next();
+            },
+            None if ch == '"' || ch == '\'' => open = Some((ch, idx + 1)),
+            _ => {},
+        }
+    }
+    open.map(|(_, at)| at)
 }
 
 impl BashLine {
@@ -96,10 +138,13 @@ impl BashLine {
         let mut prev = None;
         let mut chars = line.chars().peekable();
         while let Some(ch) = chars.next() {
+            let after = line.len() - rest(&chars);
+            let here = after - ch.len_utf8();
             match (quote, ch) {
                 (Some('\''), '\'') | (Some('"'), '"') => {
                     quote = None;
                     lex.kept = lex.unquoted_kept;
+                    lex.kept_raw = lex.unquoted_raw;
                 },
                 (Some('"'), '\\') if chars.peek().is_some_and(|next| "\"\\$`".contains(*next)) => {
                     lex.word.extend(chars.next());
@@ -107,6 +152,7 @@ impl BashLine {
                 (Some('"'), '$' | '`') if ch == '`' || chars.peek() == Some(&'(') => {
                     let mut ahead = chars.clone();
                     let open = ahead.next_if_eq(&'(').unwrap_or(ch);
+                    let body_at = line.len() - rest(&ahead);
                     let (body, closed) = substitution(&mut ahead, open);
                     if closed {
                         chars = ahead;
@@ -115,7 +161,9 @@ impl BashLine {
                             lex.word.push(open);
                         }
                         lex.word.push_str(&body);
-                    } else if let Some(inner) = Self::in_quotes(&lex, open, &body, wordbreaks) {
+                    } else if let Some(inner) =
+                        Self::in_quotes(line, &lex, &body, body_at, wordbreaks)
+                    {
                         return inner;
                     } else {
                         lex.word.push(ch);
@@ -127,11 +175,14 @@ impl BashLine {
                 (None, '&') if chars.peek() == Some(&'>') => {},
                 (None, '$' | '<' | '>' | '`') if ch == '`' || chars.peek() == Some(&'(') => {
                     let open = chars.next_if_eq(&'(').unwrap_or(ch);
+                    let body_at = line.len() - rest(&chars);
                     let (body, closed) = substitution(&mut chars, open);
                     if !closed {
-                        return Self::parse(&body, wordbreaks);
+                        let mut inner = Self::parse(&body, wordbreaks);
+                        inner.raw_kept += body_at;
+                        return inner;
                     }
-                    lex.start_word();
+                    lex.start_word(here);
                     lex.word.push(ch);
                     if open == '(' {
                         lex.word.push(open);
@@ -151,7 +202,7 @@ impl BashLine {
                     lex.pending = true;
                 },
                 (None, '\\') => {
-                    lex.start_word();
+                    lex.start_word(here);
                     lex.word.extend(chars.next());
                 },
                 (None, '$')
@@ -159,29 +210,42 @@ impl BashLine {
                         .peek()
                         .is_some_and(|next| *next == '\'' || *next == '"') =>
                 {
-                    lex.start_word();
+                    lex.start_word(here);
                     quote = chars.next();
-                    lex.unquoted_kept = lex.kept;
-                    lex.kept = lex.word.len();
+                    lex.open_quote(line.len() - rest(&chars));
                 },
                 (None, '\'' | '"') => {
-                    lex.start_word();
+                    lex.start_word(here);
                     quote = Some(ch);
-                    lex.unquoted_kept = lex.kept;
-                    lex.kept = lex.word.len();
+                    lex.open_quote(after);
                 },
                 (None, other) => {
-                    lex.start_word();
+                    lex.start_word(here);
                     lex.word.push(other);
                     if wordbreaks.contains(other) {
-                        lex.kept = lex.word.len();
+                        if SPECIAL_PREFIXES.contains(other) {
+                            lex.kept = lex.word.len() - other.len_utf8();
+                            lex.kept_raw = Some(here);
+                        } else {
+                            lex.kept = lex.word.len();
+                            lex.kept_raw = Some(after);
+                        }
                     }
                 },
             }
             prev = Some(ch);
         }
+        Self::finish(lex, quote, line.len())
+    }
+
+    fn finish(mut lex: Lexer, quote: Option<char>, len: usize) -> Self {
         let redirect = lex.pending || lex.target;
         let kept = lex.word.get(..lex.kept).unwrap_or_default().to_owned();
+        let raw_kept = if lex.in_word {
+            lex.kept_raw.unwrap_or(lex.word_raw)
+        } else {
+            len
+        };
         if !redirect {
             lex.words.push(mem::take(&mut lex.word));
         }
@@ -204,22 +268,28 @@ impl BashLine {
             quote,
             redirect,
             lead: String::new(),
+            raw_kept,
         }
     }
 
     /// the command typed in a substitution still open inside double quotes.
-    /// readline keeps all the quoted text as one word there, so `lead` carries
-    /// what precedes the command's last word back in.
-    fn in_quotes(lex: &Lexer, open: char, body: &str, wordbreaks: &str) -> Option<Self> {
-        let mut line = Self::parse(body, wordbreaks);
-        if line.redirect {
+    /// readline keeps the text it counts as the word as one candidate prefix
+    /// there, so `lead` carries what precedes the command's last word back in.
+    fn in_quotes(
+        line: &str,
+        lex: &Lexer,
+        body: &str,
+        body_at: usize,
+        wordbreaks: &str,
+    ) -> Option<Self> {
+        let mut inner = Self::parse(body, wordbreaks);
+        if inner.redirect {
             return None;
         }
-        let tail = line.words.last()?.get(line.kept.len()..)?;
-        let head = body.strip_suffix(tail)?;
-        let opener = if open == '(' { "$(" } else { "`" };
-        line.lead = format!("{}{opener}{head}", lex.word.get(lex.kept..)?);
-        Some(line)
+        inner.raw_kept += body_at;
+        let from = readline_quote(line).unwrap_or_else(|| lex.unquoted_raw.unwrap_or(lex.word_raw));
+        line.get(from..inner.raw_kept)?.clone_into(&mut inner.lead);
+        Some(inner)
     }
 
     /// `value` as readline should insert it over the replaced tail of the
@@ -407,6 +477,44 @@ mod tests {
         );
         assert_eq!(words("echo \"$(a) b\" --fl"), ["echo", "$(a) b", "--fl"]);
         assert_eq!(words("echo \"\\$(a"), ["echo", "$(a"]);
+    }
+
+    #[test]
+    fn a_substitution_in_quotes_keeps_the_raw_text_in_the_lead() {
+        let escaped = parse(r#"echo "$(frob --output=dir\ o"#);
+        assert_eq!(escaped.words, ["frob", "--output=dir o"]);
+        assert_eq!(escaped.lead, "$(frob --output=");
+        assert_eq!(
+            escaped.insertion("--output=dir one/").as_deref(),
+            Some(r"$(frob --output=dir\ one/")
+        );
+        let nested = parse(r#"echo "$(frob --output="dir o"#);
+        assert_eq!(nested.words, ["frob", "--output=dir o"]);
+        assert_eq!(nested.quote, Some('"'));
+        assert_eq!(nested.lead, r#""$(frob --output=""#);
+        assert_eq!(
+            nested.insertion("--output=dir one/").as_deref(),
+            Some(r#""$(frob --output="dir one/"#)
+        );
+        let reopened = parse(r#"echo "$(frob "x" --col"#);
+        assert_eq!(reopened.lead, " ");
+        assert_eq!(reopened.insertion("--color").as_deref(), Some(" --color"));
+        assert_eq!(parse(r#"echo x"$(frob --co"#).lead, "$(frob ");
+        assert_eq!(parse(r#"echo "a\$b $(frob --co"#).lead, r"a\$b $(frob ");
+    }
+
+    #[test]
+    fn special_prefixes_stay_in_the_replaced_word() {
+        let unit = parse("systemctl restart autovt@");
+        assert_eq!(unit.kept, "autovt");
+        assert_eq!(
+            unit.insertion("autovt@tty1.service").as_deref(),
+            Some("@tty1.service")
+        );
+        assert_eq!(parse("cmd a@b@c").kept, "a@b");
+        assert_eq!(parse("cmd a:b@").kept, "a:b");
+        assert_eq!(parse("cmd a:b").kept, "a:");
+        assert_eq!(BashLine::parse("cmd a@b", " ").kept, "");
     }
 
     #[test]
