@@ -35,7 +35,9 @@ impl Fixture {
         let cache = dir.path().join("inshellah");
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).expect("bin dir");
-        for tool in ["demotool", "twotool", "fwrap", "ordtool"] {
+        for tool in [
+            "demotool", "twotool", "fwrap", "ordtool", "dirtool", "widetool",
+        ] {
             let stub = bin.join(tool);
             fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub executable");
             fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -78,6 +80,34 @@ impl Fixture {
         write_result(&cache, "demotool alpha", "help", &result_from_json(&alpha)).expect("alpha");
         write_result(&cache, "twotool", "help", &result_from_json(&demotool)).expect("twotool");
 
+        let dirtool = json!({
+            "source": "help",
+            "description": "",
+            "entries": [
+                {
+                    "switch": {"type": "long", "name": "out"},
+                    "param": {"kind": "mandatory", "name": "FILE", "choices": []},
+                    "desc": "write here",
+                },
+            ],
+            "subcommands": [],
+            "positional_choices": [],
+            "positionals": [],
+        });
+        write_result(&cache, "dirtool", "help", &result_from_json(&dirtool)).expect("dirtool");
+        let widetool = json!({
+            "source": "help",
+            "description": "",
+            "entries": [],
+            "subcommands": [
+                {"name": "alpha", "desc": "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{8aac}\u{660e}\u{6587}\u{306f}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}", "aliases": []},
+                {"name": "beta", "desc": "short", "aliases": []},
+            ],
+            "positional_choices": [],
+            "positionals": [],
+        });
+        write_result(&cache, "widetool", "help", &result_from_json(&widetool)).expect("widetool");
+
         let built = Path::new(env!("CARGO_BIN_EXE_inshellah"))
             .parent()
             .expect("binary dir");
@@ -96,6 +126,14 @@ impl Fixture {
             .arg(script)
             .env("PATH", &self.path)
             .env("SEAM_PATH", &self.path)
+            .env(
+                "LC_ALL",
+                if cfg!(target_os = "macos") {
+                    "en_US.UTF-8"
+                } else {
+                    "C.UTF-8"
+                },
+            )
             .env("HOME", self.dir.path())
             .env("XDG_CACHE_HOME", self.dir.path())
             .env("XDG_CONFIG_HOME", self.dir.path().join("config"))
@@ -203,16 +241,19 @@ export PATH=$SEAM_PATH
 source "$SHIM/inshellah.zsh"
 typeset -A compstate
 compadd() {
+    emulate -L zsh
     local -a _vals _displays
+    local _suffix=
     while (($#)); do
         case $1 in
             -a) _vals=("${(@P)2}"); shift 2 ;;
             -d) _displays=("${(@P)2}"); shift 2 ;;
             -V) shift 2 ;;
+            -S) _suffix=" S[$2]"; shift 2 ;;
             *) shift ;;
         esac
     done
-    print -rn -- "${(j:|:)_vals}"
+    print -rn -- "${(j:|:)_vals}$_suffix"
     (($#_displays)) && print -rn -- " {${(j:|:)_displays}}"
     return 0
 }
@@ -220,12 +261,16 @@ _description() { eval "$3=()" }
 _files() { print -rn -- ' +files' }
 _default() { print -rn -- 'default' }
 _prev() { print -rn -- 'prev' }
-comp() {
-    compstate[context]=command
+setup() {
+    emulate -L zsh
+    compstate[context]=${ctx:-command}
     words=("${(@z)1}")
     [[ $1 == *' ' ]] && words+=('')
     CURRENT=$#words
     PREFIX=$words[-1]
+}
+comp() {
+    setup "$1"
     print -rn -- "$1 => "
     _inshellah
     print
@@ -245,6 +290,23 @@ INSHELLAH_TAKEOVER=0 service=-first- comp 'demotool al'
 INSHELLAH_TAKEOVER=" On " service=-first- comp 'demotool al'
 INSHELLAH_TAKEOVER=on _inshellah_prev_first=_prev service=-first- comp 'demotool alpha run '
 _inshellah_prev_first=_prev service=-first- comp 'demotool al'
+ctx=redirect INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'cat < pd'
+ctx=redirect _inshellah_prev_first=_prev service=-first- comp 'cat < pd'
+ctx=redirect service=-first- comp 'cat < pd'
+ctx=redirect service=-default- comp 'cat < pd'
+mkdir -p $HOME/pdir/sub
+cd $HOME
+comp 'dirtool --out=pd'
+comp 'dirtool --out=pdir/'
+COLUMNS=24 comp 'widetool '
+setopt ksharrays
+comp 'demotool alpha r'
+comp 'dirtool --out=pd'
+service=-first- INSHELLAH_TAKEOVER=1 comp 'demotool al'
+typeset -A _comps
+compdef() { _comps[$2]=$1 }
+_inshellah_register
+print -r -- "registered ${_comps[-first-]} ${_comps[-default-]}"
 "#;
 
 #[test]
@@ -272,6 +334,17 @@ demotool al =>
 demotool al => alpha {alpha  -- first}
 demotool alpha run  => prev
 demotool al => prev
+cat < pd => prev
+cat < pd => prev
+cat < pd => 
+cat < pd => 
+dirtool --out=pd => --out=pdir/ S[] {--out=pdir/  -- directory}
+dirtool --out=pdir/ => --out=pdir/sub/ S[] {--out=pdir/sub/  -- directory}
+widetool  => alpha|beta {alpha  -- \u{65e5}\u{672c}\u{8a9e}\u{306e}\u{8aac}...|beta   -- short}
+demotool alpha r => run|reset {run    -- run it|reset  -- reset it}
+dirtool --out=pd => --out=pdir/ S[] {--out=pdir/  -- directory}
+demotool al => alpha {alpha  -- first}
+registered _inshellah _inshellah
 ",
     );
 }

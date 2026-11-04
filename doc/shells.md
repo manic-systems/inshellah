@@ -60,12 +60,14 @@ systemd and the rest, set `INSHELLAH_TAKEOVER=1` before the hook loads. takeover
 | shell | fallback | takeover |
 |---|---|---|
 | bash | sits on `complete -D` and lets bash-completion's loader try first | answers first, falls back to bash-completion's completer when it comes up empty, and clears out any specs bash-completion loads later at the next prompt. anything bash-completion registers before the first prompt still wins |
-| zsh | hooks into `-default-` | also hooks into `-first-` and cuts off other completers once it has an answer. a `-first-` completer you had before is kept and called whenever inshellah steps aside, including while takeover is off |
+| zsh | hooks into `-default-` | also hooks into `-first-` and cuts off other completers once it has an answer. a `-first-` completer you had before is kept and called whenever inshellah steps aside, including while takeover is off and in contexts such as redirections and parameter names |
 | fish | answers only for commands fish has no completion for | answers first, falls back to fish's own completion for that command when it comes up empty, and replaces completions your config registers at runtime. fish's builtins, functions and wrappers like `sudo`, `env` and `xargs` keep fish's own completion, which hands the wrapped command back to inshellah. a command whose first argument is its own, like `ssh` with its host, is not a wrapper and gets taken over. completions you register with `complete -c` after a command loaded survive takeover being turned on or off |
 
 in zsh, the hook checks its registration at every prompt and again as you type, so a `compinit` that a plugin manager defers until after the first prompt does not lose it. pressing tab before any key or prompt follows that deferred `compinit` still reaches the stock completers.
 
-in zsh, long descriptions are cut to fit the terminal width with a trailing `...`, so every candidate stays on one line.
+in zsh, long descriptions are cut to fit the terminal width with a trailing `...`, so every candidate stays on one line. wide characters such as cjk and emoji are measured by display width.
+
+in zsh, directory candidates such as the value of `--output=pdir/` keep the cursor right after the slash with no space appended, so you can keep typing the path. the hook sets its own shell options for every function it runs, so options like `ksharrays` in your config do not break it. under takeover the answer from `-first-` is reused by `-default-` for the same words, so a single tab press runs `inshellah complete` once.
 
 in bash, `kill` is a builtin that inshellah normally leaves to the shell. under
 takeover, or when bash-completion has no spec for it, inshellah's own `kill`
