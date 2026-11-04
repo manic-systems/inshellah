@@ -29,6 +29,13 @@ stripped before lookup: `sudo docker compose up --` resolves against
 `docker`, not `sudo`. absolute paths after the wrapper are recognised
 too.
 
+commands that only run another command are unwrapped the same way, with
+their own flags and operands skipped. these are `nohup`, `env` (flags and
+`NAME=value` words), `nice`, `ionice`, `timeout` (and its duration), `xargs`,
+`time`, `command`, `exec`, `stdbuf`, `setsid`, `chrt` and `taskset`. modes
+that run no command (`command -v`, `chrt -p`, `taskset -p`, `ionice -p`) and
+`env -S`, whose argument is a command line in one word, are left alone.
+
 ## setup
 
 ```nu
