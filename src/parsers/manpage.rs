@@ -475,6 +475,17 @@ fn is_common_obvious_alias(short: char, long: &str) -> bool {
 pub fn parse_manpage_lines(lines: &[GroffLine]) -> ManpageResult {
     let mut result = parse_manpage_lines_raw(lines);
     result.normalize();
+    let prose = lines
+        .iter()
+        .filter_map(|line| {
+            match line {
+                GroffLine::Text(text) => Some(text.as_str()),
+                GroffLine::Macro { .. } | GroffLine::Blank | GroffLine::Comment => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    result.attach_metavar_choices(&prose);
     result
 }
 

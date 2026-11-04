@@ -704,3 +704,32 @@ fn lowercase_placeholder_repeated_in_long_form_names_the_param() {
     assert_eq!(param.name, "number");
     assert!(param.choices.is_empty(), "{:?}", param.choices);
 }
+
+#[test]
+fn manpage_metavar_sentence_gives_choices_to_the_matching_param() {
+    let groff = r#".TH LS "1"
+.SH NAME
+ls \- list
+.SH DESCRIPTION
+.TP
+\fB\-\-color\fR[=\fIWHEN\fR]
+colorize the output
+.TP
+\fB\-\-block\-size\fR=\fISIZE\fR
+scale sizes
+.PP
+The WHEN argument defaults to \(aqalways\(aq and can also be \(aqauto\(aq or \(aqnever\(aq.
+"#;
+    let result = parse_manpage_string(groff);
+    let values = |long: &str| {
+        result
+            .entries
+            .iter()
+            .find(|entry| matches!(&entry.switch, OwnedSwitch::Long(name) | OwnedSwitch::Both(_, name) if name == long))
+            .and_then(|entry| entry.param.as_ref())
+            .map(|param| choice_values(param).iter().map(ToString::to_string).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    assert_eq!(values("color"), ["always", "auto", "never"]);
+    assert!(values("block-size").is_empty());
+}

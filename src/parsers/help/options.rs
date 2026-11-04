@@ -579,6 +579,22 @@ make_parser!(flag_in_bracket<'src> -> Vec<UsageFlag<'src>>,
     )
 );
 
+// words usage lines give as an example value, `[-t ext4] [-k on]`. they say
+// the flag takes a value but are not its name.
+const EXAMPLE_VALUES: &[&str] = &[
+    "on", "off", "yes", "no", "true", "false", "all", "none", "auto", "ro", "rw", "fast", "slow",
+    "default", "min", "max", "never", "always", "ext2", "ext3", "ext4", "xfs", "btrfs", "vfat",
+    "tmpfs",
+];
+
+fn bracket_word(word: &str) -> Param<'_> {
+    Param::Mandatory(if EXAMPLE_VALUES.contains(&word) {
+        "value"
+    } else {
+        word
+    })
+}
+
 // a lowercase word closing the bracket after a flag names its value,
 // `[-w secs]` and `[-o opt[,opts...]]`.
 make_parser!(bracket_word_param<'src> -> Param<'src>,
@@ -589,7 +605,7 @@ make_parser!(bracket_word_param<'src> -> Param<'src>,
             |word: &str| word.len() <= 10 && word.starts_with(|ch: char| ch.is_ascii_lowercase()),
         ),
         peek(satisfy(|ch| matches!(ch, ']' | '[' | '…' | '.')))
-    ) => Param::Mandatory);
+    ) => bracket_word);
 
 // `[-aApy]` bundles single-letter switches. only mixed case is taken since
 // `[-xyz]` and `[-nt]` can equally be single-dash names and `[-WIDTH]` is a
@@ -610,7 +626,11 @@ fn short_cluster(input: &str) -> IResult<&str, Vec<UsageFlag<'_>>> {
             && first.starts_with(|ch: char| ch.is_ascii_uppercase())
             || rest.chars().all(|ch| ch.is_ascii_uppercase())
                 && first.starts_with(|ch: char| ch.is_ascii_lowercase()));
-    if !mixed_case || flag_and_word {
+    let camel_word = first.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && rest.starts_with(|ch: char| ch.is_ascii_uppercase())
+        && rest.len() > 3
+        && rest.chars().skip(1).all(|ch| ch.is_ascii_lowercase());
+    if !mixed_case || flag_and_word || camel_word {
         return Err(NomErr::Error(NomError::new(input, ErrorKind::Verify)));
     }
     Ok((

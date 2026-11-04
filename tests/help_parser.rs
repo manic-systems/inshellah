@@ -561,13 +561,16 @@ fn bracketed_short_switch_clusters_expand_and_junk_does_not() {
     for junk in [
         "Usage: fmt [-WIDTH] [OPTION]... [FILE]...\n",
         "Usage: psfxtable [-i infont] [-nt]\n",
+        "Usage: tool [-lName] [-m size]\n",
     ] {
         let parsed = parse(junk);
         assert!(
-            !parsed
-                .entries
-                .iter()
-                .any(|entry| { matches!(entry.switch, OwnedSwitch::Short('W' | 'D' | 'n' | 't')) }),
+            !parsed.entries.iter().any(|entry| {
+                matches!(
+                    entry.switch,
+                    OwnedSwitch::Short('W' | 'D' | 'n' | 't' | 'N' | 'a' | 'e')
+                )
+            }),
             "{junk}: {:?}",
             parsed.entries
         );
@@ -585,4 +588,16 @@ fn flag_and_value_name_squeezed_together_is_not_a_cluster() {
         "{:?}",
         parsed.entries
     );
+}
+
+#[test]
+fn example_value_in_a_usage_bracket_is_not_the_param_name() {
+    let result = parse("Usage: tool [-t ext4] [-o ro] [--mode fast] [-w secs]\n");
+    assert_eq!(param_of(&result, "mode").name, "value");
+    let names: Vec<_> = result
+        .entries
+        .iter()
+        .filter_map(|entry| entry.param.as_ref().map(|param| param.name.as_str()))
+        .collect();
+    assert_eq!(names, ["value", "value", "value", "secs"]);
 }
