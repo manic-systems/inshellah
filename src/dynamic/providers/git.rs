@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: EUPL-1.2
 use crate::{
     complete::Candidate,
-    dynamic::shared::{
-        DynCtx,
-        Words,
-        parse_tabular,
-        run,
+    dynamic::{
+        Files,
+        shared::{
+            DynCtx,
+            Words,
+            parse_tabular,
+            run,
+        },
     },
 };
 const GIT_TOP_VERBS: &[&str] = &[
@@ -141,6 +144,28 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
         GitCompletion::TrackedPaths => git_tracked_paths(&git, ctx),
         GitCompletion::Submodules => git_submodules(&git, ctx),
         GitCompletion::Worktrees => git_worktrees(&git, ctx),
+    }
+}
+
+/// only the verbs that take a revision or a path put files beside the
+/// candidates, a remote or a branch name never names a file.
+pub(super) fn files(words: &Words, ctx: &DynCtx) -> Files {
+    let path_verbs = ["checkout", "diff", "log", "show", "reset", "blame"];
+    match git_completion(words, ctx) {
+        Some(GitCompletion::Refs) if !path_verbs.contains(&words.arg(0)) => Files::Replace,
+        Some(
+            GitCompletion::Static { .. }
+            | GitCompletion::PushDestinations(_)
+            | GitCompletion::RemoteBranches(_)
+            | GitCompletion::Branches
+            | GitCompletion::Tags
+            | GitCompletion::Remotes
+            | GitCompletion::Stashes
+            | GitCompletion::Submodules
+            | GitCompletion::Worktrees,
+        ) => Files::Replace,
+        Some(GitCompletion::Refs | GitCompletion::StatusPaths | GitCompletion::TrackedPaths)
+        | None => Files::Alongside,
     }
 }
 

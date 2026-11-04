@@ -24,6 +24,7 @@ pub mod ssh;
 pub mod systemd;
 
 type CompleteFn = fn(&Words<'_>, &DynCtx<'_>) -> Option<Vec<Candidate>>;
+type FilesFn = fn(&Words<'_>, &DynCtx<'_>) -> Files;
 
 /// where a provider sits relative to static completion. `Value` preempts static
 /// flags; `Fallback` answers only when static produced nothing.
@@ -44,9 +45,9 @@ enum Globals {
 trait Provider {
     fn commands(&self) -> &'static [&'static str];
     fn kind(&self) -> Kind;
-    fn files(&self) -> Files;
     fn matching(&self) -> Matching;
     fn complete(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>>;
+    fn answer(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Answer>;
 }
 
 struct FunctionProvider {
@@ -59,6 +60,8 @@ struct FunctionProvider {
     value_flags: &'static [&'static str],
     globals:     Globals,
     complete:    CompleteFn,
+    /// narrows `files` for a slot that can never be a path.
+    files_at:    Option<FilesFn>,
 }
 
 impl Provider for FunctionProvider {
@@ -70,15 +73,24 @@ impl Provider for FunctionProvider {
         self.kind
     }
 
-    fn files(&self) -> Files {
-        self.files
-    }
-
     fn matching(&self) -> Matching {
         self.matching
     }
 
     fn complete(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
+        (self.complete)(&self.words(spans, ctx), ctx)
+    }
+
+    fn answer(&self, spans: &[String], ctx: &DynCtx<'_>) -> Option<Answer> {
+        let words = self.words(spans, ctx);
+        let candidates = (self.complete)(&words, ctx)?;
+        let files = self.files_at.map_or(self.files, |at| at(&words, ctx));
+        Some(Answer { candidates, files })
+    }
+}
+
+impl FunctionProvider {
+    fn words<'span>(&self, spans: &'span [String], ctx: &DynCtx<'_>) -> Words<'span> {
         let known = |flag: &str, flags: &[String]| flags.iter().any(|known| known == flag);
         let global_scope = |leading: bool| leading || self.globals == Globals::Anywhere;
         let takes_value = |flag: &str, leading: bool| {
@@ -89,8 +101,7 @@ impl Provider for FunctionProvider {
             (known(flag, ctx.flags.short) && !leading)
                 || (known(flag, ctx.flags.global_short) && global_scope(leading))
         };
-        let words = Words::parse(spans, takes_value, is_switch);
-        (self.complete)(&words, ctx)
+        Words::parse(spans, takes_value, is_switch)
     }
 }
 
@@ -103,6 +114,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &[],
         globals:     Globals::Leading,
         complete:    adb::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["nix"],
@@ -112,6 +124,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &[],
         globals:     Globals::Leading,
         complete:    nix::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &[
@@ -136,6 +149,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         ],
         globals:     Globals::Anywhere,
         complete:    systemd::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["ssh", "sftp"],
@@ -145,6 +159,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &["-J", "-F"],
         globals:     Globals::Leading,
         complete:    ssh::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["scp"],
@@ -154,6 +169,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &["-J", "-F"],
         globals:     Globals::Anywhere,
         complete:    ssh::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["docker"],
@@ -163,6 +179,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: containers::SELECTOR_FLAGS,
         globals:     Globals::Leading,
         complete:    containers::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["podman"],
@@ -172,6 +189,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: containers::SELECTOR_FLAGS,
         globals:     Globals::Anywhere,
         complete:    containers::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["kubectl"],
@@ -181,6 +199,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: kubectl::VALUE_FLAGS,
         globals:     Globals::Anywhere,
         complete:    kubectl::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["git"],
@@ -190,6 +209,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &["-C", "-c", "--git-dir", "--work-tree", "--namespace"],
         globals:     Globals::Leading,
         complete:    git::complete,
+        files_at:    Some(git::files),
     },
     FunctionProvider {
         commands:    &["jj"],
@@ -199,6 +219,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &[],
         globals:     Globals::Leading,
         complete:    jj::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["npm", "pnpm", "yarn"],
@@ -208,6 +229,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &["--prefix", "-C", "--dir", "--cwd"],
         globals:     Globals::Anywhere,
         complete:    project::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["make"],
@@ -217,6 +239,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &["-C", "--directory", "-f", "--file", "--makefile"],
         globals:     Globals::Anywhere,
         complete:    project::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["just"],
@@ -226,6 +249,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &["-f", "--justfile", "-d", "--working-directory"],
         globals:     Globals::Anywhere,
         complete:    project::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["cargo"],
@@ -235,6 +259,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &["-C", "--manifest-path"],
         globals:     Globals::Anywhere,
         complete:    project::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["zig"],
@@ -244,6 +269,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: project::ZIG_BUILD_FLAGS,
         globals:     Globals::Anywhere,
         complete:    project::complete,
+        files_at:    None,
     },
     FunctionProvider {
         commands:    &["kill", "pkill"],
@@ -253,6 +279,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         value_flags: &[],
         globals:     Globals::Anywhere,
         complete:    process::complete,
+        files_at:    None,
     },
 ];
 
@@ -260,6 +287,18 @@ fn provider_for(cmd: &str, kind: Kind) -> Option<&'static FunctionProvider> {
     PROVIDERS
         .iter()
         .find(|provider| provider.kind() == kind && provider.commands().contains(&cmd))
+}
+
+/// whether the provider for `cmd` knows `flag` to take the next word, where
+/// `leading` is true before the subcommand.
+pub fn takes_value(cmd: &str, flag: &str, leading: bool) -> bool {
+    PROVIDERS
+        .iter()
+        .find(|provider| provider.commands().contains(&cmd))
+        .is_some_and(|provider| {
+            provider.value_flags.contains(&flag)
+                && (leading || provider.globals == Globals::Anywhere)
+        })
 }
 
 pub fn kind_of(cmd: &str) -> Option<&'static str> {
@@ -279,10 +318,7 @@ pub fn kind_of(cmd: &str) -> Option<&'static str> {
 pub fn dispatch(spans: &[String], ctx: &DynCtx<'_>) -> Option<Answer> {
     let cmd = spans.first()?.as_str();
     let provider = provider_for(cmd, Kind::Fallback)?;
-    Some(Answer {
-        candidates: provider.complete(spans, ctx)?,
-        files:      provider.files(),
-    })
+    provider.answer(spans, ctx)
 }
 
 /// a provider's own matching rule, plain value matching otherwise.

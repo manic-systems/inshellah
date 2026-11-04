@@ -42,6 +42,7 @@ use inshellah::{
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
         provider_kind,
+        provider_takes_value,
     },
     executable::{
         find_in_path,
@@ -186,12 +187,15 @@ pub fn decide(
     let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, &mut trace);
     trace.dirs.clone_from(&dirs);
 
-    if let Some(candidates) =
-        dynamic_value_completions(&cmd_name, &rest, explicit_cmd_path.as_deref(), timeout_ms)
-    {
-        trace.dynamic = Some(candidates.len());
+    if let Some(response) = value_provider(
+        &spans,
+        explicit_cmd_path.as_deref(),
+        timeout_ms,
+        cfg,
+        &mut trace,
+    ) {
         return Decision {
-            response: Response::or_defer(candidates),
+            response,
             reason: Reason::ValueProvider,
             trace,
         };
@@ -218,11 +222,7 @@ pub fn decide(
     trace.node = found.as_ref().map(|node| node.name.clone());
 
     let slot = cmd_path.slot;
-    trace.slot = Some(match slot {
-        ArgSlot::Free => "free".to_owned(),
-        ArgSlot::FlagValue(flag) => format!("value of {flag}"),
-        ArgSlot::AfterDoubleDash => "after --".to_owned(),
-    });
+    trace.slot = Some(slot.to_string());
     if let Some(candidates) = flag_value_choices(found.as_ref(), slot, &last_token, cfg) {
         return Decision {
             response: Response::Candidates(candidates),
@@ -293,6 +293,19 @@ pub fn decide(
         reason,
         trace,
     }
+}
+
+fn value_provider(
+    spans: &[String],
+    explicit_cmd_path: Option<&Path>,
+    timeout_ms: u64,
+    cfg: &Config,
+    trace: &mut Trace,
+) -> Option<Response> {
+    let (cmd_name, rest) = spans.split_first()?;
+    let candidates = dynamic_value_completions(cmd_name, rest, explicit_cmd_path, timeout_ms, cfg)?;
+    trace.dynamic = Some(candidates.len());
+    Some(Response::or_defer(candidates))
 }
 
 struct Resolve<'ctx> {
@@ -682,6 +695,16 @@ enum ArgSlot<'rest> {
     AfterDoubleDash,
 }
 
+impl Display for ArgSlot<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Free => f.write_str("free"),
+            Self::FlagValue(flag) => write!(f, "value of {flag}"),
+            Self::AfterDoubleDash => f.write_str("after --"),
+        }
+    }
+}
+
 struct CommandPath<'rest> {
     path:  Vec<String>,
     depth: usize,
@@ -729,6 +752,7 @@ fn command_path<'rest>(
             if current
                 .as_ref()
                 .is_some_and(|result| switch_takes_value(result, token))
+                || (!token.contains('=') && provider_takes_value(cmd_name, token, depth == 1))
             {
                 value_of = Some(token.as_str());
             }

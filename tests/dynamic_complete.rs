@@ -110,6 +110,7 @@ case "${0##*/}" in
   systemctl)
     case "$*" in
       *"g*"*) printf 'greetd.service loaded active running Greeter\n' ;;
+      *"h*"*) printf 'home.mount not-found inactive dead home.mount\n' ;;
       *) printf 'demo.service loaded active running Demo Unit\n' ;;
     esac
     ;;
@@ -268,6 +269,9 @@ printf '%s\n' "$@" > "$INSHELLAH_JJ_ARGS_FILE"
 case "$*" in
   *"log -r main.."*)
     printf 'main..main\tmain change\n\nmain..feature\t feature change\n'
+    ;;
+  *" aliased "*)
+    printf 'list\tList things [default alias: ls]\nls\t\n--all\tShow all\n'
     ;;
 esac
 "#;
@@ -644,6 +648,15 @@ fn systemctl_emits_units_only_for_unit_verbs() {
     let (prefixed_out, ..) = harness.run(&["systemctl", "start", "g"], &[]);
     let prefixed = parse_output(&prefixed_out).expect("prefix-filtered units");
     assert_eq!(prefixed[0].value, "greetd.service");
+}
+
+#[test]
+fn systemctl_units_do_not_repeat_their_name_as_description() {
+    let harness = Harness::new("dyn-systemctl-ghost");
+    let (stdout, ..) = harness.run(&["systemctl", "restart", "h"], &[]);
+    let cands = parse_output(&stdout).expect("units");
+    assert_eq!(Harness::values(&cands), vec!["home.mount"]);
+    assert_eq!(Harness::descriptions(&cands), vec![""]);
 }
 
 #[test]
@@ -1134,4 +1147,65 @@ fn jj_defers_to_native_completer() {
 
     let (empty, ..) = harness.run(&["jj", "nothing", ""], &[]);
     assert!(parse_output(&empty).is_none());
+}
+
+#[test]
+fn jj_hides_flags_on_an_empty_token_and_bare_aliases() {
+    let harness = Harness::new("dyn-jj-flags");
+    let values = |last: &str, env: &[(&str, &str)]| {
+        let (stdout, ..) = harness.run(&["jj", "aliased", last], env);
+        Harness::values(&parse_output(&stdout).expect("candidates"))
+    };
+    assert_eq!(values("", &[]), vec!["list"]);
+    assert_eq!(values("", &[("INSHELLAH_FLAG_ON_EMPTY", "1")]), vec![
+        "list", "--all"
+    ]);
+    assert!(values("--", &[]).contains(&"--all".to_owned()));
+}
+
+#[test]
+fn git_slots_that_never_take_paths_answer_without_files() {
+    let harness = Harness::new("dyn-git-no-files");
+    for line in [
+        &["git", "push", ""][..],
+        &["git", "push", "origin", ""],
+        &["git", "stash", ""],
+        &["git", "remote", ""],
+        &["git", "merge", ""],
+    ] {
+        let (stdout, ..) = harness.run(line, &[]);
+        assert!(
+            stdout.trim_start().starts_with('['),
+            "{line:?} must not carry the file fallback, got {stdout}"
+        );
+    }
+    for line in [&["git", "checkout", ""][..], &["git", "diff", ""]] {
+        let (stdout, ..) = harness.run(line, &[]);
+        assert!(
+            stdout.contains(r#""fallback":true"#),
+            "{line:?} takes paths, got {stdout}"
+        );
+    }
+}
+
+#[test]
+fn provider_value_flags_consume_the_next_word_without_a_cached_entry() {
+    let harness = Harness::new("dyn-git-global-value");
+    seed_command(&harness, "git", &["checkout", "commit"], &[], &[]);
+    let (stdout, ..) = harness.run(&["git", "-C", ""], &[]);
+    assert_eq!(stdout.trim(), "null", "-C takes a directory, got {stdout}");
+
+    let (after, ..) = harness.run(&["git", "-C", "/tmp", "ch"], &[]);
+    let cands = parse_output(&after).expect("subcommands after the flag value");
+    assert!(Harness::values(&cands).contains(&"checkout".to_owned()));
+
+    let (inner, ..) = harness.run(&["git", "commit", "-C", ""], &[]);
+    assert!(
+        !stdout_has_subcommands(&inner),
+        "-C after the subcommand is not the global flag, got {inner}"
+    );
+}
+
+fn stdout_has_subcommands(stdout: &str) -> bool {
+    parse_output(stdout).is_some_and(|cands| Harness::values(&cands).contains(&"checkout".into()))
 }
