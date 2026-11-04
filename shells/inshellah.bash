@@ -24,6 +24,7 @@ _inshellah_takeover() {
 _inshellah_shell_owns() {
     case $(type -t -- "$1") in
         builtin)
+            [[ $1 == command || $1 == exec ]] && return 1
             [[ $1 == kill ]] && { _inshellah_takeover || ! complete -p kill >/dev/null 2>&1; } && return 1
             return 0
             ;;
@@ -61,7 +62,7 @@ _inshellah_answer() {
     [[ -n $nested ]] && _inshellah_shell_owns "$_inshellah_command" && return 1
     [[ $mode == defer ]] && return 1
 
-    compopt +o default 2>/dev/null || true
+    compopt +o default +o nospace 2>/dev/null || true
     compopt -o nosort 2>/dev/null || true
     local entry
     for entry in "${reply[@]:1}"; do
@@ -70,16 +71,61 @@ _inshellah_answer() {
     if [[ $mode == values+files ]]; then
         _inshellah_add_files
     fi
-    if [[ ${#COMPREPLY[@]} -eq 1 && ${COMPREPLY[0]} == *[=/] ]]; then
-        compopt -o nospace 2>/dev/null || true
-    fi
+    [[ ${#COMPREPLY[@]} -eq 1 ]] && _inshellah_single
     return 0
 }
 
-# a provider may already list a directory the file listing repeats, so a file
+# readline closes an open quote and adds a space after a lone match, which is
+# wrong for a directory and for a `"$(` whose quote is not the match's. bash
+# skips the quote for a directory it can stat, but for a substitution only in
+# its own completer, so there two matches that share the wanted text make
+# readline insert it and nothing more.
+_inshellah_single() {
+    local only=${COMPREPLY[0]} pad=" " lead=
+    local opener='(^|[^\\])(\$\(|<\(|>\(|`)'
+    [[ $only =~ $opener || $only == " "* ]] && lead=1
+    if [[ $only == *[=/] ]]; then
+        pad=
+        compopt -o nospace 2>/dev/null || true
+    fi
+    if [[ -z $lead ]]; then
+        [[ $only == */ ]] && { compopt -o filenames -o noquote 2>/dev/null || true; }
+    elif _inshellah_open_quote; then
+        compopt -o nospace 2>/dev/null || true
+        COMPREPLY=("$only$pad" "$only$pad ")
+    fi
+}
+
+# succeeds when readline counts a quote as open at the cursor, going by quote
+# characters alone as it does
+_inshellah_open_quote() {
+    local line=${COMP_LINE:0:COMP_POINT} quote= ch i
+    for ((i = 0; i < ${#line}; i++)); do
+        ch=${line:i:1}
+        if [[ -n $quote && $ch == "$quote" ]]; then
+            quote=
+        elif [[ $quote == "'" ]]; then
+            :
+        elif [[ $ch == "\\" ]]; then
+            ((i++))
+        elif [[ -z $quote && ($ch == '"' || $ch == "'") ]]; then
+            quote=$ch
+        fi
+    done
+    [[ -n $quote ]]
+}
+
+# files alone are left to readline to quote and mark, which also keeps menus
+# showing plain names. next to provider values the names are escaped here, a
+# provider may already list a directory the file listing repeats, so a file
 # replaces its bare twin instead of doubling it
 _inshellah_add_files() {
     local cur=${COMP_WORDS[COMP_CWORD]} quoted= file slash i
+    if [[ ${#COMPREPLY[@]} -eq 0 ]]; then
+        mapfile -t COMPREPLY < <(compgen -f -- "$cur")
+        compopt -o filenames 2>/dev/null || true
+        return 0
+    fi
     [[ $cur == [\"\']* ]] && quoted=1
     local -A seen=()
     for i in "${!COMPREPLY[@]}"; do

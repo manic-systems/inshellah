@@ -79,9 +79,23 @@ fish and the binary get signal names after `-s`, `--signal`, `-l` and
 only pids. reserved words that start a command, like `time`,
 `if`, `while`, `!` and `{`, never stop inshellah from completing the command
 after them, and neither does a `$(` or backtick substitution opened inside
-double quotes. file candidates are not offered there. a line that begins with
+double quotes. builtins that run another command, `command` and `exec`, hand
+the command behind them to inshellah as well. file candidates are not offered
+inside a substitution. a line that begins with
 an assignment, as in `x="$(git sw`, is still completed by bash as a command
 name, so the hook never sees it.
+
+readline would close an open quote after a lone match, which inside a `"$(` is
+the substitution's quote and not the match's. bash only avoids that in its own
+substitution completer, so the hook hands readline two matches that share the
+wanted text and the line is left open, at the price of the same text listed
+twice if you press tab again. a directory that exists is completed without
+closing its quote and without a space, as are file names that stand alone,
+which readline quotes itself and shows without escapes in menus. file names
+listed next to provider values, and flag paths such as `--output=`, are escaped
+by inshellah and show their backslashes in menus, and menus inside a `"$(` show
+the text from the start of the quoted word, because bash lists exactly what it
+inserts.
 
 whenever inshellah comes up empty for a cursor position, the shell drops back
 to its normal file completion.
@@ -118,7 +132,9 @@ bash hands over the raw command line with `--line` because `COMP_WORDS`
 already splits tokens on `COMP_WORDBREAKS` characters like `=` and `:`.
 inshellah does its own split and formats each returned value the way readline
 expects to insert it, stripping the prefix up to the last wordbreak and
-escaping shell characters. for bash, the header line also tacks on a tab and
+escaping shell characters. the wordbreaks `@` and `$` stay in the replaced word,
+as they do in readline, so `autovt@` completes the part after the `@` and keeps it.
+for bash, the header line also tacks on a tab and
 the command it ended up completing, since a cursor inside `$(` can be
 completing a different command than the outer one bash passed to the hook.
 

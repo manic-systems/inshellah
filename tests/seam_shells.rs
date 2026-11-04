@@ -192,6 +192,9 @@ comp_as if 'if demotool al'
 comp_as echo 'echo "$(demotool al'
 comp_as echo 'echo "x$(demotool --color=al'
 comp_as echo 'echo `demotool al'
+comp_as command 'command demotool al'
+comp_as exec 'exec demotool al'
+comp_as echo 'echo "$(command demotool al'
 for value in 1 true ' Yes ' ON 0 off '' maybe; do
     INSHELLAH_TAKEOVER=$value _inshellah_takeover && state=on || state=off
     echo "takeover '$value' => $state"
@@ -220,9 +223,12 @@ time demotool be|beta|
 demotool alpha run |
 time demotool be|beta|
 if demotool al|alpha|
-echo "$(demotool al|$(demotool alpha|
-echo "x$(demotool --color=al|x$(demotool --color=always|
+echo "$(demotool al|$(demotool alpha |$(demotool alpha  |
+echo "x$(demotool --color=al|x$(demotool --color=always |x$(demotool --color=always  |
 echo `demotool al|alpha|
+command demotool al|alpha|
+exec demotool al|alpha|
+echo "$(command demotool al|$(command demotool alpha |$(command demotool alpha  |
 takeover '1' => on
 takeover 'true' => on
 takeover ' Yes ' => on
