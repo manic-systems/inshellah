@@ -43,7 +43,7 @@ inshellah index /usr --shell bash,zsh
 in bash, the hook re-claims `complete -D` when the first prompt draws, so load
 order relative to bash-completion does not matter. wrapped commands like
 `sudo` and `nohup` that bash-completion unwraps still get handed through to
-inshellah.
+inshellah. the catch-all spec also carries `-o bashdefault`, so a line the hook defers still gets bash's own command, variable and substitution completion, and under takeover the borrowed bash-completion completer keeps the `-o nospace`, `filenames`, `noquote` and `nosort` options of its spec so a finished word gets one space, not two.
 
 bash has to be 4.1 or newer. macos still ships 3.2 at `/bin/bash`, so grab a
 newer bash from nix or homebrew there. on older bash versions the hook stays
@@ -73,10 +73,16 @@ in bash, `kill` is a builtin that inshellah normally leaves to the shell. under
 takeover, or when bash-completion has no spec for it, inshellah's own `kill`
 provider answers instead. that provider offers the builtin's own flags
 (`-s`, `-n`, `-l`, and `-L` in bash) and not the binary's, completes signal
-names after them and for `-SIGTERM` style words, and lists pids otherwise.
-the binary gets signal names after `-s`, `--signal`, `-l` and `--list`. fish
-keeps its own `kill`, a function that hands the work to the binary, so fish
-lists pids after `-l` as it does without inshellah, while nushell's own `kill` takes a signal number and keeps getting
+names after them, also attached as in `-sTERM`, and for `-SIGTERM` style words,
+and lists pids otherwise. after `--` no flags are offered. zsh's `-n` takes only
+numbers, so there it lists signal numbers and bash lists names. the signal
+table follows the os inshellah was built for, with `STKFLT`, `PWR` and the
+`RTMIN` to `RTMAX` range on linux, and `EMT` and `INFO` on macos.
+the binary gets signal names after `-s`, `--signal`, `-l` and `--list`, and
+pkill gets them after `--signal` and `-SIG` words as well as user and group
+names after `-u`, `-U`, `-G` and their long forms. fish keeps its own `kill`, a
+function that hands the work to the binary, so fish lists pids after `-l` as it
+does without inshellah, while nushell's own `kill` takes a signal number and keeps getting
 only pids. reserved words that start a command, like `time`,
 `if`, `while`, `!` and `{`, never stop inshellah from completing the command
 after them, and neither does a `$(` or backtick substitution opened inside
@@ -90,7 +96,7 @@ readline would close an open quote after a lone match, which inside a `"$(` is
 the substitution's quote and not the match's. bash only avoids that in its own
 substitution completer, so the hook hands readline two matches that share the
 wanted text and the line is left open, at the price of the same text listed
-twice if you press tab again. a directory that exists is completed without
+twice if you press tab again. a quote opened by the command inside a substitution, as in `"$(git checkout "fea`, is closed by inshellah along with the candidate. a directory that exists is completed without
 closing its quote and without a space, as are file names that stand alone,
 which readline quotes itself and shows without escapes in menus. file names
 listed next to provider values, and flag paths such as `--output=`, are escaped
@@ -164,7 +170,8 @@ and `git diff` keep files beside their refs.
 a value that starts with `~` or `$` is not listed. no shell expands either one
 inside an attached `--output=` value, so a listed path would resolve against
 the working directory while the shell shows it as the home directory. the
-position is deferred to the shell instead.
+position is deferred to the shell instead. in bash a candidate that begins
+with `~` or `~user` keeps its tilde unescaped so the shell expands it.
 
 `git fetch`, `git pull` and `git push` take a path or url in place of a remote
 name, as in `git pull ../other`, so their first argument answers

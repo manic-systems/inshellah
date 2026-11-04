@@ -36,8 +36,7 @@ impl Fixture {
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).expect("bin dir");
         for tool in [
-            "demotool", "twotool", "fwrap", "ordtool", "dirtool", "widetool", "bigtool",
-            "pendtool",
+            "demotool", "twotool", "fwrap", "ordtool", "dirtool", "widetool", "bigtool", "pendtool",
         ] {
             let stub = bin.join(tool);
             fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub executable");
@@ -192,6 +191,7 @@ comp_as time 'time demotool be'
 comp_as if 'if demotool al'
 comp_as echo 'echo "$(demotool al'
 comp_as echo 'echo "x$(demotool --color=al'
+comp_as echo 'echo "$(demotool "al'
 comp_as echo 'echo `demotool al'
 comp_as command 'command demotool al'
 comp_as exec 'exec demotool al'
@@ -226,6 +226,7 @@ time demotool be|beta|
 if demotool al|alpha|
 echo "$(demotool al|$(demotool alpha |$(demotool alpha  |
 echo "x$(demotool --color=al|x$(demotool --color=always |x$(demotool --color=always  |
+echo "$(demotool "al|"$(demotool "alpha"|
 echo `demotool al|alpha|
 command demotool al|alpha|
 exec demotool al|alpha|
@@ -352,9 +353,9 @@ dirtool --out=pd => --out=pdir/ S[] {--out=pdir/  -- directory}
 dirtool --out=pdir/ => --out=pdir/sub/ S[] {--out=pdir/sub/  -- directory}
 widetool  => alpha|beta {alpha  -- \u{65e5}\u{672c}\u{8a9e}\u{306e}\u{8aac}...|beta   -- short}
 demotool alpha r => run|reset {run    -- run it|reset  -- reset it}
-dirtool --out=pd => --out=pdir/ S[] {--out=pdir/  -- directory}
 demotool alpha run  => default
 demotool al => prev
+dirtool --out=pd => --out=pdir/ S[] {--out=pdir/  -- directory}
 demotool al => alpha {alpha  -- first}
 registered _inshellah _inshellah
 ",

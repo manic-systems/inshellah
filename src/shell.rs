@@ -60,6 +60,9 @@ pub struct BashLine {
     /// byte offset in the parsed line where the replaced tail of the last
     /// word starts.
     pub raw_kept: usize,
+    /// the line ends inside a substitution still open, where readline does
+    /// not close the command's own quote.
+    pub nested:   bool,
 }
 
 #[derive(Default)]
@@ -180,6 +183,7 @@ impl BashLine {
                     if !closed {
                         let mut inner = Self::parse(&body, wordbreaks);
                         inner.raw_kept += body_at;
+                        inner.nested = true;
                         return inner;
                     }
                     lex.start_word(here);
@@ -269,6 +273,7 @@ impl BashLine {
             redirect,
             lead: String::new(),
             raw_kept,
+            nested: false,
         }
     }
 
@@ -287,6 +292,7 @@ impl BashLine {
             return None;
         }
         inner.raw_kept += body_at;
+        inner.nested = true;
         let from = readline_quote(line).unwrap_or_else(|| lex.unquoted_raw.unwrap_or(lex.word_raw));
         line.get(from..inner.raw_kept)?.clone_into(&mut inner.lead);
         Some(inner)
@@ -307,13 +313,16 @@ impl BashLine {
                 Some(_) => "\"\\$`".contains(ch),
                 None => {
                     " \"'\\$`<>|&;()*?[]{}!".contains(ch)
-                        || (idx == 0 && self.kept.is_empty() && "~#".contains(ch))
+                        || (idx == 0 && self.kept.is_empty() && ch == '#')
                 },
             };
             if special {
                 out.push('\\');
             }
             out.push(ch);
+        }
+        if let (true, Some(quote), false) = (self.nested, self.quote, value.ends_with(['/', '='])) {
+            out.push(quote);
         }
         Some(format!("{}{out}", self.lead))
     }
@@ -496,6 +505,15 @@ mod tests {
             nested.insertion("--output=dir one/").as_deref(),
             Some(r#""$(frob --output="dir one/"#)
         );
+        let inner = parse(r#"echo "$(frob "fea"#);
+        assert_eq!(
+            inner.insertion("feature").as_deref(),
+            Some(r#""$(frob "feature""#)
+        );
+        assert_eq!(
+            parse(r#"frob "fea"#).insertion("feature").as_deref(),
+            Some("feature")
+        );
         let reopened = parse(r#"echo "$(frob "x" --col"#);
         assert_eq!(reopened.lead, " ");
         assert_eq!(reopened.insertion("--color").as_deref(), Some(" --color"));
@@ -526,7 +544,12 @@ mod tests {
             parse("cmd ").insertion("a b&c").as_deref(),
             Some(r"a\ b\&c")
         );
-        assert_eq!(parse("cmd ").insertion("~x").as_deref(), Some(r"\~x"));
+        assert_eq!(parse("cmd ").insertion("~x/").as_deref(), Some("~x/"));
+        assert_eq!(
+            parse("cmd ").insertion("~/a b/").as_deref(),
+            Some(r"~/a\ b/")
+        );
+        assert_eq!(parse("cmd ").insertion("#x").as_deref(), Some(r"\#x"));
         assert_eq!(
             parse(r#"cmd "a"#).insertion("a $b").as_deref(),
             Some(r"a \$b")
