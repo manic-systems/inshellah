@@ -125,14 +125,16 @@ fn expect(got: &str, want: &str) {
 const BASH: &str = r#"
 set -e
 source "$SHIM/inshellah.bash"
-comp() {
+comp() { comp_as demotool "$1"; }
+comp_as() {
+    set -- "$2" "$1"
     COMP_LINE=$1
     COMP_POINT=${#1}
     read -ra COMP_WORDS <<<"$1"
     [[ $1 == *' ' ]] && COMP_WORDS+=("")
     COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
     COMPREPLY=()
-    _inshellah_complete demotool "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD - 1]}"
+    _inshellah_complete "$2" "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD - 1]}"
     printf '%s|' "$1" "${COMPREPLY[@]}"
     echo
 }
@@ -147,6 +149,15 @@ comp 'demotool > out'
 comp 'demotool a"l"p'
 comp 'time demotool be'
 comp 'demotool alpha run '
+comp_as time 'time demotool be'
+comp_as if 'if demotool al'
+comp_as echo 'echo "$(demotool al'
+comp_as echo 'echo "x$(demotool --color=al'
+comp_as echo 'echo `demotool al'
+for value in 1 true ' Yes ' ON 0 off '' maybe; do
+    INSHELLAH_TAKEOVER=$value _inshellah_takeover && state=on || state=off
+    echo "takeover '$value' => $state"
+done
 "#;
 
 #[test]
@@ -169,6 +180,19 @@ demotool > out|
 demotool a"l"p|alpha|
 time demotool be|beta|
 demotool alpha run |
+time demotool be|beta|
+if demotool al|alpha|
+echo "$(demotool al|$(demotool alpha|
+echo "x$(demotool --color=al|x$(demotool --color=always|
+echo `demotool al|alpha|
+takeover '1' => on
+takeover 'true' => on
+takeover ' Yes ' => on
+takeover 'ON' => on
+takeover '0' => off
+takeover 'off' => off
+takeover '' => off
+takeover 'maybe' => off
 "#,
     );
 }

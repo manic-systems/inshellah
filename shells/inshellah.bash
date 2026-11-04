@@ -6,12 +6,28 @@
 # tell which, so a line holding an opener is decided after it answers.
 _inshellah_nested() {
     local line=${COMP_LINE:0:COMP_POINT}
-    [[ $line == *'$('* || $line == *'<('* || $line == *'>('* ]]
+    [[ $line == *'$('* || $line == *'<('* || $line == *'>('* || $line == *'`'* ]]
+}
+
+# the values parse_bool accepts in the config, so every hook reads the
+# variable alike
+_inshellah_takeover() {
+    local value=${INSHELLAH_TAKEOVER-}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    case ${value,,} in
+        1 | true | yes | on) return 0 ;;
+    esac
+    return 1
 }
 
 _inshellah_shell_owns() {
     case $(type -t -- "$1") in
-        builtin | keyword | function) return 0 ;;
+        builtin)
+            [[ $1 == kill ]] && { _inshellah_takeover || ! complete -p kill >/dev/null 2>&1; } && return 1
+            return 0
+            ;;
+        keyword | function) return 0 ;;
     esac
     return 1
 }
@@ -32,6 +48,7 @@ _inshellah_answer() {
     _inshellah_command=$1
     local nested=
     _inshellah_nested && nested=1
+    [[ $(type -t -- "$1") == keyword ]] && nested=1
     [[ -z $nested ]] && _inshellah_shell_owns "$1" && return 1
 
     local -a reply
@@ -94,7 +111,8 @@ _inshellah_borrow() {
 }
 
 _inshellah_complete() {
-    local takeover=${INSHELLAH_TAKEOVER-}
+    local takeover=
+    _inshellah_takeover && takeover=1
     if [[ -z $takeover ]] && ! _inshellah_nested; then
         _inshellah_load "$1" && return 124
     fi
@@ -156,7 +174,7 @@ _inshellah_register_at_prompt() {
         _inshellah_eager=$(complete -p 2>/dev/null) || true
         return 0
     fi
-    [[ -n ${INSHELLAH_TAKEOVER-} ]] || return 0
+    _inshellah_takeover || return 0
     local spec
     while IFS= read -r spec; do
         [[ ${spec##* } == -* || $'\n'$_inshellah_eager$'\n' == *$'\n'"$spec"$'\n'* ]] ||
@@ -167,7 +185,7 @@ _inshellah_register_at_prompt() {
 if [[ $(type -t complete) == builtin ]] &&
     ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1))); then
     _inshellah_register
-    unset _inshellah_registered
+    [[ -n ${_inshellah_eager+set} ]] || unset _inshellah_registered
     if [[ ${PROMPT_COMMAND[*]-} == *_inshellah_register_at_prompt* ]]; then
         true
     elif [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]] &&

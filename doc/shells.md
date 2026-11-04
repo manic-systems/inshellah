@@ -67,6 +67,15 @@ in zsh, the hook checks its registration at every prompt and again as you type, 
 
 in zsh, long descriptions are cut to fit the terminal width with a trailing `...`, so every candidate stays on one line.
 
+in bash, `kill` is a builtin that inshellah normally leaves to the shell. under
+takeover, or when bash-completion has no spec for it, inshellah's own `kill`
+provider answers instead. reserved words that start a command, like `time`,
+`if`, `while`, `!` and `{`, never stop inshellah from completing the command
+after them, and neither does a `$(` or backtick substitution opened inside
+double quotes. file candidates are not offered there. a line that begins with
+an assignment, as in `x="$(git sw`, is still completed by bash as a command
+name, so the hook never sees it.
+
 whenever inshellah comes up empty for a cursor position, the shell drops back
 to its normal file completion.
 
