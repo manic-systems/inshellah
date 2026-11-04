@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! commands that run another command, so completion follows the one they run.
 //! sudo and friends are handled by their own lookup in `complete`.
+//!
+//! which flags take a value comes from the wrapper's cached entry. the
+//! `fallback_value` list stands in only when that entry names no value flag,
+//! which is the case for builtins and for tools that are not installed, and
+//! for taskset, whose `-c LIST` the scraper reads as a plain switch.
 
 /// the argument grammar of one wrapper, enough to find the command it runs.
 struct Wrapper {
     name:              &'static str,
-    /// flags whose value is the next word, as `-n 5` or `--adjustment 5`.
-    takes_value:       &'static [&'static str],
+    /// value flags used when the cache lists none, as `-n 5` or `--adjustment
+    /// 5`.
+    fallback_value:    &'static [&'static str],
     /// flags after which no command follows, or whose grammar is too irregular
     /// to skip, like `env -S`.
     no_command:        &'static [&'static str],
@@ -23,155 +29,73 @@ struct Wrapper {
     bare_dash:         bool,
 }
 
+const PLAIN: Wrapper = Wrapper {
+    name:              "",
+    fallback_value:    &[],
+    no_command:        &[],
+    operands:          0,
+    replaces_operands: &[],
+    optional_operands: &[],
+    assignments:       false,
+    bare_dash:         false,
+};
+
 const WRAPPERS: &[Wrapper] = &[
     Wrapper {
-        name:              "nohup",
-        takes_value:       &[],
-        no_command:        &[],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "nohup",
+        ..PLAIN
     },
     Wrapper {
-        name:              "env",
-        takes_value:       &[
-            "-u",
-            "--unset",
-            "-C",
-            "--chdir",
-            "-a",
-            "--argv0",
-            "-P",
-            "--env0-from",
-        ],
-        no_command:        &["-S", "--split-string"],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       true,
-        bare_dash:         true,
+        name: "env",
+        no_command: &["-S", "--split-string"],
+        assignments: true,
+        bare_dash: true,
+        ..PLAIN
     },
     Wrapper {
-        name:              "nice",
-        takes_value:       &["-n", "--adjustment"],
-        no_command:        &[],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "nice",
+        ..PLAIN
     },
     Wrapper {
-        name:              "ionice",
-        takes_value:       &["-c", "--class", "-n", "--classdata"],
-        no_command:        &["-p", "--pid", "-P", "--pgid", "-u", "--uid"],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "ionice",
+        no_command: &["-p", "--pid", "-P", "--pgid", "-u", "--uid"],
+        ..PLAIN
     },
     Wrapper {
-        name:              "timeout",
-        takes_value:       &["-s", "--signal", "-k", "--kill-after"],
-        no_command:        &[],
-        operands:          1,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "timeout",
+        operands: 1,
+        ..PLAIN
     },
     Wrapper {
-        name:              "xargs",
-        takes_value:       &[
-            "-a",
-            "--arg-file",
-            "-d",
-            "--delimiter",
-            "-E",
-            "-I",
-            "-L",
-            "--max-lines",
-            "-n",
-            "--max-args",
-            "-P",
-            "--max-procs",
-            "-s",
-            "--max-chars",
-            "--process-slot-var",
-        ],
-        no_command:        &[],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "xargs",
+        ..PLAIN
     },
     Wrapper {
-        name:              "time",
-        takes_value:       &["-f", "--format", "-o", "--output"],
-        no_command:        &[],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "time",
+        ..PLAIN
     },
     Wrapper {
-        name:              "command",
-        takes_value:       &[],
-        no_command:        &["-v", "-V"],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "command",
+        no_command: &["-v", "-V"],
+        ..PLAIN
     },
     Wrapper {
-        name:              "exec",
-        takes_value:       &["-a"],
-        no_command:        &[],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "exec",
+        fallback_value: &["-a"],
+        ..PLAIN
     },
     Wrapper {
-        name:              "stdbuf",
-        takes_value:       &["-i", "--input", "-o", "--output", "-e", "--error"],
-        no_command:        &[],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "stdbuf",
+        ..PLAIN
     },
     Wrapper {
-        name:              "setsid",
-        takes_value:       &[],
-        no_command:        &[],
-        operands:          0,
-        replaces_operands: &[],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        name: "setsid",
+        ..PLAIN
     },
     Wrapper {
-        name:              "chrt",
-        takes_value:       &[
-            "-T",
-            "--sched-runtime",
-            "-P",
-            "--sched-period",
-            "-D",
-            "--sched-deadline",
-        ],
-        no_command:        &["-p", "--pid", "-m", "--max"],
-        operands:          1,
-        replaces_operands: &[],
+        name: "chrt",
+        no_command: &["-p", "--pid", "-m", "--max"],
+        operands: 1,
         optional_operands: &[
             "-b",
             "--batch",
@@ -184,18 +108,40 @@ const WRAPPERS: &[Wrapper] = &[
             "-o",
             "--other",
         ],
-        assignments:       false,
-        bare_dash:         false,
+        ..PLAIN
     },
     Wrapper {
-        name:              "taskset",
-        takes_value:       &["-c", "--cpu-list"],
-        no_command:        &["-p", "--pid"],
-        operands:          1,
+        name: "taskset",
+        fallback_value: &["-c", "--cpu-list"],
+        no_command: &["-p", "--pid"],
+        operands: 1,
         replaces_operands: &["-c", "--cpu-list"],
-        optional_operands: &[],
-        assignments:       false,
-        bare_dash:         false,
+        ..PLAIN
+    },
+    Wrapper {
+        name: "strace",
+        fallback_value: &[
+            "-a", "-e", "-E", "-o", "-P", "-s", "-S", "-u", "-U", "--env", "--output", "--trace",
+            "--signal", "--user",
+        ],
+        no_command: &["-p", "--attach", "-h", "--help", "-V", "--version"],
+        ..PLAIN
+    },
+    Wrapper {
+        name: "ltrace",
+        fallback_value: &[
+            "-a",
+            "-e",
+            "-l",
+            "-n",
+            "-o",
+            "-s",
+            "-u",
+            "--output",
+            "--library",
+        ],
+        no_command: &["-p", "-h", "--help", "-V", "--version"],
+        ..PLAIN
     },
 ];
 
@@ -211,8 +157,21 @@ fn wrapper_of(word: &str) -> Option<&'static Wrapper> {
 /// the index of the command `spans[0]` runs, when that command is already
 /// typed. the last span is the word under the cursor, so a command that is
 /// still being typed, or a flag value not yet typed, gives None.
-pub fn wrapped_command(spans: &[String]) -> Option<usize> {
+///
+/// `cached_value_flags` gives the value flags of a wrapper's cached entry.
+pub fn wrapped_command<Cached>(spans: &[String], cached_value_flags: Cached) -> Option<usize>
+where
+    Cached: FnOnce(&str) -> Vec<String>,
+{
     let wrapper = wrapper_of(spans.first()?)?;
+    let mut value_flags = cached_value_flags(wrapper.name);
+    if value_flags.is_empty() {
+        value_flags = wrapper
+            .fallback_value
+            .iter()
+            .map(|flag| (*flag).to_owned())
+            .collect();
+    }
     let cursor = spans.len() - 1;
     let mut at = 1;
     let mut operands = wrapper.operands;
@@ -230,7 +189,7 @@ pub fn wrapped_command(spans: &[String]) -> Option<usize> {
         if !word.starts_with('-') || word == "-" {
             break;
         }
-        let scan = scan_flag(wrapper, word)?;
+        let scan = scan_flag(wrapper, &value_flags, word)?;
         if scan.replaced {
             operands = 0;
         }
@@ -268,7 +227,7 @@ struct FlagScan {
 }
 
 /// None when the flag rules out a command.
-fn scan_flag(wrapper: &Wrapper, word: &str) -> Option<FlagScan> {
+fn scan_flag(wrapper: &Wrapper, value_flags: &[String], word: &str) -> Option<FlagScan> {
     if word.starts_with("--") {
         let (name, attached) = word
             .split_once('=')
@@ -277,7 +236,7 @@ fn scan_flag(wrapper: &Wrapper, word: &str) -> Option<FlagScan> {
             return None;
         }
         return Some(FlagScan {
-            consumed: !attached && wrapper.takes_value.contains(&name),
+            consumed: !attached && value_flags.iter().any(|flag| flag == name),
             replaced: wrapper.replaces_operands.contains(&name),
             relaxed:  wrapper.optional_operands.contains(&name),
         });
@@ -290,7 +249,7 @@ fn scan_flag(wrapper: &Wrapper, word: &str) -> Option<FlagScan> {
         }
         scan.replaced |= wrapper.replaces_operands.contains(&flag.as_str());
         scan.relaxed |= wrapper.optional_operands.contains(&flag.as_str());
-        if wrapper.takes_value.contains(&flag.as_str()) {
+        if value_flags.contains(&flag) {
             let attached = idx + letter.len_utf8() < word.len();
             scan.consumed = !attached;
             return Some(scan);
@@ -305,7 +264,30 @@ mod tests {
 
     fn at(line: &str) -> Option<usize> {
         let spans: Vec<String> = line.split(' ').map(str::to_owned).collect();
-        wrapped_command(&spans)
+        wrapped_command(&spans, cached)
+    }
+
+    fn cached(wrapper: &str) -> Vec<String> {
+        let flags: &[&str] = match wrapper {
+            "env" => {
+                &[
+                    "-u",
+                    "--unset",
+                    "-C",
+                    "--chdir",
+                    "-a",
+                    "--argv0",
+                    "--env0-from",
+                ]
+            },
+            "nice" => &["-n", "--adjustment"],
+            "ionice" => &["-c", "--class", "-n", "--classdata"],
+            "timeout" => &["-s", "--signal", "-k", "--kill-after"],
+            "xargs" => &["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"],
+            "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
+            _ => &[],
+        };
+        flags.iter().map(|flag| (*flag).to_owned()).collect()
     }
 
     #[test]
@@ -393,6 +375,47 @@ mod tests {
         assert_eq!(at("chrt -p 10 1234 "), None);
         assert_eq!(at("taskset -p 0x1 1234 "), None);
         assert_eq!(at("ionice -p 1234 "), None);
+    }
+
+    #[test]
+    fn strace_skips_its_flag_values() {
+        assert_eq!(at("strace ls "), Some(1));
+        assert_eq!(at("strace -f -o out.txt ls "), Some(4));
+        assert_eq!(at("strace -fo out.txt ls "), Some(3));
+        assert_eq!(at("strace -oout.txt ls "), Some(2));
+        assert_eq!(at("strace -e trace=openat -s 80 -E A=1 ls "), Some(7));
+        assert_eq!(at("strace -c -S calls -U name,calls ls "), Some(6));
+        assert_eq!(at("strace --output out.txt --trace=file ls "), Some(4));
+        assert_eq!(at("strace -ff -tt -T -yy ls "), Some(5));
+        assert_eq!(at("strace --decode-fds all ls "), Some(2));
+        assert_eq!(at("strace --verbose "), None);
+        assert_eq!(at("strace -p 1 "), None);
+        assert_eq!(at("strace --attach=1 "), None);
+        assert_eq!(at("strace -e trace=file "), None);
+        assert_eq!(at("strace --help "), None);
+    }
+
+    #[test]
+    fn ltrace_skips_its_flag_values() {
+        assert_eq!(at("ltrace ls "), Some(1));
+        assert_eq!(at("ltrace -S -f ls "), Some(3));
+        assert_eq!(at("ltrace -o out.txt -l libc.so* -s 64 ls "), Some(7));
+        assert_eq!(at("ltrace -ttt -n 2 -e malloc ls "), Some(6));
+        assert_eq!(at("ltrace --output=out.txt ls "), Some(2));
+        assert_eq!(at("ltrace -p 1 "), None);
+        assert_eq!(at("ltrace -n "), None);
+    }
+
+    #[test]
+    fn cached_value_flags_replace_the_fallback() {
+        let spans: Vec<String> = ["strace", "--color", "always", "ls", ""]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(
+            wrapped_command(&spans, |_| vec!["--color".to_owned()]),
+            Some(3)
+        );
+        assert_eq!(wrapped_command(&spans, |_| Vec::new()), Some(2));
     }
 
     #[test]

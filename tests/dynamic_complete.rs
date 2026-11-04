@@ -1346,12 +1346,33 @@ fn stdout_has_subcommands(stdout: &str) -> bool {
 #[test]
 fn command_wrappers_are_unwrapped_to_the_command_they_run() {
     let harness = Harness::new("dyn-wrappers");
+    for (wrapper, flag) in [
+        ("env", "unset"),
+        ("nice", "adjustment"),
+        ("timeout", "signal"),
+        ("xargs", "max-args"),
+    ] {
+        let result = ManpageResult {
+            entries:            vec![ManpageEntry {
+                switch: OwnedSwitch::Long(flag.to_owned()),
+                param:  Some(OwnedParam::new(ParamKind::Mandatory, "ARG".to_owned())),
+                desc:   String::new(),
+            }],
+            subcommands:        Vec::new(),
+            positional_choices: Vec::new(),
+            positionals:        Vec::new(),
+            description:        String::new(),
+        };
+        write_result(&harness.cache_dir, wrapper, "help", &result).expect("seed cache");
+    }
     for line in [
         &["nohup", "git", "remote", "show", ""][..],
-        &["env", "-u", "HOME", "FOO=1", "git", "remote", "show", ""],
-        &["nice", "-n", "5", "git", "remote", "show", ""],
+        &[
+            "env", "--unset", "HOME", "FOO=1", "git", "remote", "show", "",
+        ],
+        &["nice", "--adjustment", "5", "git", "remote", "show", ""],
         &["timeout", "--signal=KILL", "5", "git", "remote", "show", ""],
-        &["xargs", "-n", "1", "git", "remote", "show", ""],
+        &["xargs", "--max-args", "1", "git", "remote", "show", ""],
         &["sudo", "env", "FOO=1", "nice", "git", "remote", "show", ""],
     ] {
         let (stdout, ..) = harness.run(line, &[]);

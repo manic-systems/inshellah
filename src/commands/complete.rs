@@ -470,7 +470,7 @@ fn strip_elevation(spans: &[String], dirs: &[PathBuf]) -> (Vec<String>, Option<P
 fn wrapped_command_index(spans: &[String], dirs: &[PathBuf]) -> Option<usize> {
     let (first, rest) = spans.split_first()?;
     if !ELEVATION_COMMANDS.contains(&first.as_str()) {
-        return wrapped_command(spans);
+        return wrapped_command(spans, |wrapper| value_flags(lookup(dirs, wrapper).as_ref()));
     }
     rest.iter()
         .position(|span| {

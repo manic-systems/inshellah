@@ -32,9 +32,16 @@ too.
 commands that only run another command are unwrapped the same way, with
 their own flags and operands skipped. these are `nohup`, `env` (flags and
 `NAME=value` words), `nice`, `ionice`, `timeout` (and its duration), `xargs`,
-`time`, `command`, `exec`, `stdbuf`, `setsid`, `chrt` and `taskset`. modes
-that run no command (`command -v`, `chrt -p`, `taskset -p`, `ionice -p`) and
+`time`, `command`, `exec`, `stdbuf`, `setsid`, `chrt`, `taskset`, `strace` and
+`ltrace`. modes that run no command (`command -v`, `chrt -p`, `taskset -p`,
+`ionice -p`, `strace -p`, `ltrace -p`) and
 `env -S`, whose argument is a command line in one word, are left alone.
+
+which of a wrapper's flags take a value is read from its cached entry, so
+`env -u HOME` or `nice -n 5` is skipped correctly only once `env` or `nice` is
+indexed. a small built in list stands in for `exec`, `taskset`, `strace` and
+`ltrace`, whose cached entry is missing or does not mark `taskset -c` as taking
+a value.
 
 a flag value attached with `=` stays in the word, so `--output=pa` reaches
 inshellah whole. when the flag takes a path (a `FILE`, `PATH` or `DIR`
