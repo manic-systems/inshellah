@@ -64,7 +64,7 @@ _inshellah() {
 }
 
 # a compinit that runs after the first prompt, as deferred plugin managers do,
-# resets both contexts, so every prompt checks the registration. under
+# resets both contexts, so every prompt and keystroke checks the registration. under
 # takeover `-default-` still catches the command behind nohup, env and the like.
 _inshellah_register() {
     (($+functions[compdef])) || return 0
@@ -77,3 +77,7 @@ _inshellah_register() {
 
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _inshellah_register
+if [[ -o interactive ]] && zmodload zsh/zle 2>/dev/null; then
+    autoload -Uz add-zle-hook-widget
+    add-zle-hook-widget line-pre-redraw _inshellah_register
+fi
