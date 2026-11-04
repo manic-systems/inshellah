@@ -234,6 +234,7 @@ fn build_help_result(original: &str) -> ManpageResult {
         description: String::new(),
     };
     result.normalize();
+    result.attach_metavar_choices(original);
     result
 }
 

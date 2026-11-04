@@ -674,3 +674,17 @@ fn single_space_option_row_after_a_finished_line_is_kept() {
         );
     }
 }
+
+#[test]
+fn lowercase_placeholder_between_short_and_long_keeps_both_names() {
+    let groff = ".TH XZ 1\n.SH NAME\nxz \\- compress\n.SH OPTIONS\n.TP\n\\fB\\-F\\fR \
+                 \\fIformat\\fR, \\fB\\-\\-format=\\fIformat\nSpecify the file format.\n";
+    let result = parse_manpage_string(groff);
+    assert!(
+        result.entries.iter().any(|entry| {
+            entry.switch == OwnedSwitch::Both('F', "format".to_owned()) && entry.param.is_some()
+        }),
+        "{:?}",
+        result.entries
+    );
+}

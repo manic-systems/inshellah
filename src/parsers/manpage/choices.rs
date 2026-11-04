@@ -40,10 +40,11 @@ type Miner = fn(&str, &str) -> Vec<ParamChoice>;
 
 /// `desc` keeps its source line breaks.
 pub fn mine(param_name: &str, desc: &str) -> Vec<ParamChoice> {
-    let miners: [Miner; 5] = [
+    let miners: [Miner; 6] = [
         placeholder_list,
         bracketed_possible_values,
         listed_after_header,
+        quoted_label_list,
         parenthesized_list,
         inline_enumeration,
     ];
@@ -55,6 +56,52 @@ pub fn mine(param_name: &str, desc: &str) -> Vec<ParamChoice> {
     let mut seen = HashSet::new();
     found.retain(|choice| seen.insert(choice.value.clone()));
     found
+}
+
+/// values a doc-wide `The WHEN argument ...` sentence gives `param_name`. only
+/// an all-caps metavar followed by the word `argument` counts, so a flag
+/// cannot pick up a list written about some other name.
+pub fn mine_metavar(param_name: &str, doc: &str) -> Vec<ParamChoice> {
+    let metavar = param_name.len() >= 3
+        && param_name.starts_with(|ch: char| ch.is_ascii_uppercase())
+        && param_name
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+    if !metavar {
+        return Vec::new();
+    }
+    let flat = flatten(doc);
+    flat.match_indices(param_name)
+        .filter(|(at, _)| {
+            !flat
+                .get(..*at)
+                .and_then(|before| before.chars().next_back())
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+        .filter_map(|(at, _)| flat.get(at + param_name.len()..)?.strip_prefix(" argument"))
+        .map(argument_values)
+        .find(|choices| choices.len() >= 2)
+        .unwrap_or_default()
+}
+
+// `defaults to 'always' and can also be 'auto' or 'never'` or a plain linking
+// verb followed by the list.
+fn argument_values(after: &str) -> Vec<ParamChoice> {
+    if let Some(tail) = after.strip_prefix(" defaults to ")
+        && let Some((default, _, rest)) = enumerated_item(tail)
+        && let Some(listed) = [" and can also be ", " and can be "]
+            .iter()
+            .find_map(|joiner| rest.strip_prefix(joiner))
+    {
+        let mut values = vec![choice(default, "")];
+        values.extend(enumeration(listed));
+        return values;
+    }
+    LINKING_VERBS
+        .iter()
+        .find_map(|verb| after.strip_prefix(verb))
+        .map(enumeration)
+        .unwrap_or_default()
 }
 
 fn choice(value: &str, desc: &str) -> ParamChoice {
@@ -107,8 +154,26 @@ fn bracketed_possible_values(_param_name: &str, desc: &str) -> Vec<ParamChoice> 
         .find(marker)
         .and_then(|start| desc.get(start + marker.len()..))
         .and_then(|tail| tail.split_once(']'))
-        .map(|(inner, _)| values_of(inner.split(',')))
+        .map(|(inner, _)| bracketed_values(inner))
         .unwrap_or_default()
+}
+
+// eza writes `.name` and `mod|modified` as values and clap lists a custom
+// `"+<FORMAT>"` slot, none of which `values_of` takes.
+fn bracketed_values(inner: &str) -> Vec<ParamChoice> {
+    let mut found = Vec::new();
+    for part in inner.split(',').map(str::trim) {
+        let alternates: Vec<&str> = part.split('|').collect();
+        if alternates
+            .iter()
+            .all(|alt| is_value(alt.strip_prefix('.').unwrap_or(alt)))
+        {
+            found.extend(alternates.into_iter().map(|alt| choice(alt, "")));
+        } else if !part.contains('<') {
+            return Vec::new();
+        }
+    }
+    found
 }
 
 fn listed_after_header(param_name: &str, desc: &str) -> Vec<ParamChoice> {
@@ -121,6 +186,36 @@ fn listed_after_header(param_name: &str, desc: &str) -> Vec<ParamChoice> {
         return by_header;
     }
     list_after(&lines, |paragraph| contains_word(paragraph, &param_lower))
+}
+
+// fd's `'f' or 'file':  regular files` items under a first line ending in a
+// colon. a later list such as fd's size units does not name the param's values.
+fn quoted_label_list(_param_name: &str, desc: &str) -> Vec<ParamChoice> {
+    let mut lines = desc.lines().map(str::trim);
+    if !lines.next().is_some_and(|header| header.ends_with(':')) {
+        return Vec::new();
+    }
+    let mut items: Vec<ParamChoice> = Vec::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        match quoted_labels(line) {
+            Some(labelled) => items.extend(labelled),
+            None => break,
+        }
+    }
+    if items.len() >= 2 { items } else { Vec::new() }
+}
+
+fn quoted_labels(line: &str) -> Option<Vec<ParamChoice>> {
+    let (labels, desc) = line.split_once("':")?;
+    let body = labels.strip_prefix('\'')?;
+    let values: Vec<&str> = body.split("' or '").collect();
+    let spaced = desc.is_empty() || desc.starts_with(char::is_whitespace);
+    (spaced && values.iter().all(|value| is_value(value))).then(|| {
+        values
+            .into_iter()
+            .map(|value| choice(value, desc.trim()))
+            .collect()
+    })
 }
 
 fn list_after<Announces>(lines: &[&str], announces: Announces) -> Vec<ParamChoice>
