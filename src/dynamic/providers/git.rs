@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
+use std::collections::HashMap;
+
 use crate::{
     complete::Candidate,
     dynamic::{
@@ -133,6 +135,7 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
             values,
             description,
         } => Some(static_candidates(values, description)),
+        GitCompletion::TopVerbs => Some(top_verb_candidates(ctx)),
         GitCompletion::Refs => git_refs(&git, ctx, prefix),
         GitCompletion::PushDestinations(remote) => git_push_destinations(&git, ctx, remote, prefix),
         GitCompletion::RemoteBranches(remote) => git_remote_branches(&git, ctx, remote, prefix),
@@ -155,6 +158,7 @@ pub(super) fn files(words: &Words, ctx: &DynCtx) -> Files {
         Some(GitCompletion::Refs) if !path_verbs.contains(&words.arg(0)) => Files::Replace,
         Some(
             GitCompletion::Static { .. }
+            | GitCompletion::TopVerbs
             | GitCompletion::PushDestinations(_)
             | GitCompletion::RemoteBranches(_)
             | GitCompletion::Branches
@@ -180,6 +184,7 @@ enum GitCompletion<'span> {
         values:      &'static [&'static str],
         description: &'static str,
     },
+    TopVerbs,
     Refs,
     PushDestinations(&'span str),
     RemoteBranches(&'span str),
@@ -192,6 +197,32 @@ enum GitCompletion<'span> {
     TrackedPaths,
     Submodules,
     Worktrees,
+}
+
+fn top_verb_candidates(ctx: &DynCtx) -> Vec<Candidate> {
+    let listing =
+        run(&[ctx.bin("git"), "help".to_owned(), "-a".to_owned()], ctx).unwrap_or_default();
+    let described = help_descriptions(&listing);
+    GIT_TOP_VERBS
+        .iter()
+        .map(|verb| {
+            let description = described.get(verb).copied().unwrap_or("git subcommand");
+            Candidate::new(*verb, description)
+        })
+        .collect()
+}
+
+/// the `   name   description` rows of `git help -a`.
+fn help_descriptions(listing: &str) -> HashMap<&str, &str> {
+    let mut rows = HashMap::new();
+    for line in listing.lines().filter(|line| line.starts_with("   ")) {
+        if let Some((name, rest)) = line.trim_start().split_once(char::is_whitespace)
+            && !rest.trim().is_empty()
+        {
+            rows.entry(name).or_insert_with(|| rest.trim());
+        }
+    }
+    rows
 }
 
 fn static_candidates(values: &'static [&'static str], description: &'static str) -> Vec<Candidate> {
@@ -226,10 +257,7 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         return None;
     }
     if words.arg_count() == 0 {
-        return Some(GitCompletion::Static {
-            values:      GIT_TOP_VERBS,
-            description: "git subcommand",
-        });
+        return Some(GitCompletion::TopVerbs);
     }
 
     let nested = match sub {
