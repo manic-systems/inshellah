@@ -35,9 +35,11 @@ impl Fixture {
         let cache = dir.path().join("inshellah");
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).expect("bin dir");
-        let stub = bin.join("demotool");
-        fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub executable");
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
+        for tool in ["demotool", "twotool", "fwrap"] {
+            let stub = bin.join(tool);
+            fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub executable");
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
 
         let demotool = json!({
             "source": "help",
@@ -74,6 +76,7 @@ impl Fixture {
         });
         write_result(&cache, "demotool", "help", &result_from_json(&demotool)).expect("demotool");
         write_result(&cache, "demotool alpha", "help", &result_from_json(&alpha)).expect("alpha");
+        write_result(&cache, "twotool", "help", &result_from_json(&demotool)).expect("twotool");
 
         let built = Path::new(env!("CARGO_BIN_EXE_inshellah"))
             .parent()
@@ -254,8 +257,31 @@ source $SHIM/inshellah.fish
 for line in 'demotool al' 'demotool alpha r' 'demotool --' 'demotool --color=' 'demotool has' 'demotool "al' 'demotool has\\ sp'
     echo "$line =>" (complete -C $line | string join '|')
 end
+function show
+    echo "$argv[1] =>" (complete -C $argv[2] | string join "|")
+end
+complete -c twotool -f -a nativechoice
+complete -c fwrap -x -a "(__fish_complete_subcommand)"
+show "fallback keeps fish own" "twotool "
 set -g INSHELLAH_TAKEOVER 1
-test "$fish_complete_path[1]" = "$__inshellah_stub_dir"; and echo "takeover => stubs first"
+show "takeover reaches loaded" "twotool al"
+show "takeover wrapper" "fwrap demotool al"
+show "takeover defers to fish" "twotool alpha run "
+set -g INSHELLAH_TAKEOVER 0
+show "zero is off" "twotool "
+set -g INSHELLAH_TAKEOVER " TRUE "
+show "trimmed and case folded" "twotool al"
+set -e INSHELLAH_TAKEOVER
+show "unset is off" "twotool "
+"#;
+
+const FISH_USER_DIR: &str = r#"
+set -g fish_complete_path $HOME/usercomp $fish_complete_path
+mkdir -p $HOME/usercomp
+echo "complete -c demotool -f -a userchoice" > $HOME/usercomp/demotool.fish
+set -gx INSHELLAH_TAKEOVER yes
+source $SHIM/inshellah.fish
+echo "user file =>" (complete -C "demotool " | string join "|")
 "#;
 
 #[test]
@@ -274,9 +300,19 @@ demotool --color= => --color=always|--color=never
 demotool has => has space\tquoted
 demotool \"al => alpha\tfirst
 demotool has\\ sp => has space\tquoted
-takeover => stubs first
+fallback keeps fish own => nativechoice
+takeover reaches loaded => alpha\tfirst
+takeover wrapper => alpha\tfirst
+takeover defers to fish => nativechoice
+zero is off => nativechoice
+trimmed and case folded => alpha\tfirst
+unset is off => nativechoice
 ",
     );
+    let user = fixture
+        .run("fish", &["--no-config", "-c"], FISH_USER_DIR)
+        .expect("fish ran once already");
+    expect(&user, "user file => userchoice");
     assert!(
         fixture
             .dir

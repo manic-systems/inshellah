@@ -25,9 +25,12 @@ list also needs `programs.<shell>.enable` turned on. if a shell is set up
 through home-manager alone, put the `inshellah init` line in its rc file as
 shown above.
 
-the takeover variable gets checked when you press tab, and bash and fish also
+takeover is on when `INSHELLAH_TAKEOVER` is `1`, `true`, `yes` or `on`, in any
+case and ignoring surrounding spaces. anything else, including `0`, leaves it
+off. the variable gets checked when you press tab, and bash and fish also
 check it when the hook first loads. if you flip it later in a running shell,
-fish and zsh notice right away and bash catches up at the next prompt.
+fish and zsh notice right away, in both directions, and bash catches up at the
+next prompt.
 
 if you build an index by hand, pass `--shell` with the shells you want it to
 serve. without it, `index` assumes nushell alone and runs `nu` to find out
@@ -58,7 +61,7 @@ systemd and the rest, set `INSHELLAH_TAKEOVER=1` before the hook loads. takeover
 |---|---|---|
 | bash | sits on `complete -D` and lets bash-completion's loader try first | answers first, falls back to bash-completion's completer when it comes up empty, and clears out any specs bash-completion loads later at the next prompt. anything bash-completion registers before the first prompt still wins |
 | zsh | hooks into `-default-` | also hooks into `-first-` and cuts off other completers once it has an answer. a `-first-` completer you had before is kept and called whenever inshellah steps aside, including while takeover is off |
-| fish | puts its stubs after fish's own completion dirs | puts its stubs in front and overrides completions registered at runtime by your config, while leaving fish's builtins alone |
+| fish | answers only for commands fish has no completion for | answers first, falls back to fish's own completion for that command when it comes up empty, and replaces completions your config registers at runtime. fish's builtins, functions and wrappers like `sudo`, `env` and `xargs` keep fish's own completion, which hands the wrapped command back to inshellah |
 
 in zsh, the hook checks its registration at every prompt and again as you type, so a `compinit` that a plugin manager defers until after the first prompt does not lose it. pressing tab before any key or prompt follows that deferred `compinit` still reaches the stock completers.
 
@@ -75,8 +78,13 @@ work with that, the hook runs `inshellah fish-stubs`, which drops a one-line
 stub for every command on `PATH` into the `fish` directory inside the user
 cache and prints that directory path. the hook re-runs it whenever `PATH`
 changes, so entering a `nix shell` picks up the new commands automatically.
-unless takeover is turned on, those stubs step aside when fish already ships a
-completion for the command or your config registered one with `complete -c`.
+the stub dir goes ahead of the vendor and shipped completion dirs and behind
+any dir you put first on `fish_complete_path`, so a completion file of your own
+such as `~/.config/fish/completions/CMD.fish` wins even under takeover. a stub
+loads fish's own completion for its command and, unless takeover is turned on,
+steps aside when there is one or your config registered one with `complete -c`.
+turning takeover on or off puts fish's completions away or back for commands
+that already loaded.
 
 ## the line protocol
 

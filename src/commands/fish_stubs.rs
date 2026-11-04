@@ -20,7 +20,7 @@ use super::common::Dirs;
 
 /// bumped whenever `stub_for` changes, so stubs written by an older inshellah
 /// are replaced rather than kept because they exist.
-const STUB_VERSION: &str = "1";
+const STUB_VERSION: &str = "2";
 const VERSION_FILE: &str = ".version";
 
 /// fish has no catch-all completer, so every command on PATH gets a stub that
@@ -76,9 +76,7 @@ fn stubbable(name: &str) -> bool {
 
 fn stub_for(name: &str) -> String {
     let quoted = format!("'{}'", name.replace('\\', r"\\").replace('\'', r"\'"));
-    format!(
-        "__inshellah_native {quoted}\nor complete -c {quoted} -k -f -a '(__inshellah_complete)'\n"
-    )
+    format!("__inshellah_load {quoted}\n")
 }
 
 #[cfg(test)]
@@ -87,11 +85,7 @@ mod tests {
 
     #[test]
     fn stub_quotes_the_command_name() {
-        assert_eq!(
-            stub_for("it's"),
-            "__inshellah_native 'it\\'s'\nor complete -c 'it\\'s' -k -f -a \
-             '(__inshellah_complete)'\n"
-        );
+        assert_eq!(stub_for("it's"), "__inshellah_load 'it\\'s'\n");
         assert!(!stubbable("-x"));
         assert!(!stubbable(".hidden"));
         assert!(stubbable("git"));

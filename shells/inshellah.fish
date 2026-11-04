@@ -1,6 +1,10 @@
 # inshellah completions for fish. load with
 #   inshellah init fish | source
 
+function __inshellah_takeover
+    string trim -- "$INSHELLAH_TAKEOVER" | string lower | string match -rq "^(1|true|yes|on)\$"
+end
+
 function __inshellah_complete
     set -l words (commandline -opc)
     set -l raw (commandline -ct)
@@ -15,61 +19,140 @@ function __inshellah_complete
             or set current $raw
     end
     set -l reply (command inshellah complete --shell fish -- $words $current 2>/dev/null)
-    or begin
-        __fish_complete_path $raw
-        return
-    end
+    or set reply defer
     set -q reply[1]; or set reply defer
     if test $reply[1] != defer
         printf '%s\n' $reply[2..-1]
+    else if set -q words[1]; and contains -- $words[1] $__inshellah_taken
+        set -l own (__inshellah_fish_own $words[1])
+        if set -q own[1]
+            printf '%s\n' $own
+            return
+        end
     end
     if test $reply[1] != values
         __fish_complete_path $raw
     end
 end
 
-# fish 4 embeds its own completions and only reaches them after every
-# fish_complete_path dir, so a stub loads them itself, and fish 3 ships them as
-# files. a command without them may still have completions a config registered
-# at runtime, as `jj util completion fish | source` does, which takeover drops.
-function __inshellah_native -a cmd
-    if test -n "$INSHELLAH_TAKEOVER"; and not builtin -q -- $cmd; and not functions -q -- $cmd
+# fish's own answer for a command takeover replaced, found by putting its
+# completions back for the length of one lookup
+function __inshellah_fish_own -a cmd
+    set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
+    complete -e -c $cmd
+    printf '%s\n' $$orig | source
+    complete -C "$(commandline -cp)"
+    complete -e -c $cmd
+    __inshellah_install $cmd
+end
+
+function __inshellah_install -a cmd
+    complete -c $cmd -k -f -a '(__inshellah_complete)'
+end
+
+# a line that completes another command's arguments, as opposed to the git
+# subcommands that merely run one
+function __inshellah_wraps
+    for line in $argv
+        string match -rq -- '__fish_complete_\w*subcommand|__fish_complete_command' $line
+        and not string match -rq -- 'using_command|seen_subcommand_from' $line
+        and return 0
+    end
+    return 1
+end
+
+# takeover replaces a command's completions with the stub's, remembering them
+# so turning takeover off puts them back. wrappers like sudo keep fish's own
+# since they hand the wrapped command back to the completion engine.
+function __inshellah_apply -a cmd
+    set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
+    set -l at (contains -i -- $cmd $__inshellah_taken)
+    if __inshellah_takeover
+        and not set -q at[1]
+        and test (count $$orig) -gt 0
+        and not builtin -q -- $cmd
+        and not functions -q -- $cmd
+        and not __inshellah_wraps $$orig
         complete -e -c $cmd
-        return 1
+        __inshellah_install $cmd
+        set -ga __inshellah_taken $cmd
+    else if not __inshellah_takeover; and set -q at[1]
+        complete -e -c $cmd
+        printf '%s\n' $$orig | source
+        set -e __inshellah_taken[$at]
+    end
+end
+
+# the first completion file fish would have loaded had the stub dir not been
+# in the way. fish 4 embeds its own completions and reaches them after every
+# fish_complete_path dir, fish 3 ships them as files.
+function __inshellah_source_native -a cmd
+    set -l seen false
+    for dir in $fish_complete_path
+        if test "$dir" = "$__inshellah_stub_dir"
+            set seen true
+        else if $seen; and not string match -q '*generated_completions' -- $dir; and test -f $dir/$cmd.fish
+            source $dir/$cmd.fish
+            return
+        end
     end
     set -l native (status get-file completions/$cmd.fish 2>/dev/null)
-    and string join \n -- $native | source
-    and return 0
-    test -f $__fish_data_dir/completions/$cmd.fish
-    and source $__fish_data_dir/completions/$cmd.fish
-    and return 0
-    test -z "$INSHELLAH_TAKEOVER"; and complete -c $cmd | string length -q
+    if set -q native[1]
+        string join \n -- $native | source
+    else if test -f $__fish_data_dir/completions/$cmd.fish
+        source $__fish_data_dir/completions/$cmd.fish
+    end
+end
+
+# a command without any completion gets the stub's. changing fish_complete_path
+# makes fish forget what every stub registered, and the stub then runs again,
+# so a second run puts the remembered completions back before applying takeover.
+function __inshellah_load -a cmd
+    set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
+    if contains -- $cmd $__inshellah_loaded
+        complete -e -c $cmd
+        printf '%s\n' $$orig | source
+        set -l at (contains -i -- $cmd $__inshellah_taken)
+        set -q at[1]; and set -e __inshellah_taken[$at]
+    else
+        set -ga __inshellah_loaded $cmd
+        __inshellah_source_native $cmd
+        set -g $orig (complete -c $cmd)
+    end
+    if test (count $$orig) -gt 0
+        __inshellah_apply $cmd
+    else
+        __inshellah_install $cmd
+    end
 end
 
 function __inshellah_stubs --on-variable PATH
     command inshellah fish-stubs >/dev/null 2>&1
 end
 
-# fish's own manpage-generated completions are the ones inshellah improves on,
-# so fallback slots the stubs in just ahead of them
-function __inshellah_place --on-variable INSHELLAH_TAKEOVER
-    set -q __inshellah_stub_dir[1]; or return
+function __inshellah_retake --on-variable INSHELLAH_TAKEOVER
+    for cmd in $__inshellah_loaded
+        __inshellah_apply $cmd
+    end
+end
+
+# the stubs go ahead of everything shipped or vendored, which they replace,
+# but behind dirs the user put first, so a user's own completion file still wins
+function __inshellah_place
     set -l rest
     for dir in $fish_complete_path
         test "$dir" = "$__inshellah_stub_dir"; or set -a rest $dir
     end
-    if test -n "$INSHELLAH_TAKEOVER"
-        set -g fish_complete_path $__inshellah_stub_dir $rest
-        return
-    end
     set -l before $rest
     set -l after
-    set -l generated (string match -e generated_completions -- $rest)
-    if set -q generated[1]
-        set -l at (contains -i -- $generated[1] $rest)
-        set before
-        test $at -gt 1; and set before $rest[1..(math $at - 1)]
-        set after $rest[$at..-1]
+    for at in (seq (count $rest))
+        if string match -rq -- '/vendor_completions\.d$|/generated_completions$' $rest[$at]
+            or test "$rest[$at]" = "$__fish_data_dir/completions"
+            test $at -gt 1; and set before $rest[1..(math $at - 1)]
+            test $at -eq 1; and set before
+            set after $rest[$at..-1]
+            break
+        end
     end
     set -g fish_complete_path $before $__inshellah_stub_dir $after
 end
