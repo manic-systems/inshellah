@@ -153,6 +153,9 @@ _inshellah_borrow() {
     [[ $spec == *' -F '* ]] || return 1
     fn=${spec#* -F }
     fn=${fn%% *}
+    for opt in nospace filenames noquote nosort; do
+        [[ $spec == *" -o $opt"* ]] && { compopt -o "$opt" 2>/dev/null || true; }
+    done
     "$fn" "$@" || true
 }
 
@@ -205,7 +208,7 @@ _inshellah_register() {
             *) _inshellah_prev_default=$prev ;;
         esac
     fi
-    complete -D -o default -F _inshellah_complete
+    complete -D -o bashdefault -o default -F _inshellah_complete
     _inshellah_wrap_minimal
 }
 
