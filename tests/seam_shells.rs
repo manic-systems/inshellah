@@ -195,6 +195,9 @@ comp_as echo 'echo "$(demotool "al'
 comp_as echo 'echo `demotool al'
 comp_as command 'command demotool al'
 comp_as exec 'exec demotool al'
+comp_as builtin 'builtin command demotool al'
+comp_as builtin 'builtin builtin exec demotool al'
+comp_as builtin 'builtin demotool al'
 comp_as echo 'echo "$(command demotool al'
 for value in 1 true ' Yes ' ON 0 off '' maybe; do
     INSHELLAH_TAKEOVER=$value _inshellah_takeover && state=on || state=off
@@ -216,10 +219,29 @@ unwrap 'nohup demotool al'
 unwrap 'nohup nosuchtool al'
 INSHELLAH_TAKEOVER=1 unwrap 'nohup demotool al'
 INSHELLAH_TAKEOVER=1 unwrap 'nohup nosuchtool al'
+_comp_complete_longopt() { COMPREPLY=(longopt); }
+_inshellah_wrap_longopt
+_inshellah_wrap_longopt
+longopt() {
+    COMP_LINE=$1 COMP_POINT=${#1}
+    read -ra COMP_WORDS <<<"$1"
+    [[ $1 == *' ' ]] && COMP_WORDS+=("")
+    COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+    COMPREPLY=()
+    _comp_complete_longopt diff "${COMP_WORDS[COMP_CWORD]}" x
+    printf '%s|' "longopt $1" "${COMPREPLY[@]}"
+    echo
+}
+longopt 'diff --he'
+longopt 'diff <(demotool al'
+longopt 'diff <(builtin command demotool al'
+longopt 'diff `demotool alpha r'
 owns() {
+    COMP_LINE="$*"
+    COMP_POINT=${#COMP_LINE}
     COMP_WORDS=("$@")
     COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
-    _inshellah_shell_owns builtin && echo "owns $*" || echo "asks $*"
+    _inshellah_shell_owns builtin && echo "owns $COMP_LINE" || echo "asks $COMP_LINE"
 }
 owns builtin ki
 owns builtin kill
@@ -238,6 +260,20 @@ nowns "echo \"\$(builtin kill -s T" builtin
 nowns "echo \`builtin kill -s " builtin
 nowns "echo \$(true; builtin command kill -s T" builtin
 nowns "echo \$(builtin cd " builtin
+nowns "echo \$(time builtin kill -s T" builtin
+nowns "echo \$(time -p builtin kill -s T" builtin
+nowns "echo \$(x=1 builtin kill -s T" builtin
+nowns "echo \$(! builtin kill -s T" builtin
+nowns "echo \$(x=1 builtin cd " builtin
+nowns "if builtin kill -s T" builtin
+nowns "! builtin kill -s T" builtin
+nowns "time builtin kill -s T" builtin
+nowns "time -p builtin kill -s T" builtin
+nowns "x=1 builtin kill -s T" builtin
+nowns "while true; do builtin kill -s T" builtin
+nowns "{ builtin kill -s T" builtin
+nowns "if builtin cd " builtin
+nowns "time x=1 builtin cd " builtin
 nowns "echo \$(kill -s T" kill
 nowns "echo kill -s T" kill
 owns builtin command kill -s T
@@ -274,6 +310,9 @@ echo "$(demotool "al|"$(demotool "alpha"|
 echo `demotool al|alpha|
 command demotool al|alpha|
 exec demotool al|alpha|
+builtin command demotool al|alpha|
+builtin builtin exec demotool al|alpha|
+builtin demotool al|
 echo "$(command demotool al|$(command demotool alpha |$(command demotool alpha  |
 takeover '1' => on
 takeover 'true' => on
@@ -287,6 +326,10 @@ unwrap nohup demotool al|bc|
 unwrap nohup nosuchtool al|bc|
 unwrap nohup demotool al|alpha|
 unwrap nohup nosuchtool al|bc|
+longopt diff --he|longopt|
+longopt diff <(demotool al|alpha|
+longopt diff <(builtin command demotool al|alpha|
+longopt diff `demotool alpha r|run|reset|
 owns builtin ki
 owns builtin kill
 asks builtin kill -
@@ -297,6 +340,20 @@ asks echo "$(builtin kill -s T
 asks echo `builtin kill -s 
 asks echo $(true; builtin command kill -s T
 owns echo $(builtin cd 
+asks echo $(time builtin kill -s T
+asks echo $(time -p builtin kill -s T
+asks echo $(x=1 builtin kill -s T
+asks echo $(! builtin kill -s T
+owns echo $(x=1 builtin cd 
+asks if builtin kill -s T
+asks ! builtin kill -s T
+asks time builtin kill -s T
+asks time -p builtin kill -s T
+asks x=1 builtin kill -s T
+asks while true; do builtin kill -s T
+asks { builtin kill -s T
+owns if builtin cd 
+owns time x=1 builtin cd 
 asks echo $(kill -s T
 asks echo kill -s T
 asks builtin command kill -s T

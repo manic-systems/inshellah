@@ -21,12 +21,11 @@ _inshellah_takeover() {
     return 1
 }
 
-# the words of the command being typed. inside a substitution still open at
-# the cursor that is the nested command, not the outer line bash split
+# the words of the command being typed, past the reserved words, `time -p`
+# and assignments that only precede it. bash splits COMP_WORDS at `=` and
+# `(`, so the line is split again here. inside a substitution still open at
+# the cursor that is the nested command, not the outer line bash split.
 _inshellah_cmdwords() {
-    _inshellah_cw=("${COMP_WORDS[@]}")
-    _inshellah_cc=$COMP_CWORD
-    _inshellah_nested || return 0
     local line=${COMP_LINE:0:COMP_POINT} tail best opener
     best=$line
     for opener in '$(' '<(' '>(' '`'; do
@@ -36,7 +35,22 @@ _inshellah_cmdwords() {
     best=${best##*[;|&)]}
     read -ra _inshellah_cw <<<"$best"
     [[ -z $best || $best == *[[:space:]] ]] && _inshellah_cw+=("")
-    _inshellah_cc=$((${#_inshellah_cw[@]} - 1))
+    local skip=0 last=$((${#_inshellah_cw[@]} - 1))
+    while ((skip < last)); do
+        case ${_inshellah_cw[skip]} in
+            time)
+                ((skip++))
+                [[ ${_inshellah_cw[skip]} == -p ]] && ((skip < last)) && ((skip++))
+                ;;
+            if | then | elif | else | while | until | do | "!" | "{" | coproc) ((skip++)) ;;
+            *) break ;;
+        esac
+    done
+    while ((skip < last)) && [[ ${_inshellah_cw[skip]} =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; do
+        ((skip++))
+    done
+    _inshellah_cw=("${_inshellah_cw[@]:skip}")
+    _inshellah_cc=$((last - skip))
 }
 
 # whether the shell keeps a line that starts with builtin. the command behind
@@ -244,6 +258,21 @@ _inshellah_wrap_minimal() {
     done
 }
 
+# bash-completion registers its --help scraper up front for commands such as
+# cat and diff, so it runs for the outer command of a `<(` or `$(` still open
+# at the cursor and would offer that command's flags for the nested words
+_inshellah_wrap_longopt() {
+    local name orig
+    for name in _comp_complete_longopt _longopt; do
+        declare -F "$name" >/dev/null || continue
+        [[ $(declare -f "$name") == *_inshellah_* ]] && continue
+        _inshellah_wraps=$((${_inshellah_wraps:-0} + 1))
+        orig=_inshellah_orig$_inshellah_wraps
+        eval "$orig$(declare -f "$name")"
+        eval "$name() { if _inshellah_nested; then _inshellah_answer \"\$@\" || compopt -o default 2>/dev/null; return 0; fi; $orig$name \"\$@\"; }"
+    done
+}
+
 # under takeover, the commands bash-completion registers up front to unwrap
 # another one, such as nohup and xargs, ask inshellah about the whole line
 # before bash-completion loads the inner command's own spec
@@ -276,6 +305,7 @@ _inshellah_register() {
         complete -F _inshellah_complete_builtin builtin
     complete -D -o bashdefault -o default -F _inshellah_complete
     _inshellah_wrap_minimal
+    _inshellah_wrap_longopt
     _inshellah_wrap_unwrappers
 }
 

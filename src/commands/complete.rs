@@ -418,8 +418,8 @@ fn flags_answer(spans: &[String], flags: &[Candidate], last_token: &str, shell: 
             || flags.iter().any(|flag| flag.value.starts_with(last_token)))
 }
 
-/// whether the line is not inshellah's to complete. anything but the shell's
-/// own kill behind `builtin` is the shell's.
+/// whether the line is not inshellah's to complete. behind `builtin` only the
+/// shell's own kill and a `command` or `exec` running a binary are inshellah's.
 fn unanswerable(
     raw_spans: &[String],
     spans: &[String],
@@ -427,8 +427,17 @@ fn unanswerable(
     shell: Shell,
 ) -> bool {
     let behind_builtin = raw_spans.first().is_some_and(|word| word == "builtin")
-        && builtin_kill_at(raw_spans, shell).is_none();
+        && builtin_kill_at(raw_spans, shell).is_none()
+        && !runs_binary_behind_builtin(raw_spans);
     behind_builtin || spans.is_empty() || (explicit.is_none() && find_in_path(&spans[0]).is_none())
+}
+
+fn runs_binary_behind_builtin(raw_spans: &[String]) -> bool {
+    let at = raw_spans
+        .iter()
+        .take_while(|word| *word == "builtin")
+        .count();
+    at + 1 < raw_spans.len() && matches!(raw_spans[at].as_str(), "command" | "exec")
 }
 
 /// where the shell's own `kill` starts. `builtin` always reaches it and bash's
