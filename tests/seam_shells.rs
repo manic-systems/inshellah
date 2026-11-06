@@ -314,6 +314,11 @@ setup() {
     CURRENT=$#words
     PREFIX=$words[-1]
 }
+kindof() {
+    local out
+    out=$(comp "$1")
+    [[ $out == *'-- TERM'[\|\}]* ]] && print -r -- "${1% } => signals" || print -r -- "${1% } => pids"
+}
 comp() {
     _inshellah_reset
     setup "$1"
@@ -353,6 +358,14 @@ comp 'dirtool --out=pd'
 service=-first- INSHELLAH_TAKEOVER=1 comp 'demotool al'
 INSHELLAH_TAKEOVER=1 service=-first- comp 'kill -s TERM'
 INSHELLAH_TAKEOVER=1 service=-first- comp 'command kill -s TERM'
+INSHELLAH_TAKEOVER=1 service=-first- kindof 'kill -n '
+INSHELLAH_TAKEOVER=1 service=-first- kindof 'command kill -n '
+INSHELLAH_TAKEOVER=1 service=-first- kindof 'noglob exec -a k kill -n '
+INSHELLAH_TAKEOVER=1 service=-first- kindof 'builtin kill -n '
+INSHELLAH_TAKEOVER=1 service=-first- kindof 'builtin command kill -n '
+INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'command exec demotool al'
+INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'command builtin kill -'
+INSHELLAH_TAKEOVER=1 service=-first- comp 'builtin command demotool al'
 INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'command pwd -'
 INSHELLAH_TAKEOVER=1 service=-first- comp 'command demotool al'
 INSHELLAH_TAKEOVER=1 service=-first- comp 'exec -cl -a name demotool al'
@@ -415,6 +428,14 @@ kill -s TERM => TERM|TTOU|TSTP|TTIN {TERM  -- terminate|TTOU  -- background writ
          terminal|TSTP  -- stop from the terminal|TTIN  -- background read from the terminal}
 command kill -s TERM => TERM|TTOU|TSTP|TTIN {TERM  -- terminate|TTOU  -- background write to the \
          terminal|TSTP  -- stop from the terminal|TTIN  -- background read from the terminal}
+kill -n => signals
+command kill -n => pids
+noglob exec -a k kill -n => pids
+builtin kill -n => signals
+builtin command kill -n => pids
+command exec demotool al => prev
+command builtin kill - => prev
+builtin command demotool al => alpha {alpha  -- first}
 command pwd - => prev
 command demotool al => alpha {alpha  -- first}
 exec -cl -a name demotool al => alpha {alpha  -- first}

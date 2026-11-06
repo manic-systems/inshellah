@@ -29,6 +29,8 @@ _inshellah_unwrap() {
             noglob|nocorrect|-) ((i++)) ;;
             builtin) viabuiltin=1; ((i++)) ;;
             command|exec)
+                pre=$i
+                viabuiltin=
                 ((i++))
                 while ((i < CURRENT)); do
                     o=${(Q)words[i]}
@@ -41,6 +43,9 @@ _inshellah_unwrap() {
                         ((i++))
                     fi
                 done
+                ((i < CURRENT)) && case ${(Q)words[i]} in
+                    builtin|exec) return 1 ;;
+                esac
                 ;;
             *) break ;;
         esac
@@ -54,7 +59,7 @@ _inshellah() {
     emulate -L zsh
     (($+_comp_options)) && setopt ${_comp_options[@]}
     local first=
-    local -i at=1
+    local -i at=1 pre=0 start
     if [[ $service == -first- ]]; then
         _inshellah_takeover || { _inshellah_pass "$@"; return }
         [[ $compstate[context] == command ]] && ((CURRENT > 1)) || { _inshellah_pass "$@"; return }
@@ -65,6 +70,8 @@ _inshellah() {
         [[ $compstate[context] == command ]] && ((CURRENT > 1)) || return 1
     fi
     local cmd=${(Q)words[at]}
+    start=$at
+    [[ $cmd == kill ]] && ((pre)) && start=$pre
     local -a reply=(defer)
     local skip=
     if ((${reswords[(I)$cmd]} || $+functions[$cmd])); then
@@ -73,11 +80,11 @@ _inshellah() {
         [[ -n $first && $cmd == kill ]] || skip=1
     fi
     if [[ -z $skip ]]; then
-        local key=${(pj:\x01:)words[at,CURRENT-1]}$'\x01'$PREFIX
+        local key=${(pj:\x01:)words[start,CURRENT-1]}$'\x01'$PREFIX
         if (($+_inshellah_memo[(e)$key])); then
             reply=("${(@f)_inshellah_memo[(e)$key]}")
         else
-            reply=("${(@f)$(command inshellah complete --shell zsh -- "${(@Q)words[at,CURRENT-1]}" "${(Q)PREFIX}" 2>/dev/null)}")
+            reply=("${(@f)$(command inshellah complete --shell zsh -- "${(@Q)words[start,CURRENT-1]}" "${(Q)PREFIX}" 2>/dev/null)}")
             _inshellah_memo[(e)$key]=${(F)reply}
         fi
     fi
