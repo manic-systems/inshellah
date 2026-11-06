@@ -130,9 +130,10 @@ already in place, so completions that fish loaded stay loaded. a load that ctrl-
 is finished right after, so the command does not stay on fish's own completions.
 the cut short load writes nothing once the finishing load has run, and inshellah's
 own stub line is never kept as fish's completion, so a second tab after ctrl-c
-gives fish's answer. when many new binaries show up at once, `fish_complete_path`
-is briefly set to a different value and back so fish forgets the names it found
-no completion for.
+gives fish's answer. a load that ctrl-c interrupts again while it finishes stays
+pending and is finished before the next prompt, however many times you press it.
+new binaries are loaded by hand whatever their number, since assigning
+`fish_complete_path` at runtime makes fish drop every completion it autoloaded.
 
 ## the line protocol
 

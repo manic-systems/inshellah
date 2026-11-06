@@ -135,10 +135,11 @@ function __inshellah_source_native -a cmd
     end
 end
 
-# a command without any completion gets the stub's. changing fish_complete_path
-# makes fish forget what every stub registered, and the stub then runs again,
-# so a second run puts the remembered completions back before applying takeover.
-# a ctrl-c resume runs inside the load it cut short, which must not write afterwards
+# a command without any completion gets the stub's. a second run for a loaded
+# command puts the remembered completions back before applying takeover.
+# a ctrl-c resume runs inside the load it cut short, which must not write afterwards.
+# fish runs no handler for a second ctrl-c while the first resume is going, so a
+# load that ends in status 130 stays pending for the next prompt to finish
 function __inshellah_load -a cmd adopt
     set -q __inshellah_gen; or set -g __inshellah_gen 0
     set -l gen (math $__inshellah_gen + 1)
@@ -160,6 +161,8 @@ function __inshellah_load -a cmd adopt
             set -g $pre (__inshellah_snapshot $cmd)
         end
         test "$adopt" = adopt; or __inshellah_source_native $cmd
+        set -l sourced $status
+        test $sourced -ne 130; or return
         test $__inshellah_gen = $gen; or return
         set -g $orig (__inshellah_snapshot $cmd)
     end
@@ -189,18 +192,12 @@ function __inshellah_path_mark
 end
 
 # fish forgets a name it found no completion file for until its autoload cache
-# expires, so new commands are loaded by hand, or fish is made to forget when
-# there are too many for that
+# expires, so new commands are loaded by hand. fish_complete_path is never
+# assigned here, since any assignment makes fish drop everything it autoloaded
 function __inshellah_refresh
     set -l out (command inshellah fish-stubs 2>/dev/null)
     __inshellah_path_mark
     set -q out[2]; or return
-    if test (count $out) -gt 17
-        set -l path $fish_complete_path
-        set -g fish_complete_path $path /
-        set -g fish_complete_path $path
-        return
-    end
     for name in $out[2..-1]
         set -l have (complete -c $name)
         if set -q have[1]

@@ -489,6 +489,25 @@ set -g INSHELLAH_TAKEOVER 1
 for round in 1 2
     echo "resumed load $round =>" (complete -C "slowcmd " 2>&1 | string join "|") (count $__inshellah_orig_slowcmd) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowcmd"; and echo stub; or echo own)
 end
+printf 'set -q __s2; or set -g __s2 0\nset -g __s2 (math $__s2 + 1)\ncomplete -c slowtwo -f -a own\ntest $__s2 -eq 1; and __inshellah_resume\ntest $__s2 -le 2; and return 130\n' > $HOME/slowvend/vendor_completions.d/slowtwo.fish
+set -l slowtwo $PATH[1]/slowtwo
+printf '#!/bin/sh\n' > $slowtwo
+chmod +x $slowtwo
+__inshellah_load slowtwo
+echo "twice interrupted =>" (count $__inshellah_orig_slowtwo) (count $__inshellah_pending)
+__inshellah_prompt
+echo "finished at prompt =>" (count $__inshellah_orig_slowtwo) (count $__inshellah_pending) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowtwo"; and echo stub; or echo own)
+complete -C "manynew1 " >/dev/null
+set -l manydir $HOME/manybin
+mkdir -p $manydir
+for i in (seq 40)
+    printf '#!/bin/sh\n' > $manydir/manynew$i
+    chmod +x $manydir/manynew$i
+end
+set -l path_before $fish_complete_path
+set -l have_before (complete -c twotool | count)
+set -p PATH $manydir
+echo "many new names =>" (test "$path_before" = "$fish_complete_path"; and echo path same; or echo path changed) (test (complete -c twotool | count) -eq $have_before; and echo kept; or echo dropped) (test (complete -c manynew1 | count) -gt 0; and echo loaded; or echo missed) (test (complete -c manynew40 | count) -gt 0; and echo loaded; or echo missed)
 "#;
 
 const FISH_USER_DIR: &str = r#"
@@ -538,6 +557,9 @@ interrupted load => taken clean 0
 late binary => loaded
 resumed load 1 => own 1 own
 resumed load 2 => own 1 own
+twice interrupted => 0 1
+finished at prompt => 1 0 own
+many new names => path same kept loaded loaded
 ",
     );
     let user = fixture
