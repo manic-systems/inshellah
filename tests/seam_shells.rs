@@ -532,51 +532,46 @@ set -l took (math "("(date +%s%N)" - $began)/1000000")
 echo "big first load =>" (test $took -lt 3000; and echo fast; or echo slow $took)
 echo "big taken =>" (contains bigtool $__inshellah_taken; and echo yes; or echo no)
 complete -c pendtool -f -a mine
-set -g __inshellah_pre_pendtool (__inshellah_snapshot pendtool)
+set -g __inshellah_pre_pendtool fresh (__inshellah_snapshot pendtool)
 set -g __inshellah_pending pendtool
 complete -c pendtool -f -a half
-set -g __inshellah_loading pendtool
-__inshellah_resume
-set -e __inshellah_loading
+__inshellah_hook pendtool
+complete -C "pendtool " >/dev/null
 echo "interrupted load =>" (contains pendtool $__inshellah_taken; and echo taken; or echo lost) (string match -q '*half*' (complete -c pendtool); and echo stale; or echo clean) (count $__inshellah_pending)
+complete -c pendhook -f -a mine
+set -g __inshellah_pending pendhook
+__inshellah_prompt
+echo "prompt restores hook =>" (string match -q '*__inshellah_retry*' (complete -c pendhook | string collect); and echo hooked; or echo bare) (count $__inshellah_pending)
+set -e __inshellah_pending
 set -l late $PATH[1]/latetool
 printf '#!/bin/sh\n' > $late
 chmod +x $late
 __inshellah_prompt
 echo "late binary =>" (contains latetool $__inshellah_loaded; and echo loaded; or echo missed)
 mkdir -p $HOME/slowvend/vendor_completions.d
-printf 'set -q __slow_done; or begin; set -g __slow_done 1; __inshellah_resume; end\ncomplete -c slowcmd -f -a own\n' > $HOME/slowvend/vendor_completions.d/slowcmd.fish
+printf 'complete -c slowcmd -f -a own\n' > $HOME/slowvend/vendor_completions.d/slowcmd.fish
+printf 'complete -c slowtwo -f -a own\n' > $HOME/slowvend/vendor_completions.d/slowtwo.fish
 set -g fish_complete_path $fish_complete_path $HOME/slowvend/vendor_completions.d
 __inshellah_place
-set -l slow $PATH[1]/slowcmd
-printf '#!/bin/sh\n' > $slow
-chmod +x $slow
-__inshellah_load slowcmd
 set -g INSHELLAH_TAKEOVER 1
+set -g __inshellah_pending slowcmd
+__inshellah_hook slowcmd
 for round in 1 2
-    echo "resumed load $round =>" (complete -C "slowcmd " 2>&1 | string join "|") (count $__inshellah_orig_slowcmd) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowcmd"; and echo stub; or echo own)
+    complete -C "slowcmd " >/dev/null
+    echo "retried load $round =>" (count $__inshellah_orig_slowcmd) (count $__inshellah_pending) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowcmd"; and echo stub; or echo own)
 end
-printf 'set -q __s2; or set -g __s2 0\nset -g __s2 (math $__s2 + 1)\ncomplete -c slowtwo -f -a own\ntest $__s2 -eq 1; and __inshellah_resume\ntest $__s2 -eq 2; and set -g __inshellah_sigint (math $__inshellah_sigint + 1)\ntest $__s2 -le 2; and return 130\n' > $HOME/slowvend/vendor_completions.d/slowtwo.fish
-set -l slowtwo $PATH[1]/slowtwo
-printf '#!/bin/sh\n' > $slowtwo
-chmod +x $slowtwo
-__inshellah_load slowtwo
-echo "twice interrupted =>" (count $__inshellah_orig_slowtwo) (count $__inshellah_pending)
-__inshellah_prompt
-echo "finished at prompt =>" (count $__inshellah_orig_slowtwo) (count $__inshellah_pending) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowtwo"; and echo stub; or echo own)
+complete -c slowtwo -f -a own
+set -g __inshellah_pre_slowtwo kept (complete -c slowtwo)
+set -g __inshellah_pending slowtwo
+__inshellah_hook slowtwo
+complete -C "slowtwo " >/dev/null
+echo "cut after native =>" (count $__inshellah_orig_slowtwo) (count $__inshellah_pending) (count (complete -c slowtwo)) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowtwo"; and echo stub; or echo own)
 printf 'complete -c slowthree -f -a own\nreturn 130\n' > $HOME/slowvend/vendor_completions.d/slowthree.fish
 set -l slowthree $PATH[1]/slowthree
 printf '#!/bin/sh\n' > $slowthree
 chmod +x $slowthree
 __inshellah_load slowthree
 echo "status 130 alone =>" (count $__inshellah_pending) (contains slowthree $__inshellah_loaded; and echo loaded; or echo pending)
-printf 'complete -c slowfour -f -a own\n' > $HOME/slowvend/vendor_completions.d/slowfour.fish
-set -g __inshellah_pending slowfour
-__inshellah_resume
-__inshellah_prompt
-echo "ctrl-c at prompt =>" (count $__inshellah_pending)
-__inshellah_prompt
-echo "next prompt =>" (count $__inshellah_pending)
 complete -C "manynew1 " >/dev/null
 set -l manydir $HOME/manybin
 mkdir -p $manydir
@@ -603,6 +598,7 @@ chmod +x $newbin
 echo "complete -c usernew -f -a userchoice" > $HOME/usercomp/usernew.fish
 __inshellah_prompt
 echo "new name user file =>" (complete -C "usernew " | string join "|")
+echo "new name taken =>" (contains usernew $__inshellah_taken; and echo taken; or echo kept)
 "#;
 
 #[test]
@@ -640,14 +636,12 @@ sudo like => wraps
 big first load => fast
 big taken => yes
 interrupted load => taken clean 0
+prompt restores hook => hooked 1
 late binary => loaded
-resumed load 1 => own 1 own
-resumed load 2 => own 1 own
-twice interrupted => 0 1
-finished at prompt => 1 0 own
+retried load 1 => 1 0 own
+retried load 2 => 1 0 own
+cut after native => 1 0 1 own
 status 130 alone => 0 loaded
-ctrl-c at prompt => 1
-next prompt => 0
 many new names => path same kept loaded loaded
 ",
     );
@@ -656,7 +650,7 @@ many new names => path same kept loaded loaded
         .expect("fish ran once already");
     expect(
         &user,
-        "user file => userchoice\nnew name user file => userchoice",
+        "user file => userchoice\nnew name user file => userchoice\nnew name taken => kept",
     );
     assert!(
         fixture

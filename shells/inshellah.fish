@@ -52,7 +52,7 @@ end
 # order they were registered in
 function __inshellah_snapshot -a cmd
     set -l now (complete -c $cmd)
-    set -q now[1]; and printf '%s\n' $now[-1..1] | string match -v -- '*(__inshellah_complete)*'
+    set -q now[1]; and printf '%s\n' $now[-1..1] | string match -v -r -- '\(__inshellah_(complete\)|retry )'
 end
 
 function __inshellah_extras -a cmd
@@ -97,6 +97,7 @@ function __inshellah_apply -a cmd
     set -l at (contains -i -- $cmd $__inshellah_taken)
     if __inshellah_takeover
         and not set -q at[1]
+        and not contains -- $cmd $__inshellah_user
         and test (count $$orig) -gt 0
         and not builtin -q -- $cmd
         and not functions -q -- $cmd
@@ -119,9 +120,14 @@ end
 # fish autoloads. fish 4 embeds its own completions and reaches them after
 # every fish_complete_path dir, fish 3 ships them as files.
 function __inshellah_source_native -a cmd
+    set -l ahead true
     for dir in $fish_complete_path
-        test "$dir" = "$__inshellah_stub_dir"; and continue
+        if test "$dir" = "$__inshellah_stub_dir"
+            set ahead false
+            continue
+        end
         if not string match -q '*generated_completions' -- $dir; and test -f $dir/$cmd.fish
+            $ahead; and not contains -- $cmd $__inshellah_user; and set -ga __inshellah_user $cmd
             source $dir/$cmd.fish
             return
         end
@@ -136,52 +142,64 @@ end
 
 # a command without any completion gets the stub's. a second run for a loaded
 # command puts the remembered completions back before applying takeover.
-# a ctrl-c resume runs inside the load it cut short, which must not write afterwards.
-# fish runs no handler for a second ctrl-c while the first resume is going, so a
-# load that a SIGINT cut short stays pending for the next prompt to finish
+# ctrl-c aborts the whole call chain, so a load marks its command pending
+# first and clears that last. what a cut short load leaves behind is the
+# pre-load completions, kept so the next attempt can start from them, and a
+# stand-in completion that finishes the load at the next tab.
 function __inshellah_load -a cmd adopt
-    set -g __inshellah_loading $cmd
-    __inshellah_load_run $cmd $adopt
-    set -e __inshellah_loading
-end
-
-function __inshellah_load_run -a cmd adopt
-    set -q __inshellah_gen; or set -g __inshellah_gen 0
-    set -q __inshellah_sigint; or set -g __inshellah_sigint 0
-    set -l sigint $__inshellah_sigint
-    set -l gen (math $__inshellah_gen + 1)
-    set -g __inshellah_gen $gen
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
     set -l pre __inshellah_pre_(string escape --style=var -- $cmd)
-    if contains -- $cmd $__inshellah_loaded
-        set -l extras (__inshellah_extras $cmd)
-        complete -e -c $cmd
-        printf '%s\n' $$orig $extras | source
-        set -l at (contains -i -- $cmd $__inshellah_taken)
-        set -q at[1]; and set -e __inshellah_taken[$at]
-    else
-        if contains -- $cmd $__inshellah_pending
-            complete -e -c $cmd
-            printf '%s\n' $$pre | source
+    contains -- $cmd $__inshellah_pending; or set -ga __inshellah_pending $cmd
+    if not set -q $pre
+        if contains -- $cmd $__inshellah_loaded
+            set -g $pre kept $$orig (__inshellah_extras $cmd)
+        else if test "$adopt" = adopt
+            set -g $pre adopt (__inshellah_snapshot $cmd)
         else
-            set -ga __inshellah_pending $cmd
-            set -g $pre (__inshellah_snapshot $cmd)
+            set -g $pre fresh (__inshellah_snapshot $cmd)
         end
-        test "$adopt" = adopt; or __inshellah_source_native $cmd
-        set -l sourced $status
-        test $sourced -ne 130; or test $sigint -eq $__inshellah_sigint; or return
-        test $__inshellah_gen = $gen; or return
-        set -g $orig (__inshellah_snapshot $cmd)
+        set -l saved $$pre
+        if test $saved[1] = kept
+            complete -e -c $cmd
+            printf '%s\n' $saved[2..-1] | source
+        end
+    else
+        set -l saved $$pre
+        complete -e -c $cmd
+        printf '%s\n' $saved[2..-1] | source
     end
+    __inshellah_hook $cmd
+    set -l at (contains -i -- $cmd $__inshellah_taken)
+    set -q at[1]; and set -e __inshellah_taken[$at]
+    set -l saved $$pre
+    if test $saved[1] != kept
+        test $saved[1] = adopt; or __inshellah_source_native $cmd
+        set -l now (__inshellah_snapshot $cmd)
+        set -g $pre kept $now
+        set -g $orig $now
+    end
+    set saved $$pre
+    set -q $orig; or set -g $orig $saved[2..-1]
+    complete -e -c $cmd
+    printf '%s\n' $saved[2..-1] | source
     if test (count $$orig) -gt 0
         __inshellah_apply $cmd
     else
         __inshellah_install $cmd
     end
     contains -- $cmd $__inshellah_loaded; or set -ga __inshellah_loaded $cmd
-    set -l pending (contains -i -- $cmd $__inshellah_pending)
-    set -q pending[1]; and set -e __inshellah_pending[$pending]
     set -e $pre
+    set -e __inshellah_pending[(contains -i -- $cmd $__inshellah_pending)]
+end
+
+function __inshellah_hook -a cmd
+    complete -c $cmd -k -f -a "(__inshellah_retry $(string escape --style=var -- $cmd))"
+end
+
+function __inshellah_retry -a name
+    set -l cmd (string unescape --style=var -- $name)
+    __inshellah_load $cmd
+    contains -- $cmd $__inshellah_pending; or complete -C "$(commandline -cp)"
 end
 
 function __inshellah_path_stamp
@@ -200,18 +218,27 @@ end
 
 # fish forgets a name it found no completion file for until its autoload cache
 # expires, so new commands are loaded by hand. fish_complete_path is never
-# assigned here, since any assignment makes fish drop everything it autoloaded
+# assigned here, since any assignment makes fish drop everything it autoloaded.
+# names wait in a queue so that a ctrl-c partway through loses none of them
 function __inshellah_refresh
     set -l out (command inshellah fish-stubs 2>/dev/null)
     __inshellah_path_mark
-    set -q out[2]; or return
-    for name in $out[2..-1]
-        set -l have (complete -c $name)
-        if set -q have[1]
-            __inshellah_load $name adopt
-        else
-            __inshellah_load $name
+    set -q out[2]; and set -ga __inshellah_queue $out[2..-1]
+    __inshellah_drain
+end
+
+function __inshellah_drain
+    while set -q __inshellah_queue[1]
+        set -l name $__inshellah_queue[1]
+        if not contains -- $name $__inshellah_loaded $__inshellah_pending
+            set -l have (complete -c $name)
+            if set -q have[1]
+                __inshellah_load $name adopt
+            else
+                __inshellah_load $name
+            end
         end
+        set -e __inshellah_queue[1]
     end
 end
 
@@ -220,26 +247,23 @@ function __inshellah_stubs --on-variable PATH
 end
 
 # runs before each prompt, so it picks up a command installed into a dir that
-# was already on PATH and finishes a load that ctrl-c cut short. a ctrl-c at the
-# prompt or during these loads skips the next run, so pressing it never waits on one.
+# was already on PATH. a load that ctrl-c cut short is not retried here, since a
+# slow completion file would hold up every prompt. it only gets its stand-in
+# completion back in case the cut came before it was registered
 function __inshellah_prompt --on-event fish_prompt
-    if set -q __inshellah_quiet
-        set -e __inshellah_quiet
-        return
-    end
-    set -g __inshellah_at_prompt
-    set -l sigint $__inshellah_sigint
     for cmd in $__inshellah_pending
-        test "$sigint" = "$__inshellah_sigint"; or break
-        __inshellah_load $cmd
+        complete -c $cmd | string match -q -- '*(__inshellah_retry *'; or __inshellah_hook $cmd
     end
-    test "$sigint" = "$__inshellah_sigint"; and test "$(__inshellah_path_stamp)" != "$__inshellah_path_seen"; and __inshellah_refresh
-    set -e __inshellah_at_prompt
+    if test "$(__inshellah_path_stamp)" != "$__inshellah_path_seen"
+        __inshellah_refresh
+    else
+        __inshellah_drain
+    end
 end
 
 function __inshellah_retake --on-variable INSHELLAH_TAKEOVER
     for cmd in $__inshellah_loaded
-        __inshellah_apply $cmd
+        contains -- $cmd $__inshellah_pending; or __inshellah_apply $cmd
     end
 end
 
@@ -269,15 +293,3 @@ set -l out (command inshellah fish-stubs 2>/dev/null)
 and set -g __inshellah_stub_dir $out[1]
 and __inshellah_path_mark
 and __inshellah_place
-
-function __inshellah_resume --on-signal SIGINT
-    set -q __inshellah_sigint; or set -g __inshellah_sigint 0
-    set -g __inshellah_sigint (math $__inshellah_sigint + 1)
-    if set -q __inshellah_at_prompt; or not set -q __inshellah_loading
-        set -g __inshellah_quiet
-        return
-    end
-    for cmd in $__inshellah_pending
-        __inshellah_load $cmd
-    end
-end

@@ -126,19 +126,25 @@ steps aside when there is one or your config registered one with `complete -c`.
 turning takeover on or off puts fish's completions away or back for commands
 that already loaded, in the order fish had them, which matters for `complete -k`.
 sourcing your config again leaves `fish_complete_path` alone when the stub dir is
-already in place, so completions that fish loaded stay loaded. a load that ctrl-c cuts short
-is finished right after, so the command does not stay on fish's own completions.
-the cut short load writes nothing once the finishing load has run, and inshellah's
-own stub line is never kept as fish's completion, so a second tab after ctrl-c
-gives fish's answer. a load that ctrl-c interrupts again while it finishes stays
-pending and is finished at the next prompt. a load is only kept pending when a
-ctrl-c actually hit it, so a completion file that ends in status 130 by itself is
-not retried. a ctrl-c at the prompt, or while it is finishing pending loads, never
-waits on one and skips the pending loads for the following prompt.
+already in place, so completions that fish loaded stay loaded.
+inshellah installs no signal handler, so ctrl-c does exactly what it does without
+it and aborts whatever is running, a load included. a load marks its command pending
+before it sources anything, keeps fish's completions from before the load, and
+clears the mark as its very last step. a load that ctrl-c cut short is still pending
+and has left a stand-in completion on the command. the next tab on that command
+puts the kept completions back, loads again from scratch and then answers the tab.
+another ctrl-c during that retry changes nothing, so no number of them loses a
+load. the prompt does not retry pending loads, since a slow completion file would
+hold up every prompt. it only puts the stand-in back when the cut came before it
+was registered. a completion file that ends in status 130 by itself is just a
+finished load.
 new binaries are loaded by hand whatever their number, since assigning
 `fish_complete_path` at runtime makes fish drop every completion it autoloaded.
 the by-hand load looks for a completion file in `fish_complete_path` order just as
-autoloading does, so a file of your own ahead of the stub dir wins for a new binary too.
+autoloading does, so a file of your own ahead of the stub dir wins for a new binary too,
+and takeover leaves that command alone as it does for one present at startup.
+names of new binaries wait in a queue, so a ctrl-c partway through loading them
+leaves the rest for the next prompt.
 
 ## the line protocol
 
