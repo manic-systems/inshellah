@@ -226,6 +226,24 @@ owns builtin kill
 owns builtin kill -
 owns builtin builtin kill -s ""
 owns builtin cd ""
+nowns() {
+    COMP_LINE=$1 COMP_POINT=${#1}
+    read -ra COMP_WORDS <<<"$1"
+    [[ $1 == *" " ]] && COMP_WORDS+=("")
+    COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+    _inshellah_shell_owns "$2" && echo "owns $1" || echo "asks $1"
+}
+nowns "echo \$(builtin kill -s T" builtin
+nowns "echo \"\$(builtin kill -s T" builtin
+nowns "echo \`builtin kill -s " builtin
+nowns "echo \$(true; builtin command kill -s T" builtin
+nowns "echo \$(builtin cd " builtin
+nowns "echo \$(kill -s T" kill
+nowns "echo kill -s T" kill
+owns builtin command kill -s T
+owns builtin command git sta
+owns builtin exec kill -
+owns builtin command cd ""
 "#;
 
 #[test]
@@ -274,6 +292,17 @@ owns builtin kill
 asks builtin kill -
 asks builtin builtin kill -s 
 owns builtin cd 
+asks echo $(builtin kill -s T
+asks echo "$(builtin kill -s T
+asks echo `builtin kill -s 
+asks echo $(true; builtin command kill -s T
+owns echo $(builtin cd 
+asks echo $(kill -s T
+asks echo kill -s T
+asks builtin command kill -s T
+asks builtin command git sta
+asks builtin exec kill -
+owns builtin command cd 
 "#,
     );
 }

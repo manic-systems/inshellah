@@ -21,21 +21,49 @@ _inshellah_takeover() {
     return 1
 }
 
-# whether the cursor is on an operand of the shell's own kill behind builtin
-_inshellah_builtin_kill() {
-    local i=1
-    while [[ ${COMP_WORDS[i]-} == builtin ]]; do
-        ((i++))
+# the words of the command being typed. inside a substitution still open at
+# the cursor that is the nested command, not the outer line bash split
+_inshellah_cmdwords() {
+    _inshellah_cw=("${COMP_WORDS[@]}")
+    _inshellah_cc=$COMP_CWORD
+    _inshellah_nested || return 0
+    local line=${COMP_LINE:0:COMP_POINT} tail best opener
+    best=$line
+    for opener in '$(' '<(' '>(' '`'; do
+        tail=${line##*"$opener"}
+        ((${#tail} < ${#best})) && best=$tail
     done
-    [[ ${COMP_WORDS[i]-} == kill ]] && ((COMP_CWORD > i))
+    best=${best##*[;|&)]}
+    read -ra _inshellah_cw <<<"$best"
+    [[ -z $best || $best == *[[:space:]] ]] && _inshellah_cw+=("")
+    _inshellah_cc=$((${#_inshellah_cw[@]} - 1))
+}
+
+# whether the shell keeps a line that starts with builtin. the command behind
+# builtin, command and exec decides, and kill there is never a spec lookup
+_inshellah_behind_builtin() {
+    _inshellah_cmdwords
+    local i=0
+    while :; do
+        case ${_inshellah_cw[i]-} in
+            builtin | command | exec) ((i++)) ;;
+            *) break ;;
+        esac
+    done
+    ((i > 0 && _inshellah_cc > i)) || return 0
+    [[ ${_inshellah_cw[i]} == kill ]] && return 1
+    _inshellah_shell_owns "${_inshellah_cw[i]}"
 }
 
 _inshellah_shell_owns() {
     case $(type -t -- "$1") in
         builtin)
-            [[ $1 == builtin ]] && _inshellah_builtin_kill && return 1
+            if [[ $1 == builtin ]]; then
+                _inshellah_behind_builtin
+                return
+            fi
             [[ $1 == command || $1 == exec ]] && return 1
-            [[ $1 == kill ]] && { _inshellah_takeover || ! complete -p kill >/dev/null 2>&1; } && return 1
+            [[ $1 == kill ]] && { _inshellah_nested || _inshellah_takeover || ! complete -p kill >/dev/null 2>&1; } && return 1
             return 0
             ;;
         keyword | function) return 0 ;;
@@ -169,10 +197,10 @@ _inshellah_borrow() {
     "$fn" "$@" || true
 }
 
-# bash-completion completes builtin names after builtin, kill's operands
-# are inshellah's and anything else stays with bash
+# bash-completion completes builtin names after builtin, the operands of
+# kill and of external commands are inshellah's and the rest stays with bash
 _inshellah_complete_builtin() {
-    if _inshellah_builtin_kill; then
+    if ! _inshellah_behind_builtin; then
         _inshellah_answer "$@" && return 0
         compopt -o default 2>/dev/null || true
         return 0
