@@ -463,6 +463,18 @@ printf '#!/bin/sh\n' > $late
 chmod +x $late
 __inshellah_prompt
 echo "late binary =>" (contains latetool $__inshellah_loaded; and echo loaded; or echo missed)
+mkdir -p $HOME/slowvend/vendor_completions.d
+printf 'set -q __slow_done; or begin; set -g __slow_done 1; __inshellah_resume; end\ncomplete -c slowcmd -f -a own\n' > $HOME/slowvend/vendor_completions.d/slowcmd.fish
+set -g fish_complete_path $fish_complete_path $HOME/slowvend/vendor_completions.d
+__inshellah_place
+set -l slow $PATH[1]/slowcmd
+printf '#!/bin/sh\n' > $slow
+chmod +x $slow
+__inshellah_load slowcmd
+set -g INSHELLAH_TAKEOVER 1
+for round in 1 2
+    echo "resumed load $round =>" (complete -C "slowcmd " 2>&1 | string join "|") (count $__inshellah_orig_slowcmd) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowcmd"; and echo stub; or echo own)
+end
 "#;
 
 const FISH_USER_DIR: &str = r#"
@@ -510,6 +522,8 @@ big first load => fast
 big taken => yes
 interrupted load => taken clean 0
 late binary => loaded
+resumed load 1 => own 1 own
+resumed load 2 => own 1 own
 ",
     );
     let user = fixture

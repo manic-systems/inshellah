@@ -128,6 +128,11 @@ that already loaded, in the order fish had them, which matters for `complete -k`
 sourcing your config again leaves `fish_complete_path` alone when the stub dir is
 already in place, so completions that fish loaded stay loaded. a load that ctrl-c cuts short
 is finished right after, so the command does not stay on fish's own completions.
+the cut short load writes nothing once the finishing load has run, and inshellah's
+own stub line is never kept as fish's completion, so a second tab after ctrl-c
+gives fish's answer. when many new binaries show up at once, `fish_complete_path`
+is briefly set to a different value and back so fish forgets the names it found
+no completion for.
 
 ## the line protocol
 

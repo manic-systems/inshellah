@@ -52,14 +52,14 @@ end
 # order they were registered in
 function __inshellah_snapshot -a cmd
     set -l now (complete -c $cmd)
-    set -q now[1]; and printf '%s\n' $now[-1..1]
+    set -q now[1]; and printf '%s\n' $now[-1..1] | string match -v -- '*(__inshellah_complete)*'
 end
 
 function __inshellah_extras -a cmd
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
     set -l kept $$orig
     set -l left (count $kept)
-    set -l now (__inshellah_snapshot $cmd | string match -v -- '*(__inshellah_complete)*')
+    set -l now (__inshellah_snapshot $cmd)
     if test (count $now) -ge $left; and begin; test $left -eq 0; or test "$now[1..$left]" = "$kept"; end
         set -q now[(math $left + 1)]; and printf '%s\n' $now[(math $left + 1)..-1]
         return
@@ -138,7 +138,11 @@ end
 # a command without any completion gets the stub's. changing fish_complete_path
 # makes fish forget what every stub registered, and the stub then runs again,
 # so a second run puts the remembered completions back before applying takeover.
+# a ctrl-c resume runs inside the load it cut short, which must not write afterwards
 function __inshellah_load -a cmd adopt
+    set -q __inshellah_gen; or set -g __inshellah_gen 0
+    set -l gen (math $__inshellah_gen + 1)
+    set -g __inshellah_gen $gen
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
     set -l pre __inshellah_pre_(string escape --style=var -- $cmd)
     if contains -- $cmd $__inshellah_loaded
@@ -156,6 +160,7 @@ function __inshellah_load -a cmd adopt
             set -g $pre (__inshellah_snapshot $cmd)
         end
         test "$adopt" = adopt; or __inshellah_source_native $cmd
+        test $__inshellah_gen = $gen; or return
         set -g $orig (__inshellah_snapshot $cmd)
     end
     if test (count $$orig) -gt 0
@@ -191,7 +196,9 @@ function __inshellah_refresh
     __inshellah_path_mark
     set -q out[2]; or return
     if test (count $out) -gt 17
-        set -g fish_complete_path $fish_complete_path
+        set -l path $fish_complete_path
+        set -g fish_complete_path $path /
+        set -g fish_complete_path $path
         return
     end
     for name in $out[2..-1]
