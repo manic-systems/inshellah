@@ -30,12 +30,13 @@ source /path/to/inshellah-completer.nu
 
 that's it. tab-completion now works for every command indexed.
 
-the external completer contract is explicit. `[...]` means inshellah is
-answering this position, and `[]` means nothing fits, such as a flag value
-outside its known set. `{completions: [...], fallback: true}` adds nushell's
-file completion beside the candidates, for git refs next to paths. `null`
-means "let nushell decide", returned for file-like leaf positions with no
-static or live provider candidates.
+the external completer contract is explicit. `{completions: [...]}` answers
+the current position, and an empty list means nothing fits, such as a flag
+value outside its known set. `fallback: true` keeps nushell's file
+completion beside the candidates, as with git refs next to paths, while
+`options: {cache: false}` opts out of nushell's cross-prompt completion
+cache. `null` hands the position back to nushell for file-like arguments
+with no static or live candidates.
 
 ## commands
 

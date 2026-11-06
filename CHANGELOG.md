@@ -14,6 +14,7 @@
 - commands run for dynamic completion have no controlling terminal, and every command inshellah runs gets `SSH_ASKPASS_REQUIRE=never`, so a dynamic completion that reaches an ssh host needing a password or host key confirmation fails at once, where it used to hang until the dynamic timeout. `325e898` `5b48f8a`
 - `dynamicLimit` / `INSHELLAH_DYNAMIC_LIMIT` only bounds the unfiltered listing. once a prefix is typed, providers query without it so matches past the limit are found, which costs more on very large ref or container lists. `22c6922`
 - user cache entries written by another inshellah build, including every 0.2.0 cache, are dropped and resolved again on first use. caches built with `inshellah index` into the user dir go the same way, so rerun `index` on those prefixes after updating. `7090b28`
+- `complete` answers nushell with a `{completions: [...], options: {cache: false}}` record wherever it used to print a bare list, so nushell stops replaying stale git refs, pids and other live values across prompts once it honours the option. scripts that read `complete` output as a list need to take `completions` from the record.
 
 #### nixos module
 

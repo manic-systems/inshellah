@@ -84,8 +84,9 @@ fn completion_values(stdout: &[u8]) -> Vec<String> {
     if trimmed == "null" || trimmed.is_empty() {
         return Vec::new();
     }
-    serde_json::from_str::<serde_json::Value>(trimmed)
-        .expect("completion JSON")
+    let json = serde_json::from_str::<serde_json::Value>(trimmed).expect("completion JSON");
+    json.get("completions")
+        .unwrap_or(&json)
         .as_array()
         .expect("completion array")
         .iter()
