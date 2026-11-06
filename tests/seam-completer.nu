@@ -7,7 +7,7 @@ def fail [msg: string] { error make {msg: $msg} }
 
 def vals [spans: list<string>] {
     let r = (inshellah-complete-spans $spans)
-    if $r == null { [] } else { $r | get value }
+    if $r == null { [] } else { $r.completions | get value }
 }
 
 def assert-has [spans: list<string>, needle: string] {
