@@ -594,7 +594,7 @@ set -g __inshellah_pending pendtool
 complete -c pendtool -f -a half
 __inshellah_hook pendtool
 complete -C "pendtool " >/dev/null
-echo "interrupted load =>" (contains pendtool $__inshellah_taken; and echo taken; or echo lost) (string match -q '*half*' (complete -c pendtool); and echo stale; or echo clean) (count $__inshellah_pending)
+echo "interrupted load =>" (contains pendtool $__inshellah_taken; and echo taken; or echo lost) (string match -q "*half*" (complete -c pendtool); and echo kept; or echo dropped) (count $__inshellah_pending)
 complete -c pendhook -f -a mine
 set -g __inshellah_pending pendhook
 __inshellah_prompt
@@ -617,6 +617,14 @@ for round in 1 2
     complete -C "slowcmd " >/dev/null
     echo "retried load $round =>" (count $__inshellah_orig_slowcmd) (count $__inshellah_pending) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowcmd"; and echo stub; or echo own)
 end
+set -g __inshellah_pre_slowfour fresh
+set -g __inshellah_pending slowfour
+__inshellah_hook slowfour
+complete -c slowfour -f -a own
+complete -c slowfour -f -a mine
+printf "complete -c slowfour -f -a own\n" > $HOME/slowvend/vendor_completions.d/slowfour.fish
+complete -C "slowfour " >/dev/null
+echo "registered meanwhile =>" (count $__inshellah_pending) (complete -c slowfour | string match -r -- "-a mine" | count) (count $__inshellah_orig_slowfour)
 complete -c slowtwo -f -a own
 set -g __inshellah_pre_slowtwo kept (complete -c slowtwo)
 set -g __inshellah_pending slowtwo
@@ -656,6 +664,13 @@ echo "complete -c usernew -f -a userchoice" > $HOME/usercomp/usernew.fish
 __inshellah_prompt
 echo "new name user file =>" (complete -C "usernew " | string join "|")
 echo "new name taken =>" (contains usernew $__inshellah_taken; and echo taken; or echo kept)
+set -l twice $PATH[1]/usertwice
+printf '#!/bin/sh\n' > $twice
+chmod +x $twice
+printf 'set -g usertwice_runs (math 0$usertwice_runs + 1)\ncomplete -c usertwice -f -a userchoice\n' > $HOME/usercomp/usertwice.fish
+__inshellah_prompt
+complete -C "usertwice " >/dev/null
+echo "user file once =>" $usertwice_runs (complete -c usertwice | count)
 "#;
 
 #[test]
@@ -692,11 +707,12 @@ xargs like => wraps
 sudo like => wraps
 big first load => fast
 big taken => yes
-interrupted load => taken clean 0
+interrupted load => taken kept 0
 prompt restores hook => hooked 1
 late binary => loaded
 retried load 1 => 1 0 own
 retried load 2 => 1 0 own
+registered meanwhile => 0 1 1
 cut after native => 1 0 1 own
 status 130 alone => 0 loaded
 many new names => path same kept loaded loaded
@@ -707,7 +723,8 @@ many new names => path same kept loaded loaded
         .expect("fish ran once already");
     expect(
         &user,
-        "user file => userchoice\nnew name user file => userchoice\nnew name taken => kept",
+        "user file => userchoice\nnew name user file => userchoice\nnew name taken => kept\nuser \
+         file once => 1 1",
     );
     assert!(
         fixture

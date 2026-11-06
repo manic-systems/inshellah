@@ -133,6 +133,8 @@ before it sources anything, keeps fish's completions from before the load, and
 clears the mark as its very last step. a load that ctrl-c cut short is still pending
 and has left a stand-in completion on the command. the next tab on that command
 puts the kept completions back, loads again from scratch and then answers the tab.
+completions registered between the cut and the retry are kept, except a line identical to one the load registers itself, which is not repeated.
+after a cut, fish itself sometimes skips command substitutions in completions on the next tabs, as plain fish does with a slow `-a (...)`, so finishing an interrupted load can take a second tab.
 another ctrl-c during that retry changes nothing, so no number of them loses a
 load. the prompt does not retry pending loads, since a slow completion file would
 hold up every prompt. it only puts the stand-in back when the cut came before it
@@ -141,7 +143,8 @@ finished load.
 new binaries are loaded by hand whatever their number, since assigning
 `fish_complete_path` at runtime makes fish drop every completion it autoloaded.
 the by-hand load looks for a completion file in `fish_complete_path` order just as
-autoloading does, so a file of your own ahead of the stub dir wins for a new binary too,
+autoloading does, so a file of your own ahead of the stub dir wins for a new binary too.
+the load leaves such a file to fish, which autoloads it at the first tab, so it runs once,
 and takeover leaves that command alone as it does for one present at startup.
 names of new binaries wait in a queue, so a ctrl-c partway through loading them
 leaves the rest for the next prompt.

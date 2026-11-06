@@ -57,7 +57,13 @@ end
 
 function __inshellah_extras -a cmd
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
-    set -l kept $$orig
+    __inshellah_after $cmd $$orig
+end
+
+# what a command has registered beyond the given lines, which must be in the
+# order it registered them
+function __inshellah_after -a cmd
+    set -l kept $argv[2..-1]
     set -l left (count $kept)
     set -l now (__inshellah_snapshot $cmd)
     if test (count $now) -ge $left; and begin; test $left -eq 0; or test "$now[1..$left]" = "$kept"; end
@@ -115,19 +121,28 @@ function __inshellah_apply -a cmd
     end
 end
 
+# whether a completion file sits in a dir ahead of the stub dir. fish
+# autoloads such a file at the first tab, and sourcing it by hand as well
+# would run it twice.
+function __inshellah_user_file -a cmd
+    for dir in $fish_complete_path
+        test "$dir" = "$__inshellah_stub_dir"; and return 1
+        not string match -q '*generated_completions' -- $dir; and test -f $dir/$cmd.fish; and return 0
+    end
+    return 1
+end
+
 # the first completion file fish would have loaded had the stub dir not been
-# in the way, so a file in a dir ahead of the stub dir wins as it does when
-# fish autoloads. fish 4 embeds its own completions and reaches them after
-# every fish_complete_path dir, fish 3 ships them as files.
+# in the way. fish 4 embeds its own completions and reaches them after every
+# fish_complete_path dir, fish 3 ships them as files.
 function __inshellah_source_native -a cmd
-    set -l ahead true
+    set -l behind false
     for dir in $fish_complete_path
         if test "$dir" = "$__inshellah_stub_dir"
-            set ahead false
+            set behind true
             continue
         end
-        if not string match -q '*generated_completions' -- $dir; and test -f $dir/$cmd.fish
-            $ahead; and not contains -- $cmd $__inshellah_user; and set -ga __inshellah_user $cmd
+        if $behind; and not string match -q '*generated_completions' -- $dir; and test -f $dir/$cmd.fish
             source $dir/$cmd.fish
             return
         end
@@ -149,6 +164,12 @@ end
 function __inshellah_load -a cmd adopt
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
     set -l pre __inshellah_pre_(string escape --style=var -- $cmd)
+    set -l add __inshellah_add_(string escape --style=var -- $cmd)
+    if __inshellah_user_file $cmd
+        contains -- $cmd $__inshellah_user; or set -ga __inshellah_user $cmd
+        contains -- $cmd $__inshellah_loaded; or set -ga __inshellah_loaded $cmd
+        return
+    end
     contains -- $cmd $__inshellah_pending; or set -ga __inshellah_pending $cmd
     if not set -q $pre
         if contains -- $cmd $__inshellah_loaded
@@ -165,6 +186,9 @@ function __inshellah_load -a cmd adopt
         end
     else
         set -l saved $$pre
+        for line in (__inshellah_after $cmd $saved[2..-1])
+            contains -- $line $$add; or set -ga $add $line
+        end
         complete -e -c $cmd
         printf '%s\n' $saved[2..-1] | source
     end
@@ -182,13 +206,16 @@ function __inshellah_load -a cmd adopt
     set -q $orig; or set -g $orig $saved[2..-1]
     complete -e -c $cmd
     printf '%s\n' $saved[2..-1] | source
+    for line in $$add
+        contains -- $line $saved[2..-1]; or echo $line | source
+    end
     if test (count $$orig) -gt 0
         __inshellah_apply $cmd
     else
         __inshellah_install $cmd
     end
     contains -- $cmd $__inshellah_loaded; or set -ga __inshellah_loaded $cmd
-    set -e $pre
+    set -e $pre $add
     set -e __inshellah_pending[(contains -i -- $cmd $__inshellah_pending)]
 end
 
