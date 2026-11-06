@@ -131,9 +131,14 @@ is finished right after, so the command does not stay on fish's own completions.
 the cut short load writes nothing once the finishing load has run, and inshellah's
 own stub line is never kept as fish's completion, so a second tab after ctrl-c
 gives fish's answer. a load that ctrl-c interrupts again while it finishes stays
-pending and is finished before the next prompt, however many times you press it.
+pending and is finished at the next prompt. a load is only kept pending when a
+ctrl-c actually hit it, so a completion file that ends in status 130 by itself is
+not retried. a ctrl-c at the prompt, or while it is finishing pending loads, never
+waits on one and skips the pending loads for the following prompt.
 new binaries are loaded by hand whatever their number, since assigning
 `fish_complete_path` at runtime makes fish drop every completion it autoloaded.
+the by-hand load looks for a completion file in `fish_complete_path` order just as
+autoloading does, so a file of your own ahead of the stub dir wins for a new binary too.
 
 ## the line protocol
 

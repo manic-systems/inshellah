@@ -115,14 +115,13 @@ function __inshellah_apply -a cmd
 end
 
 # the first completion file fish would have loaded had the stub dir not been
-# in the way. fish 4 embeds its own completions and reaches them after every
-# fish_complete_path dir, fish 3 ships them as files.
+# in the way, so a file in a dir ahead of the stub dir wins as it does when
+# fish autoloads. fish 4 embeds its own completions and reaches them after
+# every fish_complete_path dir, fish 3 ships them as files.
 function __inshellah_source_native -a cmd
-    set -l seen false
     for dir in $fish_complete_path
-        if test "$dir" = "$__inshellah_stub_dir"
-            set seen true
-        else if $seen; and not string match -q '*generated_completions' -- $dir; and test -f $dir/$cmd.fish
+        test "$dir" = "$__inshellah_stub_dir"; and continue
+        if not string match -q '*generated_completions' -- $dir; and test -f $dir/$cmd.fish
             source $dir/$cmd.fish
             return
         end
@@ -139,9 +138,17 @@ end
 # command puts the remembered completions back before applying takeover.
 # a ctrl-c resume runs inside the load it cut short, which must not write afterwards.
 # fish runs no handler for a second ctrl-c while the first resume is going, so a
-# load that ends in status 130 stays pending for the next prompt to finish
+# load that a SIGINT cut short stays pending for the next prompt to finish
 function __inshellah_load -a cmd adopt
+    set -g __inshellah_loading $cmd
+    __inshellah_load_run $cmd $adopt
+    set -e __inshellah_loading
+end
+
+function __inshellah_load_run -a cmd adopt
     set -q __inshellah_gen; or set -g __inshellah_gen 0
+    set -q __inshellah_sigint; or set -g __inshellah_sigint 0
+    set -l sigint $__inshellah_sigint
     set -l gen (math $__inshellah_gen + 1)
     set -g __inshellah_gen $gen
     set -l orig __inshellah_orig_(string escape --style=var -- $cmd)
@@ -162,7 +169,7 @@ function __inshellah_load -a cmd adopt
         end
         test "$adopt" = adopt; or __inshellah_source_native $cmd
         set -l sourced $status
-        test $sourced -ne 130; or return
+        test $sourced -ne 130; or test $sigint -eq $__inshellah_sigint; or return
         test $__inshellah_gen = $gen; or return
         set -g $orig (__inshellah_snapshot $cmd)
     end
@@ -213,12 +220,21 @@ function __inshellah_stubs --on-variable PATH
 end
 
 # runs before each prompt, so it picks up a command installed into a dir that
-# was already on PATH and finishes a load that ctrl-c cut short
+# was already on PATH and finishes a load that ctrl-c cut short. a ctrl-c at the
+# prompt or during these loads skips the next run, so pressing it never waits on one.
 function __inshellah_prompt --on-event fish_prompt
+    if set -q __inshellah_quiet
+        set -e __inshellah_quiet
+        return
+    end
+    set -g __inshellah_at_prompt
+    set -l sigint $__inshellah_sigint
     for cmd in $__inshellah_pending
+        test "$sigint" = "$__inshellah_sigint"; or break
         __inshellah_load $cmd
     end
-    test "$(__inshellah_path_stamp)" = "$__inshellah_path_seen"; or __inshellah_refresh
+    test "$sigint" = "$__inshellah_sigint"; and test "$(__inshellah_path_stamp)" != "$__inshellah_path_seen"; and __inshellah_refresh
+    set -e __inshellah_at_prompt
 end
 
 function __inshellah_retake --on-variable INSHELLAH_TAKEOVER
@@ -255,6 +271,12 @@ and __inshellah_path_mark
 and __inshellah_place
 
 function __inshellah_resume --on-signal SIGINT
+    set -q __inshellah_sigint; or set -g __inshellah_sigint 0
+    set -g __inshellah_sigint (math $__inshellah_sigint + 1)
+    if set -q __inshellah_at_prompt; or not set -q __inshellah_loading
+        set -g __inshellah_quiet
+        return
+    end
     for cmd in $__inshellah_pending
         __inshellah_load $cmd
     end
