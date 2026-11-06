@@ -119,6 +119,10 @@ pub fn provider_signal_word(spans: &[String], shell: Shell) -> bool {
     providers::is_signal_word(spans, shell)
 }
 
+pub fn provider_lone_capital(spans: &[String], shell: Shell) -> bool {
+    providers::is_lone_capital(spans, shell)
+}
+
 pub fn provider_kind(cmd: &str) -> Option<&'static str> {
     providers::kind_of(cmd)
 }

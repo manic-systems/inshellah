@@ -1718,3 +1718,63 @@ fn a_fully_typed_subcommand_completes_to_itself() {
         );
     }
 }
+
+#[test]
+fn only_the_builtin_kill_answers_behind_builtin() {
+    let harness = Harness::new("dyn-behind-builtin");
+    seed_command(&harness, "echo", &[], &[], &["--help", "--version"]);
+    seed_command(&harness, "git", &["status", "stash"], &[], &[]);
+    for (line, expected) in [
+        (&["builtin", "echo", "-"][..], 0),
+        (&["builtin", "git", "sta"], 0),
+        (&["builtin", "builtin", "git", "sta"], 0),
+    ] {
+        let (stdout, ..) = harness.run_for(Some("bash"), line, &[]);
+        assert_eq!(stdout.lines().next(), Some("defer"), "{line:?} {stdout}");
+        assert_eq!(stdout.lines().count(), 1 + expected, "{line:?}");
+    }
+    let found = shell_values(&harness, "bash", &["builtin", "kill", "-TE"]);
+    assert_eq!(found, ["-TERM", "-SIGTERM"]);
+}
+
+#[test]
+fn the_builtin_kill_takes_no_signal_after_a_pid() {
+    let harness = Harness::new("dyn-kill-after-pid");
+    seed_command(&harness, "kill", &[], &["--timeout"], &["-a"]);
+    for shell in ["bash", "zsh"] {
+        for typed in ["-T", "-TE", "-s", "-"] {
+            let found = shell_values(&harness, shell, &["kill", "1", typed]);
+            assert!(found.is_empty(), "{shell} {typed} {found:?}");
+        }
+        let first = shell_values(&harness, shell, &["kill", "-T"]);
+        assert!(first.contains(&"-TERM".to_owned()), "{shell} {first:?}");
+    }
+}
+
+#[test]
+fn a_lone_capital_after_pkill_offers_signals_beside_case_folded_flags() {
+    let harness = Harness::new("dyn-pkill-lone-capital");
+    seed_command(
+        &harness,
+        "pkill",
+        &[],
+        &["-t", "-u", "-O", "-s", "-P", "--signal"],
+        &["-f", "-x"],
+    );
+    for typed in ["-T", "-S"] {
+        for shell in ["bash", "zsh", "fish"] {
+            let found = shell_values(&harness, shell, &["pkill", typed]);
+            let wanted = format!("{typed}ERM");
+            assert!(
+                found.iter().any(|value| {
+                    value.starts_with(typed)
+                        && value.len() > 2
+                        && (value == &wanted || value == "-TERM" || value == "-STOP")
+                }),
+                "{shell} {typed} {found:?}"
+            );
+        }
+    }
+    let exact = shell_values(&harness, "bash", &["pkill", "-P"]);
+    assert_eq!(exact, ["-P"]);
+}

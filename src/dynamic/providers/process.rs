@@ -298,6 +298,19 @@ pub(super) fn is_signal_word(spans: &[String], shell: Shell) -> bool {
         })
 }
 
+/// whether the word under the cursor is a lone capital after `-`, such as
+/// `-T`, which names no flag of kill or pkill by itself but starts a signal.
+pub(super) fn is_lone_capital(spans: &[String], shell: Shell) -> bool {
+    let [command, typed] = spans else {
+        return false;
+    };
+    shell != Shell::Nushell
+        && matches!(command.as_str(), "kill" | "pkill")
+        && typed.strip_prefix('-').is_some_and(|rest| {
+            rest.len() == 1 && rest.starts_with(|ch: char| ch.is_ascii_uppercase())
+        })
+}
+
 /// `kill` as bash and zsh run it, which no cached manpage describes.
 pub(super) fn builtin_kill(words: &Words, ctx: &DynCtx) -> Vec<Candidate> {
     let typed = words.current();
@@ -318,6 +331,9 @@ pub(super) fn builtin_kill(words: &Words, ctx: &DynCtx) -> Vec<Candidate> {
         if rest.starts_with(['s', 'n']) && rest.len() > 1 {
             let (lead, partial) = typed.split_at(2);
             return signal_values(lead, partial, zsh && rest.starts_with('n'));
+        }
+        if words.arg_count() > 0 {
+            return Vec::new();
         }
         let mut found: Vec<Candidate> = BUILTIN_FLAGS
             .iter()
@@ -440,6 +456,15 @@ mod tests {
             Shell::Bash
         ));
         assert!(!is_signal_word(&spans(&["pgrep", "-TE"]), Shell::Bash));
+    }
+
+    #[test]
+    fn a_lone_capital_after_a_dash_is_found() {
+        let spans = |word: &str| vec!["pkill".to_owned(), word.to_owned()];
+        assert!(is_lone_capital(&spans("-T"), Shell::Bash));
+        assert!(!is_lone_capital(&spans("-t"), Shell::Bash));
+        assert!(!is_lone_capital(&spans("-TE"), Shell::Bash));
+        assert!(!is_lone_capital(&spans("-T"), Shell::Nushell));
     }
 
     #[test]

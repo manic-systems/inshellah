@@ -21,9 +21,19 @@ _inshellah_takeover() {
     return 1
 }
 
+# whether the cursor is on an operand of the shell's own kill behind builtin
+_inshellah_builtin_kill() {
+    local i=1
+    while [[ ${COMP_WORDS[i]-} == builtin ]]; do
+        ((i++))
+    done
+    [[ ${COMP_WORDS[i]-} == kill ]] && ((COMP_CWORD > i))
+}
+
 _inshellah_shell_owns() {
     case $(type -t -- "$1") in
         builtin)
+            [[ $1 == builtin ]] && _inshellah_builtin_kill && return 1
             [[ $1 == command || $1 == exec ]] && return 1
             [[ $1 == kill ]] && { _inshellah_takeover || ! complete -p kill >/dev/null 2>&1; } && return 1
             return 0
@@ -159,6 +169,17 @@ _inshellah_borrow() {
     "$fn" "$@" || true
 }
 
+# bash-completion completes builtin names after builtin, kill's operands
+# are inshellah's and anything else stays with bash
+_inshellah_complete_builtin() {
+    if _inshellah_builtin_kill; then
+        _inshellah_answer "$@" && return 0
+        compopt -o default 2>/dev/null || true
+        return 0
+    fi
+    mapfile -t COMPREPLY < <(compgen -b -- "${COMP_WORDS[COMP_CWORD]}")
+}
+
 _inshellah_complete() {
     local takeover=
     _inshellah_takeover && takeover=1
@@ -223,6 +244,8 @@ _inshellah_register() {
             *) _inshellah_prev_default=$prev ;;
         esac
     fi
+    [[ $(complete -p builtin 2>/dev/null) == 'complete -b builtin' ]] &&
+        complete -F _inshellah_complete_builtin builtin
     complete -D -o bashdefault -o default -F _inshellah_complete
     _inshellah_wrap_minimal
     _inshellah_wrap_unwrappers

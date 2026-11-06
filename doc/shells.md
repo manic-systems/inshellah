@@ -77,7 +77,7 @@ names after them, also attached as in `-sTERM`, and for `-SIGTERM` style words,
 and lists pids otherwise. after `--` no flags are offered. zsh's `-n` takes only
 numbers, so there it lists signal numbers and bash lists names. the signal
 table follows the os inshellah was built for, with `STKFLT`, `PWR` and the
-`RTMIN` to `RTMAX` range on linux, and `EMT` and `INFO` on macos.
+`RTMIN` to `RTMAX` range on linux, and `EMT` and `INFO` on macos. a signal word is not offered once a pid has been typed, as the builtin takes none there. in bash, `builtin kill` reaches inshellah with or without bash-completion and in either mode, while `builtin` in front of anything else stays with bash and lists builtin names as before. a lone capital such as `pkill -T` offers signals unless pkill has a flag spelled exactly so.
 the binary gets signal names after `-s`, `--signal`, `-l` and `--list`, and
 pkill gets them after `--signal` and `-SIG` words, including capitalised ones such as `-TE` that a flag letter would otherwise claim. pkill and pgrep get user and group
 names after `-u`, `-U`, `-G` and their long forms, also attached as in `-uroot`, every user and group `getent` lists whatever its id, as bash-completion does, or `dscl` on macos. pgrep has no signals. fish keeps its own `kill`, a

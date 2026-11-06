@@ -385,6 +385,11 @@ pub fn is_signal_word(spans: &[String], shell: Shell) -> bool {
     process::is_signal_word(spans, shell)
 }
 
+/// whether the last word is a lone capital that begins a `-SIGNAL`.
+pub fn is_lone_capital(spans: &[String], shell: Shell) -> bool {
+    process::is_lone_capital(spans, shell)
+}
+
 pub fn kind_of(cmd: &str) -> Option<&'static str> {
     PROVIDERS
         .iter()

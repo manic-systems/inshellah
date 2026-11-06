@@ -216,6 +216,16 @@ unwrap 'nohup demotool al'
 unwrap 'nohup nosuchtool al'
 INSHELLAH_TAKEOVER=1 unwrap 'nohup demotool al'
 INSHELLAH_TAKEOVER=1 unwrap 'nohup nosuchtool al'
+owns() {
+    COMP_WORDS=("$@")
+    COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+    _inshellah_shell_owns builtin && echo "owns $*" || echo "asks $*"
+}
+owns builtin ki
+owns builtin kill
+owns builtin kill -
+owns builtin builtin kill -s ""
+owns builtin cd ""
 "#;
 
 #[test]
@@ -259,6 +269,11 @@ unwrap nohup demotool al|bc|
 unwrap nohup nosuchtool al|bc|
 unwrap nohup demotool al|alpha|
 unwrap nohup nosuchtool al|bc|
+owns builtin ki
+owns builtin kill
+asks builtin kill -
+asks builtin builtin kill -s 
+owns builtin cd 
 "#,
     );
 }

@@ -45,6 +45,7 @@ use inshellah::{
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
         provider_kind,
+        provider_lone_capital,
         provider_signal_word,
         provider_takes_value,
     },
@@ -283,7 +284,7 @@ pub fn decide(
         spans: spans.clone(),
         ..Trace::default()
     };
-    if spans.is_empty() || (explicit_cmd_path.is_none() && find_in_path(&spans[0]).is_none()) {
+    if unanswerable(raw_spans, &spans, explicit_cmd_path.as_deref(), shell) {
         return Decision {
             response: Response::Defer,
             reason: Reason::NotOnPath,
@@ -377,7 +378,7 @@ pub fn decide(
     trace.protocol = protocol_of(user_dir, &trace, timeout_ms);
     // spans are post-elevation, so `sudo nix ...` reaches this as
     // `[nix, ...]` and hits the nix branch.
-    let reply = if typing_flag && !candidates.is_empty() && !provider_signal_word(&spans, shell) {
+    let reply = if typing_flag && flags_answer(&spans, &candidates, &last_token, shell) {
         Reply::Silent
     } else {
         dynamic_complete_candidates_with_path(
@@ -405,6 +406,29 @@ pub fn decide(
         reason,
         trace,
     }
+}
+
+/// whether the cached flags settle a flag word alone. a leading `-SIGNAL` is a
+/// provider's, and a lone capital such as `-T` only matches flags by case
+/// folding, so the signal it starts is offered unless a flag is spelled so.
+fn flags_answer(spans: &[String], flags: &[Candidate], last_token: &str, shell: Shell) -> bool {
+    !flags.is_empty()
+        && !provider_signal_word(spans, shell)
+        && (!provider_lone_capital(spans, shell)
+            || flags.iter().any(|flag| flag.value.starts_with(last_token)))
+}
+
+/// whether the line is not inshellah's to complete. anything but the shell's
+/// own kill behind `builtin` is the shell's.
+fn unanswerable(
+    raw_spans: &[String],
+    spans: &[String],
+    explicit: Option<&Path>,
+    shell: Shell,
+) -> bool {
+    let behind_builtin = raw_spans.first().is_some_and(|word| word == "builtin")
+        && builtin_kill_at(raw_spans, shell).is_none();
+    behind_builtin || spans.is_empty() || (explicit.is_none() && find_in_path(&spans[0]).is_none())
 }
 
 /// where the shell's own `kill` starts. `builtin` always reaches it and bash's
