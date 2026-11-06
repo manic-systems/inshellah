@@ -339,6 +339,13 @@ service=-first- INSHELLAH_TAKEOVER=1 comp 'demotool al'
 INSHELLAH_TAKEOVER=1 service=-first- comp 'kill -s TERM'
 INSHELLAH_TAKEOVER=1 service=-first- comp 'command kill -s TERM'
 INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'command pwd -'
+INSHELLAH_TAKEOVER=1 service=-first- comp 'command demotool al'
+INSHELLAH_TAKEOVER=1 service=-first- comp 'exec -cl -a name demotool al'
+INSHELLAH_TAKEOVER=1 service=-first- comp 'noglob command -p -- demotool al'
+INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'command -v demotool al'
+INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'exec -a demotool al'
+INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'builtin demotool al'
+_inshellah_prev_first=_prev service=-first- comp 'command demotool al'
 INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'pwd -'
 _inshellah_prev_first=_prev service=-first- comp 'kill -s TERM'
 INSHELLAH_TAKEOVER=1 service=-first- comp 'demotool al'
@@ -394,6 +401,13 @@ kill -s TERM => TERM|TTOU|TSTP|TTIN {TERM  -- terminate|TTOU  -- background writ
 command kill -s TERM => TERM|TTOU|TSTP|TTIN {TERM  -- terminate|TTOU  -- background write to the \
          terminal|TSTP  -- stop from the terminal|TTIN  -- background read from the terminal}
 command pwd - => prev
+command demotool al => alpha {alpha  -- first}
+exec -cl -a name demotool al => alpha {alpha  -- first}
+noglob command -p -- demotool al => alpha {alpha  -- first}
+command -v demotool al => prev
+exec -a demotool al => prev
+builtin demotool al => prev
+command demotool al => prev
 pwd - => prev
 kill -s TERM => prev
 demotool al => alpha {alpha  -- first}
