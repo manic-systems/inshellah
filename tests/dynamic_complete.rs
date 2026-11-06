@@ -78,7 +78,11 @@ fn install_fakes(bin_dir: &Path) {
     }
     write_executable(bin_dir, "zig", FAKE_ZIG);
     write_executable(bin_dir, "ps", FAKE_PS);
-    for name in ["ssh", "scp", "sftp", "kill", "pkill", "make", "just", "npm"] {
+    write_executable(bin_dir, "getent", FAKE_GETENT);
+    write_executable(bin_dir, "dscl", FAKE_DSCL);
+    for name in [
+        "ssh", "scp", "sftp", "kill", "pkill", "pgrep", "make", "just", "npm",
+    ] {
         write_executable(bin_dir, name, "#!/bin/sh\nexit 0\n");
     }
     write_executable(bin_dir, "kubectl", FAKE_KUBECTL);
@@ -152,6 +156,20 @@ esac
 
 const FAKE_PS: &str = r"#!/bin/sh
 printf ' 101 worker\n 202 database server\n'
+";
+
+const FAKE_GETENT: &str = r"#!/bin/sh
+case $1 in
+  passwd) printf 'root:x:0:0::/root:/bin/sh\nnobody:x:65534:65534::/:/bin/false\n' ;;
+  group) printf 'wheel:x:1:root\nusers:x:100:\n' ;;
+esac
+";
+
+const FAKE_DSCL: &str = r"#!/bin/sh
+case $3 in
+  /Users) printf 'root\nnobody\n' ;;
+  /Groups) printf 'wheel\nusers\n' ;;
+esac
 ";
 
 const FAKE_KUBECTL: &str = r#"#!/bin/sh
@@ -780,9 +798,11 @@ fn the_builtin_kill_of_bash_and_zsh_has_its_own_flags_and_signals() {
     let harness = Harness::new("dyn-kill-builtin");
     seed_command(&harness, "kill", &[], &["--timeout", "-q"], &["-a", "-p"]);
     for shell in ["bash", "zsh"] {
-        assert_eq!(shell_values(&harness, shell, &["kill", "-"]), [
-            "-s", "-n", "-l", "-L"
-        ]);
+        let mut flags = vec!["-s", "-n", "-l", "-L"];
+        if shell == "zsh" {
+            flags.push("-q");
+        }
+        assert_eq!(shell_values(&harness, shell, &["kill", "-"]), flags);
         for flag in ["-s", "-n", "-l"] {
             let signals = shell_values(&harness, shell, &["kill", flag, "TE"]);
             let first = if shell == "zsh" && flag == "-n" {
@@ -825,6 +845,125 @@ fn the_builtin_kill_of_bash_and_zsh_has_its_own_flags_and_signals() {
             ["101", "202"]
         );
     }
+}
+
+#[test]
+fn zsh_kill_has_its_own_q_and_l_flags_and_bash_does_not() {
+    let harness = Harness::new("dyn-kill-zsh-flags");
+    seed_command(&harness, "kill", &[], &["--timeout"], &["-a"]);
+    let zsh = shell_values(&harness, "zsh", &["kill", "-"]);
+    assert_eq!(zsh, ["-s", "-n", "-l", "-L", "-q"]);
+    let bash = shell_values(&harness, "bash", &["kill", "-"]);
+    assert_eq!(bash, ["-s", "-n", "-l", "-L"]);
+    let (listing, ..) = harness.run_for(Some("zsh"), &["kill", "-L"], &[]);
+    assert!(listing.contains("with their numbers"), "{listing}");
+    let (bash_listing, ..) = harness.run_for(Some("bash"), &["kill", "-L"], &[]);
+    assert!(!bash_listing.contains("numbers"), "{bash_listing}");
+    assert!(shell_values(&harness, "zsh", &["kill", "-q", ""]).is_empty());
+    assert_eq!(shell_values(&harness, "zsh", &["kill", "-q", "7", ""]), [
+        "101", "202"
+    ]);
+}
+
+#[test]
+fn builtin_flags_follow_the_shell_behind_command_builtin_and_exec() {
+    let harness = Harness::new("dyn-kill-behind");
+    seed_command(&harness, "kill", &[], &["--timeout"], &["-a"]);
+    let flags = ["-s", "-n", "-l", "-L"];
+    assert_eq!(
+        shell_values(&harness, "bash", &["command", "kill", "-"]),
+        flags
+    );
+    assert_eq!(
+        shell_values(&harness, "bash", &["command", "-p", "kill", "-"]),
+        flags
+    );
+    for shell in ["bash", "zsh"] {
+        assert_eq!(
+            shell_values(&harness, shell, &["builtin", "kill", "-n", ""])
+                .first()
+                .map(String::as_str),
+            Some(if shell == "zsh" { "1" } else { "HUP" }),
+            "{shell}"
+        );
+        assert_eq!(shell_values(&harness, shell, &["builtin", "kill", ""]), [
+            "101", "202"
+        ]);
+    }
+    for line in [&["exec", "kill", "-"][..], &["sudo", "kill", "-"], &[
+        "nohup", "kill", "-",
+    ]] {
+        let found = shell_values(&harness, "bash", line);
+        assert!(
+            found.contains(&"--timeout".to_owned()),
+            "{line:?} {found:?}"
+        );
+    }
+    let found = shell_values(&harness, "zsh", &["command", "kill", "-"]);
+    assert!(found.contains(&"--timeout".to_owned()), "{found:?}");
+}
+
+#[test]
+fn pkill_offers_signals_for_capitalised_words_a_flag_letter_starts() {
+    let harness = Harness::new("dyn-pkill-signal");
+    seed_command(
+        &harness,
+        "pkill",
+        &[],
+        &["-t", "-u", "-O", "-s", "-P", "--terminal"],
+        &["-f", "-x"],
+    );
+    for (typed, wanted) in [
+        ("-TE", "-TERM"),
+        ("-TERM", "-TERM"),
+        ("-QU", "-QUIT"),
+        ("-CO", "-CONT"),
+        ("-SE", "-SEGV"),
+        ("-PI", "-PIPE"),
+        ("-KI", "-KILL"),
+        ("-SIGTE", "-SIGTERM"),
+    ] {
+        for shell in ["bash", "zsh", "fish"] {
+            let found = shell_values(&harness, shell, &["pkill", typed]);
+            assert!(
+                found.contains(&wanted.to_owned()),
+                "{shell} {typed} {found:?}"
+            );
+        }
+    }
+    let after_flag = shell_values(&harness, "bash", &["pkill", "-f", "-TE"]);
+    assert!(!after_flag.contains(&"-TERM".to_owned()), "{after_flag:?}");
+}
+
+#[test]
+fn pkill_and_pgrep_complete_accounts_attached_to_their_flags() {
+    let harness = Harness::new("dyn-pkill-accounts");
+    for command in ["pkill", "pgrep"] {
+        seed_command(&harness, command, &[], &["-u", "-U", "-G"], &["-f", "-x"]);
+        for (typed, wanted) in [
+            ("-uroo", "-uroot"),
+            ("-Uroo", "-Uroot"),
+            ("-furoo", "-furoot"),
+        ] {
+            let found = shell_values(&harness, "bash", &[command, typed]);
+            assert!(
+                found.contains(&wanted.to_owned()),
+                "{command} {typed} {found:?}"
+            );
+        }
+        let detached = shell_values(&harness, "bash", &[command, "-u", "roo"]);
+        assert!(
+            detached.contains(&"root".to_owned()),
+            "{command} {detached:?}"
+        );
+        let flagged = shell_values(&harness, "bash", &[command, "-u", "root", ""]);
+        assert!(
+            !flagged.contains(&"root".to_owned()),
+            "{command} {flagged:?}"
+        );
+    }
+    let pgrep = shell_values(&harness, "bash", &["pgrep", "-TE"]);
+    assert!(!pgrep.contains(&"-TERM".to_owned()), "{pgrep:?}");
 }
 
 #[test]

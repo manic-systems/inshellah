@@ -45,6 +45,7 @@ use inshellah::{
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
         provider_kind,
+        provider_signal_word,
         provider_takes_value,
     },
     executable::{
@@ -376,7 +377,7 @@ pub fn decide(
     trace.protocol = protocol_of(user_dir, &trace, timeout_ms);
     // spans are post-elevation, so `sudo nix ...` reaches this as
     // `[nix, ...]` and hits the nix branch.
-    let reply = if typing_flag && !candidates.is_empty() {
+    let reply = if typing_flag && !candidates.is_empty() && !provider_signal_word(&spans, shell) {
         Reply::Silent
     } else {
         dynamic_complete_candidates_with_path(
@@ -406,6 +407,26 @@ pub fn decide(
     }
 }
 
+/// where the shell's own `kill` starts. `builtin` always reaches it and bash's
+/// `command` does too, while zsh's `command` and every `exec` run the binary.
+fn builtin_kill_at(raw_spans: &[String], shell: Shell) -> Option<usize> {
+    let mut at = 0;
+    while let Some(word) = raw_spans.get(at) {
+        match word.as_str() {
+            "kill" => return (at == 0 || at + 1 < raw_spans.len()).then_some(at),
+            "builtin" => at += 1,
+            "command" if shell == Shell::Bash => {
+                at += 1;
+                while raw_spans.get(at).is_some_and(|flag| flag == "-p") {
+                    at += 1;
+                }
+            },
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// `kill` typed as the first word is the shell's own builtin.
 fn builtin_provider(
     raw_spans: &[String],
@@ -414,10 +435,8 @@ fn builtin_provider(
     cfg: &Config,
     trace: &mut Trace,
 ) -> Option<Response> {
-    if raw_spans.first()? != "kill" {
-        return None;
-    }
-    let candidates = builtin_completions(raw_spans, shell, timeout_ms, cfg)?;
+    let kill = builtin_kill_at(raw_spans, shell)?;
+    let candidates = builtin_completions(&raw_spans[kill..], shell, timeout_ms, cfg)?;
     trace.dynamic = Some(candidates.len());
     Some(Response::or_defer(candidates))
 }

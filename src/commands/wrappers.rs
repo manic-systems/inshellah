@@ -130,6 +130,16 @@ const WRAPPERS: &[Wrapper] = &[
         bare_dash:         false,
     },
     Wrapper {
+        name:              "builtin",
+        takes_value:       &[],
+        no_command:        &[],
+        operands:          0,
+        replaces_operands: &[],
+        optional_operands: &[],
+        assignments:       false,
+        bare_dash:         false,
+    },
+    Wrapper {
         name:              "exec",
         takes_value:       &["-a"],
         no_command:        &[],

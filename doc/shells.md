@@ -69,18 +69,18 @@ in zsh, long descriptions are cut to fit the terminal width with a trailing `...
 
 in zsh, directory candidates such as the value of `--output=pdir/` keep the cursor right after the slash with no space appended, so you can keep typing the path. the hook sets its own shell options for the functions it runs, so options like `ksharrays` in your config do not break it. the completer itself runs with the same options compsys gives every completion function, so a glob that matches nothing inside `_files` or your own `-first-` completer stays quiet. candidates that start with `~` are inserted unquoted so the shell still expands them. under takeover every answer is remembered for the same words, so `-default-` behind a wrapper like `nohup` and every matcher-list or completer pass reuse it, and a single tab press runs `inshellah complete` once per distinct command line. the memory is dropped at the start of each completion attempt through `compprefuncs`, so a branch created between two tab presses shows up on the second. inside quotes, as in `git -C "~/my`, candidates that start with `~` are left to zsh's own completion because the shell does not expand a tilde there.
 
-in bash and zsh, `kill` is a builtin that inshellah normally leaves to the shell, and in zsh `command kill` and `exec kill` count as `kill`. under
+in bash and zsh, `kill` is a builtin that inshellah normally leaves to the shell, and `command kill` counts as `kill` too. bash runs the builtin behind `command` and `builtin`, zsh runs the builtin only behind `builtin`, and `exec`, `sudo`, `env` and the like run the binary in both. under
 takeover, or when bash-completion has no spec for it, inshellah's own `kill`
 provider answers instead. that provider offers the builtin's own flags
-(`-s`, `-n`, `-l`, and `-L` in bash) and not the binary's, completes signal
+(`-s`, `-n`, `-l` and `-L`, plus `-q` in zsh) and not the binary's, completes signal
 names after them, also attached as in `-sTERM`, and for `-SIGTERM` style words,
 and lists pids otherwise. after `--` no flags are offered. zsh's `-n` takes only
 numbers, so there it lists signal numbers and bash lists names. the signal
 table follows the os inshellah was built for, with `STKFLT`, `PWR` and the
 `RTMIN` to `RTMAX` range on linux, and `EMT` and `INFO` on macos.
 the binary gets signal names after `-s`, `--signal`, `-l` and `--list`, and
-pkill gets them after `--signal` and `-SIG` words as well as user and group
-names after `-u`, `-U`, `-G` and their long forms, every user and group `getent` lists whatever its id, as bash-completion does. fish keeps its own `kill`, a
+pkill gets them after `--signal` and `-SIG` words, including capitalised ones such as `-TE` that a flag letter would otherwise claim. pkill and pgrep get user and group
+names after `-u`, `-U`, `-G` and their long forms, also attached as in `-uroot`, every user and group `getent` lists whatever its id, as bash-completion does, or `dscl` on macos. pgrep has no signals. fish keeps its own `kill`, a
 function that hands the work to the binary, so fish lists pids after `-l` as it
 does without inshellah, while nushell's own `kill` takes a signal number and keeps getting
 only pids. reserved words that start a command, like `time`,

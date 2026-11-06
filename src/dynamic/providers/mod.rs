@@ -13,6 +13,7 @@ use crate::{
             Words,
         },
     },
+    shell::Shell,
 };
 
 pub mod adb;
@@ -337,7 +338,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         answer_fn:   None,
     },
     FunctionProvider {
-        commands:    &["kill", "pkill"],
+        commands:    &["kill", "pkill", "pgrep"],
         kind:        Kind::Fallback,
         files:       Files::Replace,
         matching:    Matching::ValueOrDescription,
@@ -376,6 +377,12 @@ pub fn builtin(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
         .find(|provider| provider.commands().contains(&"kill"))?;
     (spans.first().map(String::as_str) == Some("kill"))
         .then(|| process::builtin_kill(&provider.words(spans, ctx), ctx))
+}
+
+/// whether the last word is a leading `-SIGNAL`, which a provider answers in
+/// place of static flags.
+pub fn is_signal_word(spans: &[String], shell: Shell) -> bool {
+    process::is_signal_word(spans, shell)
 }
 
 pub fn kind_of(cmd: &str) -> Option<&'static str> {

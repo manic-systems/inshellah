@@ -115,6 +115,10 @@ pub fn provider_takes_value(cmd: &str, flag: &str, leading: bool) -> bool {
     providers::takes_value(cmd, flag, leading)
 }
 
+pub fn provider_signal_word(spans: &[String], shell: Shell) -> bool {
+    providers::is_signal_word(spans, shell)
+}
+
 pub fn provider_kind(cmd: &str) -> Option<&'static str> {
     providers::kind_of(cmd)
 }
