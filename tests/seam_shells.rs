@@ -6,13 +6,13 @@
 //! them.
 #![cfg(test)]
 
+#[path = "common/exec.rs"] mod exec;
 #[path = "common/temp_dir.rs"] mod temp_dir;
 
 use std::{
     env,
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::Path,
     process::Command,
 };
@@ -38,9 +38,7 @@ impl Fixture {
         for tool in [
             "demotool", "twotool", "fwrap", "ordtool", "dirtool", "widetool", "bigtool", "pendtool",
         ] {
-            let stub = bin.join(tool);
-            fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub executable");
-            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
+            exec::write_executable_file(&bin.join(tool), "#!/bin/sh\nexit 0\n");
         }
 
         let demotool = json!({
