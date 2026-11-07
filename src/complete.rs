@@ -5,15 +5,15 @@
 use std::{
     cmp::Reverse,
     env,
-    fmt::{
-        self,
-        Display,
-        Formatter,
-        Write as _,
-    },
     fs,
     iter,
     path::PathBuf,
+};
+
+use serde_core::ser::{
+    Serialize,
+    SerializeStruct as _,
+    Serializer,
 };
 
 use crate::{
@@ -45,10 +45,6 @@ impl Candidate {
             description: description.into(),
         }
     }
-
-    pub fn into_json(self) -> String {
-        completion_json(&self.value, &self.description)
-    }
 }
 
 /// `Defer` prints `null`, `WithFiles` keeps nushell's file completion.
@@ -68,62 +64,53 @@ impl Response {
     }
 }
 
-impl Display for Response {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let (candidates, with_files) = match self {
-            Self::Defer => return f.write_str("null"),
-            Self::WithFiles(candidates) if candidates.is_empty() => return f.write_str("null"),
-            Self::Candidates(candidates) => (candidates, false),
-            Self::WithFiles(candidates) => (candidates, true),
-        };
-        f.write_str(r#"{"completions":["#)?;
-        for (idx, candidate) in candidates.iter().enumerate() {
-            if idx > 0 {
-                f.write_char(',')?;
-            }
-            write!(
-                f,
-                r#"{{"value":"{}","description":"{}"}}"#,
-                JsonEscaped(&candidate.value),
-                JsonEscaped(&candidate.description)
-            )?;
-        }
-        // nushell 0.115+ reuses answers across prompts keyed only on the line,
-        // serving stale git refs and pids (nushell#19297, opt-out in #19346).
-        f.write_str(r#"],"options":{"cache":false}"#)?;
-        if with_files {
-            f.write_str(r#","fallback":true"#)?;
-        }
-        f.write_char('}')
+impl Serialize for Candidate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut row = serializer.serialize_struct("Candidate", 2)?;
+        row.serialize_field("value", &self.value)?;
+        row.serialize_field("description", &self.description)?;
+        row.end()
     }
 }
 
-pub fn completion_json(value: &str, desc: &str) -> String {
-    format!(
-        r#"{{"value":"{}","description":"{}"}}"#,
-        JsonEscaped(value),
-        JsonEscaped(desc)
-    )
+struct Options;
+
+impl Serialize for Options {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // nushell 0.115+ reuses answers across prompts keyed only on the line,
+        // serving stale git refs and pids (nushell#19297, opt-out in #19346).
+        let mut options = serializer.serialize_struct("Options", 1)?;
+        options.serialize_field("cache", &false)?;
+        options.end()
+    }
 }
 
-struct JsonEscaped<'text>(&'text str);
-
-impl Display for JsonEscaped<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        for ch in self.0.chars() {
-            match ch {
-                '"' => f.write_str("\\\"")?,
-                '\\' => f.write_str("\\\\")?,
-                '\n' => f.write_str("\\n")?,
-                '\r' => f.write_str("\\r")?,
-                '\t' => f.write_str("\\t")?,
-                control if control < '\x20' => {
-                    write!(f, "\\u{:04x}", u32::from(control))?;
-                },
-                other => f.write_char(other)?,
-            }
+impl Serialize for Response {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let (candidates, with_files) = match self {
+            Self::Defer => return serializer.serialize_none(),
+            Self::WithFiles(candidates) if candidates.is_empty() => {
+                return serializer.serialize_none();
+            },
+            Self::Candidates(candidates) => (candidates, false),
+            Self::WithFiles(candidates) => (candidates, true),
+        };
+        let mut reply = serializer.serialize_struct("Response", 2 + usize::from(with_files))?;
+        reply.serialize_field("completions", candidates)?;
+        reply.serialize_field("options", &Options)?;
+        if with_files {
+            reply.serialize_field("fallback", &true)?;
         }
-        Ok(())
+        reply.end()
     }
 }
 
@@ -517,7 +504,7 @@ mod tests {
     #[test]
     fn json_escapes_without_changing_shape() {
         assert_eq!(
-            completion_json("a\"b", "line\nnext"),
+            serde_json::to_string(&Candidate::new("a\"b", "line\nnext")).unwrap(),
             r#"{"value":"a\"b","description":"line\nnext"}"#
         );
     }

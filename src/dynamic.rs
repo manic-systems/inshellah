@@ -117,8 +117,8 @@ pub fn provider_kind(cmd: &str) -> Option<&'static str> {
     providers::kind_of(cmd)
 }
 
-/// candidates as JSON, or None to hand off to nu's file completer.
-pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
+/// candidates, or None to hand off to nu's file completer.
+pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<Candidate>> {
     dynamic_complete_with_path(spans, None, cfg)
 }
 
@@ -178,7 +178,7 @@ pub fn dynamic_complete_with_path(
     spans: &[String],
     explicit_cmd_path: Option<&Path>,
     cfg: &Config,
-) -> Option<Vec<String>> {
+) -> Option<Vec<Candidate>> {
     dynamic_complete_candidates_with_path(
         spans,
         explicit_cmd_path,
@@ -188,13 +188,7 @@ pub fn dynamic_complete_with_path(
         cfg,
     )
     .into_answer()
-    .map(|answer| {
-        answer
-            .candidates
-            .into_iter()
-            .map(Candidate::into_json)
-            .collect()
-    })
+    .map(|answer| answer.candidates)
 }
 
 pub fn dynamic_complete_candidates_with_path(

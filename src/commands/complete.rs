@@ -86,7 +86,9 @@ pub fn run(
     cfg: &Config,
 ) -> io::Result<()> {
     let decision = decide(raw_spans, user_dir, system_dirs, mandirs, timeout_ms, cfg);
-    writeln!(io::stdout().lock(), "{}", decision.response)
+    let mut out = io::stdout().lock();
+    serde_json::to_writer(&mut out, &decision.response)?;
+    writeln!(out)
 }
 
 /// what `complete` answers, why, and what it looked at on the way.
