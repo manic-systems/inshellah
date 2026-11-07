@@ -674,3 +674,62 @@ fn single_space_option_row_after_a_finished_line_is_kept() {
         );
     }
 }
+
+#[test]
+fn lowercase_placeholder_between_short_and_long_keeps_both_names() {
+    let groff = ".TH XZ 1\n.SH NAME\nxz \\- compress\n.SH OPTIONS\n.TP\n\\fB\\-F\\fR \
+                 \\fIformat\\fR, \\fB\\-\\-format=\\fIformat\nSpecify the file format.\n";
+    let result = parse_manpage_string(groff);
+    assert!(
+        result.entries.iter().any(|entry| {
+            entry.switch == OwnedSwitch::Both('F', "format".to_owned()) && entry.param.is_some()
+        }),
+        "{:?}",
+        result.entries
+    );
+}
+
+#[test]
+fn lowercase_placeholder_repeated_in_long_form_names_the_param() {
+    let groff = ".TH NANO 1\n.SH NAME\nnano \\- editor\n.SH OPTIONS\n.TP\n.BI \\-r \" number\\fR, \
+                 \" \\-\\-fill= number\nSet the width. If the value is 0 or less, wrapping \
+                 occurs.\n";
+    let result = parse_manpage_string(groff);
+    let entry = result
+        .entries
+        .iter()
+        .find(|entry| entry.switch == OwnedSwitch::Both('r', "fill".to_owned()))
+        .expect("fill entry");
+    let param = entry.param.as_ref().expect("param");
+    assert_eq!(param.name, "number");
+    assert!(param.choices.is_empty(), "{:?}", param.choices);
+}
+
+#[test]
+fn manpage_metavar_sentence_gives_choices_to_the_matching_param() {
+    let groff = r#".TH LS "1"
+.SH NAME
+ls \- list
+.SH DESCRIPTION
+.TP
+\fB\-\-color\fR[=\fIWHEN\fR]
+colorize the output
+.TP
+\fB\-\-block\-size\fR=\fISIZE\fR
+scale sizes
+.PP
+The WHEN argument defaults to \(aqalways\(aq and can also be \(aqauto\(aq or \(aqnever\(aq.
+"#;
+    let result = parse_manpage_string(groff);
+    let values = |long: &str| {
+        result
+            .entries
+            .iter()
+            .find(|entry| matches!(&entry.switch, OwnedSwitch::Long(name) | OwnedSwitch::Both(_, name) if name == long))
+            .and_then(|entry| entry.param.as_ref())
+            .map(|param| choice_values(param).iter().map(ToString::to_string).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    assert_eq!(values("color"), ["always", "auto", "never"]);
+    assert!(values("block-size").is_empty());
+}

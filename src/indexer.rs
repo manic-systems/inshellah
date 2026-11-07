@@ -1291,6 +1291,30 @@ fn merge_matching_entry_details(result: &mut ManpageResult, incoming: &ManpageEn
 }
 
 fn fill_flag_alias_from_help(result: &mut ManpageResult, short: char, long: &str) -> bool {
+    let short_only = result
+        .entries
+        .iter()
+        .position(|entry| matches!(entry.switch, OwnedSwitch::Short(found) if found == short));
+    let long_only = result
+        .entries
+        .iter()
+        .position(|entry| matches!(&entry.switch, OwnedSwitch::Long(name) if name == long));
+    if let (Some(short_at), Some(long_at)) = (short_only, long_only) {
+        let spare = result.entries.remove(long_at);
+        let keep = &mut result.entries[if long_at < short_at {
+            short_at - 1
+        } else {
+            short_at
+        }];
+        keep.switch = OwnedSwitch::Both(short, long.to_owned());
+        if keep.param.is_none() {
+            keep.param = spare.param;
+        }
+        if keep.desc.is_empty() {
+            keep.desc = spare.desc;
+        }
+        return true;
+    }
     if !entry_has_long(result, long) {
         for entry in &mut result.entries {
             if matches!(entry.switch, OwnedSwitch::Short(found) if found == short) {
@@ -1322,6 +1346,14 @@ fn supplement_result_from_help(result: &mut ManpageResult, help: &ManpageResult)
             OwnedSwitch::Both(short, long) => {
                 if fill_flag_alias_from_help(result, *short, long) {
                     alias_changed = true;
+                }
+                if entry_has_short(result, *short) && !entry_has_long(result, long) {
+                    result.entries.push(ManpageEntry {
+                        switch: OwnedSwitch::Long(long.clone()),
+                        ..help_entry.clone()
+                    });
+                    changed = true;
+                    continue;
                 }
                 if entry_overlaps(result, help_entry) {
                     changed |= alias_changed;
@@ -1763,6 +1795,63 @@ mod tests {
         ParamKind,
         ParamOrigin,
     };
+
+    #[test]
+    fn colliding_short_keeps_the_long_of_a_merged_duplicate() {
+        let both = |short: char, long: &str| {
+            ManpageEntry {
+                switch: OwnedSwitch::Both(short, long.to_owned()),
+                param:  None,
+                desc:   long.to_owned(),
+            }
+        };
+        let mut query = ManpageResult {
+            entries: vec![both('P', "attr-path")],
+            ..ManpageResult::default()
+        };
+        let install = ManpageResult {
+            entries: vec![both('P', "preserve-installed")],
+            ..ManpageResult::default()
+        };
+        assert!(supplement_result_from_duplicate_manpage(
+            &mut query, &install
+        ));
+        assert!(entry_has_long(&query, "preserve-installed"));
+        assert!(
+            query
+                .entries
+                .iter()
+                .any(|entry| { entry.switch == OwnedSwitch::Both('P', "attr-path".to_owned()) })
+        );
+    }
+
+    #[test]
+    fn help_pair_joins_a_short_only_and_a_long_only_entry() {
+        let one = |switch| {
+            ManpageEntry {
+                switch,
+                param: None,
+                desc: String::new(),
+            }
+        };
+        let mut result = ManpageResult {
+            entries: vec![
+                one(OwnedSwitch::Short('t')),
+                one(OwnedSwitch::Long("list".to_owned())),
+            ],
+            ..ManpageResult::default()
+        };
+        let help = ManpageResult {
+            entries: vec![one(OwnedSwitch::Both('t', "list".to_owned()))],
+            ..ManpageResult::default()
+        };
+        assert!(supplement_result_from_help(&mut result, &help));
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(
+            result.entries[0].switch,
+            OwnedSwitch::Both('t', "list".to_owned())
+        );
+    }
 
     #[test]
     fn help_only_entries_apply_to_descendants() {

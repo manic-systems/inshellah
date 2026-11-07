@@ -348,6 +348,18 @@ make_parser!(find_usage_line -> (),
     ))
 );
 
+/// the usage line with the indented lines wrapped under it, `usage:` dropped.
+pub fn usage_block(input: &str) -> Option<String> {
+    let mut lines = input.lines();
+    let (head, ()) = lines.by_ref().find_map(|line| find_usage_line(line).ok())?;
+    let mut block = head.trim().to_owned();
+    for line in lines.take_while(|line| line.starts_with([' ', '\t']) && !line.trim().is_empty()) {
+        block.push(' ');
+        block.push_str(line.trim());
+    }
+    Some(block)
+}
+
 make_parser!(pub extract_usage_positionals<'src> -> Vec<(&'src str, Positional)>,
     preceded(
         many0(preceded(not(find_usage_line), (rest_of_line, line_ending))),
