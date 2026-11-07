@@ -733,3 +733,32 @@ many new names => path same kept loaded loaded
         "fish-stubs wrote no stub for demotool"
     );
 }
+
+#[test]
+fn zsh_shim_survives_strict_options() {
+    let fixture = Fixture::new("inshellah-seam-zsh-strict");
+    for strict in ["set -e", "set -eu", "setopt err_return"] {
+        let script = format!(
+            r#"
+export PATH=$SEAM_PATH
+{strict}
+typeset -A _comps
+compdef() {{ _comps[$2]=$1 }}
+source "$SHIM/inshellah.zsh"
+before=$options[errexit]
+_inshellah_register
+print -r -- "survived $before $options[errexit] $_comps[-first-]"
+"#
+        );
+        let Some(out) = fixture.run("zsh", &["-f", "-i", "-c"], &script) else {
+            eprintln!("skipping: zsh not found");
+            return;
+        };
+        let errexit = if strict.contains('e') && strict != "setopt err_return" {
+            "on"
+        } else {
+            "off"
+        };
+        expect(&out, &format!("survived {errexit} {errexit} _inshellah"));
+    }
+}

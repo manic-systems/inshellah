@@ -161,11 +161,16 @@ _inshellah_register() {
         _inshellah_prev_first=$_comps[-first-]
         compdef _inshellah -first-
     fi
+    return 0
 }
 
-autoload -Uz add-zsh-hook
-add-zsh-hook precmd _inshellah_register
-if [[ -o interactive ]] && zmodload zsh/zle 2>/dev/null; then
-    autoload -Uz add-zle-hook-widget
-    add-zle-hook-widget line-pre-redraw _inshellah_register
-fi
+() {
+    emulate -L zsh
+    autoload -Uz add-zsh-hook
+    add-zsh-hook precmd _inshellah_register
+    if [[ -o interactive ]] && zmodload zsh/zle 2>/dev/null; then
+        autoload -Uz add-zle-hook-widget
+        add-zle-hook-widget line-pre-redraw _inshellah_register
+    fi
+    return 0
+}
