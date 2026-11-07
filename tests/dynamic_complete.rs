@@ -11,7 +11,6 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{
         Path,
         PathBuf,
@@ -19,6 +18,7 @@ use std::{
     process::Command,
 };
 
+#[path = "common/exec.rs"] mod exec;
 #[path = "common/temp_dir.rs"] mod temp_dir;
 
 use inshellah::{
@@ -35,11 +35,7 @@ use inshellah::{
 use temp_dir::TempDir;
 
 fn write_executable(bin_dir: &Path, name: &str, script: &str) {
-    let path = bin_dir.join(name);
-    fs::write(&path, script).expect("write fake bin");
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("chmod fake bin");
+    exec::write_executable_file(&bin_dir.join(name), script);
 }
 
 /// fake shims with the minimum output each provider needs to exercise its

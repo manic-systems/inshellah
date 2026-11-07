@@ -20,6 +20,7 @@ use std::{
 
 use inshellah::store::filename_of_command;
 
+#[path = "common/exec.rs"] mod exec;
 #[path = "common/temp_dir.rs"] mod temp_dir;
 
 use temp_dir::TempDir;
@@ -239,12 +240,10 @@ fn relative_path_entries_never_resolve_children() {
     let marker = root.join("planted-ran");
     fs::create_dir_all(&tools).expect("tools dir");
     let planted = tools.join("nu");
-    fs::write(
+    exec::write_executable_file(
         &planted,
-        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-    )
-    .expect("write nu");
-    fs::set_permissions(&planted, fs::Permissions::from_mode(0o755)).expect("chmod nu");
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    );
     let prefix = root.join("prefix");
     fs::create_dir_all(prefix.join("bin")).expect("prefix bin");
 
@@ -275,9 +274,7 @@ fn relative_path_entries_never_resolve_children() {
 }
 
 fn write_script(path: &Path, body: &str) {
-    fs::create_dir_all(path.parent().expect("script dir")).expect("script dir");
-    fs::write(path, body).expect("write script");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+    exec::write_executable_file(path, body);
 }
 
 const FOO_HELP: &str =

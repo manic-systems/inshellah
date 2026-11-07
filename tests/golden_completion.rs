@@ -16,7 +16,6 @@
 use std::{
     env,
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{
         Path,
         PathBuf,
@@ -37,6 +36,7 @@ use inshellah::{
 };
 
 mod common;
+#[path = "common/exec.rs"] mod exec;
 #[path = "common/temp_dir.rs"] mod temp_dir;
 
 use temp_dir::TempDir;
@@ -54,10 +54,7 @@ fn switch_both(short: char, long: &str) -> OwnedSwitch {
 
 fn write_stub_executable(bin: &Path, name: &str) {
     let path = bin.join(name);
-    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub executable");
-    let mut perms = fs::metadata(&path).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("chmod");
+    exec::write_executable_file(&path, "#!/bin/sh\nexit 0\n");
 }
 
 fn entry(switch: OwnedSwitch, param: Option<&str>, desc: &str) -> ManpageEntry {
@@ -129,7 +126,7 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     // fake `tool` binary: resolves the uncached `tool extra` subcommand via
     // --help
     let tool_bin = bin.join("tool");
-    fs::write(
+    exec::write_executable_file(
         &tool_bin,
         r#"#!/bin/sh
 if [ "$1" = "extra" ] && { [ "$2" = "--help" ] || [ "$2" = "-h" ]; }; then
@@ -144,11 +141,7 @@ EOF
 fi
 exit 2
 "#,
-    )
-    .expect("write tool bin");
-    let mut perms = fs::metadata(&tool_bin).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&tool_bin, perms).expect("chmod");
+    );
     write_stub_executable(&bin, "othertool");
 
     (user, system, bin)
