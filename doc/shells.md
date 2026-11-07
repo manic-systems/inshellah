@@ -133,7 +133,7 @@ before it sources anything, keeps fish's completions from before the load, and
 clears the mark as its very last step. a load that ctrl-c cut short is still pending
 and has left a stand-in completion on the command. the next tab on that command
 puts the kept completions back, loads again from scratch and then answers the tab.
-completions registered between the cut and the retry are kept, except a line identical to one the load registers itself, which is not repeated.
+completions registered between the cut and the retry are kept, except a line identical to one the load registers itself, which is not repeated. a `complete -e` between the cut and the retry stays erased, so the retry only puts back kept completions that are still registered, and none at all when the stand-in itself was erased. the completion file still loads as normal.
 after a cut, fish itself sometimes skips command substitutions in completions on the next tabs, as plain fish does with a slow `-a (...)`, so finishing an interrupted load can take a second tab.
 another ctrl-c during that retry changes nothing, so no number of them loses a
 load. the prompt does not retry pending loads, since a slow completion file would
@@ -146,6 +146,7 @@ the by-hand load looks for a completion file in `fish_complete_path` order just 
 autoloading does, so a file of your own ahead of the stub dir wins for a new binary too.
 the load leaves such a file to fish, which autoloads it at the first tab, so it runs once,
 and takeover leaves that command alone as it does for one present at startup.
+a user file wins when it exists at load time. one created after inshellah loaded the command merges with inshellah's completions until the next shell, as in plain fish, since checking for new files at every tab would cost more than it saves.
 names of new binaries wait in a queue, so a ctrl-c partway through loading them
 leaves the rest for the next prompt.
 

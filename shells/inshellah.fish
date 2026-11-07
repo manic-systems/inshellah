@@ -186,6 +186,24 @@ function __inshellah_load -a cmd adopt
         end
     else
         set -l saved $$pre
+        set -l kept
+        if complete -c $cmd | string match -q -- '*(__inshellah_retry *'
+            set -l now (__inshellah_snapshot $cmd)
+            for line in $saved[2..-1]
+                contains -- $line $now; and set -a kept $line
+            end
+        end
+        if test (count $kept) -ne (count $saved[2..-1])
+            set -g $pre $saved[1] $kept
+            if test $saved[1] = kept
+                set -l left
+                for line in $$orig
+                    contains -- $line $kept; and set -a left $line
+                end
+                set -g $orig $left
+            end
+            set saved $$pre
+        end
         for line in (__inshellah_after $cmd $saved[2..-1])
             contains -- $line $$add; or set -ga $add $line
         end

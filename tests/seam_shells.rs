@@ -629,6 +629,15 @@ set -g __inshellah_pending slowtwo
 __inshellah_hook slowtwo
 complete -C "slowtwo " >/dev/null
 echo "cut after native =>" (count $__inshellah_orig_slowtwo) (count $__inshellah_pending) (count (complete -c slowtwo)) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowtwo"; and echo stub; or echo own)
+printf 'complete -c slowerase -f -a own\n' > $HOME/slowvend/vendor_completions.d/slowerase.fish
+complete -c slowerase -f -a confd
+set -g __inshellah_pre_slowerase fresh (__inshellah_snapshot slowerase)
+set -g __inshellah_pending slowerase
+__inshellah_hook slowerase
+complete -c slowerase -e
+__inshellah_prompt
+complete -C "slowerase " >/dev/null
+echo "erased while pending =>" (string match -q '*confd*' "$__inshellah_orig_slowerase"; and echo back; or echo gone) (count $__inshellah_orig_slowerase) (count $__inshellah_pending)
 printf 'complete -c slowthree -f -a own\nreturn 130\n' > $HOME/slowvend/vendor_completions.d/slowthree.fish
 set -l slowthree $PATH[1]/slowthree
 printf '#!/bin/sh\n' > $slowthree
@@ -712,6 +721,7 @@ retried load 1 => 1 0 own
 retried load 2 => 1 0 own
 registered meanwhile => 0 1 1
 cut after native => 1 0 1 own
+erased while pending => gone 1 0
 status 130 alone => 0 loaded
 many new names => path same kept loaded loaded
 ",
