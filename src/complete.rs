@@ -4,13 +4,16 @@
 
 use std::{
     cmp::Reverse,
-    fmt::{
-        self,
-        Display,
-        Formatter,
-        Write as _,
-    },
+    env,
+    fs,
     iter,
+    path::PathBuf,
+};
+
+use serde_core::ser::{
+    Serialize,
+    SerializeStruct as _,
+    Serializer,
 };
 
 use crate::{
@@ -42,10 +45,6 @@ impl Candidate {
             description: description.into(),
         }
     }
-
-    pub fn into_json(self) -> String {
-        completion_json(&self.value, &self.description)
-    }
 }
 
 /// `Defer` prints `null`, `WithFiles` keeps nushell's file completion.
@@ -65,62 +64,53 @@ impl Response {
     }
 }
 
-impl Display for Response {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let (candidates, with_files) = match self {
-            Self::Defer => return f.write_str("null"),
-            Self::WithFiles(candidates) if candidates.is_empty() => return f.write_str("null"),
-            Self::Candidates(candidates) => (candidates, false),
-            Self::WithFiles(candidates) => (candidates, true),
-        };
-        f.write_str(r#"{"completions":["#)?;
-        for (idx, candidate) in candidates.iter().enumerate() {
-            if idx > 0 {
-                f.write_char(',')?;
-            }
-            write!(
-                f,
-                r#"{{"value":"{}","description":"{}"}}"#,
-                JsonEscaped(&candidate.value),
-                JsonEscaped(&candidate.description)
-            )?;
-        }
-        // nushell 0.115+ reuses answers across prompts keyed only on the line,
-        // serving stale git refs and pids (nushell#19297, opt-out in #19346).
-        f.write_str(r#"],"options":{"cache":false}"#)?;
-        if with_files {
-            f.write_str(r#","fallback":true"#)?;
-        }
-        f.write_char('}')
+impl Serialize for Candidate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut row = serializer.serialize_struct("Candidate", 2)?;
+        row.serialize_field("value", &self.value)?;
+        row.serialize_field("description", &self.description)?;
+        row.end()
     }
 }
 
-pub fn completion_json(value: &str, desc: &str) -> String {
-    format!(
-        r#"{{"value":"{}","description":"{}"}}"#,
-        JsonEscaped(value),
-        JsonEscaped(desc)
-    )
+struct Options;
+
+impl Serialize for Options {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // nushell 0.115+ reuses answers across prompts keyed only on the line,
+        // serving stale git refs and pids (nushell#19297, opt-out in #19346).
+        let mut options = serializer.serialize_struct("Options", 1)?;
+        options.serialize_field("cache", &false)?;
+        options.end()
+    }
 }
 
-struct JsonEscaped<'text>(&'text str);
-
-impl Display for JsonEscaped<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        for ch in self.0.chars() {
-            match ch {
-                '"' => f.write_str("\\\"")?,
-                '\\' => f.write_str("\\\\")?,
-                '\n' => f.write_str("\\n")?,
-                '\r' => f.write_str("\\r")?,
-                '\t' => f.write_str("\\t")?,
-                control if control < '\x20' => {
-                    write!(f, "\\u{:04x}", u32::from(control))?;
-                },
-                other => f.write_char(other)?,
-            }
+impl Serialize for Response {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let (candidates, with_files) = match self {
+            Self::Defer => return serializer.serialize_none(),
+            Self::WithFiles(candidates) if candidates.is_empty() => {
+                return serializer.serialize_none();
+            },
+            Self::Candidates(candidates) => (candidates, false),
+            Self::WithFiles(candidates) => (candidates, true),
+        };
+        let mut reply = serializer.serialize_struct("Response", 2 + usize::from(with_files))?;
+        reply.serialize_field("completions", candidates)?;
+        reply.serialize_field("options", &Options)?;
+        if with_files {
+            reply.serialize_field("fallback", &true)?;
         }
-        Ok(())
+        reply.end()
     }
 }
 
@@ -298,11 +288,71 @@ pub fn choice_candidates(
     scored.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
+/// the files and directories a typed path leads to, directories ending in `/`.
+///
+/// each value is led by `prefix` (`--flag=` when attached), since shells that
+/// do not split at the `=` replace the whole word.
+pub fn path_candidates(typed: &str, prefix: &str, cfg: &Config) -> Vec<Candidate> {
+    list_paths(typed, prefix, cfg.max_completions, false)
+}
+
+/// like `path_candidates` but only the directories.
+pub fn attached_directory_candidates(typed: &str, prefix: &str, cfg: &Config) -> Vec<Candidate> {
+    list_paths(typed, prefix, cfg.max_completions, true)
+}
+
+/// like `path_candidates` but only the directories, up to `limit` of them when
+/// it is not zero.
+pub fn directory_candidates(typed: &str, limit: usize) -> Vec<Candidate> {
+    list_paths(typed, "", limit, true)
+}
+
+fn list_paths(typed: &str, prefix: &str, limit: usize, dirs_only: bool) -> Vec<Candidate> {
+    let split_at = typed.rfind('/').map_or(0, |slash| slash + 1);
+    let (dir_part, name_prefix) = typed.split_at(split_at);
+    let dir = match (dir_part, typed.strip_prefix("~/")) {
+        ("", _) => PathBuf::from("."),
+        (_, Some(_)) => {
+            let Some(home) = env::var_os("HOME") else {
+                return Vec::new();
+            };
+            PathBuf::from(home).join(dir_part.trim_start_matches("~/"))
+        },
+        _ => PathBuf::from(dir_part),
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, bool)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let hidden = name.starts_with('.') && !name_prefix.starts_with('.');
+            let is_dir = entry.path().is_dir();
+            (name.starts_with(name_prefix) && !hidden && (is_dir || !dirs_only))
+                .then_some((name, is_dir))
+        })
+        .collect();
+    found.sort();
+    if limit > 0 {
+        found.truncate(limit);
+    }
+    found
+        .into_iter()
+        .map(|(name, is_dir)| {
+            let slash = if is_dir { "/" } else { "" };
+            let description = if is_dir { "directory" } else { "file" };
+            Candidate::new(format!("{prefix}{dir_part}{name}{slash}"), description)
+        })
+        .collect()
+}
+
 /// subcommands emit only when `matched_depth >= resolve_depth`.
 ///
 /// i.e. the match is a full prefix of what was typed. typing past the deepest
 /// cached command stays silent so nushell's dynamic completer can take over. a
-/// token equal to a candidate is dropped so it isn't echoed back.
+/// token equal to a candidate is kept, so a fully typed subcommand still
+/// completes and gets its trailing space.
 pub fn generate_candidates(
     result: &ManpageResult,
     matched_depth: usize,
@@ -331,13 +381,6 @@ pub fn generate_candidates(
         // slot.
         let choices = subs.iter().chain(result.positional_choices.iter());
         for sc in choices {
-            // exact match on the name or any alias hands off to a dynamic
-            // completer, mirroring the switch path.
-            if !last_token.is_empty()
-                && (last_token == sc.name || sc.aliases.iter().any(|alias| alias == last_token))
-            {
-                continue;
-            }
             // emit the best-scoring form (name or alias) as the value; the rest
             // become `(aka ...)`, like a switch's short/long pair.
             let mut best: Option<(i32, &str)> = None;
@@ -425,6 +468,8 @@ pub fn generate_candidates(
 
 #[cfg(test)]
 mod tests {
+    use std::process;
+
     use super::*;
 
     #[test]
@@ -440,9 +485,26 @@ mod tests {
     }
 
     #[test]
+    fn path_candidates_keep_the_prefix_and_mark_directories() {
+        let root = env::temp_dir().join(format!("inshellah-paths-{}", process::id()));
+        fs::create_dir_all(root.join("mydir")).expect("dir");
+        fs::write(root.join("myfile"), "").expect("file");
+        fs::write(root.join(".mine"), "").expect("hidden");
+        fs::write(root.join("other"), "").expect("other");
+        let typed = format!("{}/my", root.display());
+        let values: Vec<String> = path_candidates(&typed, "--f=", &Config::default())
+            .into_iter()
+            .map(|candidate| candidate.value)
+            .collect();
+        drop(fs::remove_dir_all(&root));
+        let at = |name: &str| format!("--f={}/{name}", root.display());
+        assert_eq!(values, vec![at("mydir/"), at("myfile")]);
+    }
+
+    #[test]
     fn json_escapes_without_changing_shape() {
         assert_eq!(
-            completion_json("a\"b", "line\nnext"),
+            serde_json::to_string(&Candidate::new("a\"b", "line\nnext")).unwrap(),
             r#"{"value":"a\"b","description":"line\nnext"}"#
         );
     }
@@ -477,11 +539,17 @@ mod tests {
     }
 
     #[test]
-    fn exact_token_is_dropped_to_unmask_downstream() {
-        let result = result_with_subs(&["status"]);
+    fn exact_token_is_kept_beside_longer_matches() {
+        let result = result_with_subs(&["stash", "status", "stage"]);
         let cfg = Config::default();
-        let out = generate_candidates(&result, 1, 1, "status", &[], false, &cfg);
-        assert!(out.is_empty());
+        let out = generate_candidates(&result, 1, 1, "stash", &[], false, &cfg);
+        let values: Vec<&str> = out
+            .iter()
+            .map(|candidate| candidate.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["stash"]);
+        let partial = generate_candidates(&result, 1, 1, "sta", &[], false, &cfg);
+        assert_eq!(partial.len(), 3);
     }
 
     fn result_with_flags(entries: Vec<ManpageEntry>) -> ManpageResult {

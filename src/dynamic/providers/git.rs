@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: EUPL-1.2
+use std::collections::HashMap;
+
 use crate::{
     complete::Candidate,
-    dynamic::shared::{
-        DynCtx,
-        Words,
-        parse_tabular,
-        run,
+    dynamic::{
+        Files,
+        shared::{
+            DynCtx,
+            Words,
+            parse_tabular,
+            run,
+        },
     },
 };
 const GIT_TOP_VERBS: &[&str] = &[
@@ -130,17 +135,46 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
             values,
             description,
         } => Some(static_candidates(values, description)),
+        GitCompletion::TopVerbs => Some(top_verb_candidates(ctx)),
         GitCompletion::Refs => git_refs(&git, ctx, prefix),
         GitCompletion::PushDestinations(remote) => git_push_destinations(&git, ctx, remote, prefix),
         GitCompletion::RemoteBranches(remote) => git_remote_branches(&git, ctx, remote, prefix),
         GitCompletion::Branches => git_branches(&git, ctx, prefix),
         GitCompletion::Tags => git_tags(&git, ctx, prefix),
-        GitCompletion::Remotes => git_remotes(&git, ctx),
+        GitCompletion::Remotes | GitCompletion::Repository => git_remotes(&git, ctx),
         GitCompletion::Stashes => git_stashes(&git, ctx, prefix),
         GitCompletion::StatusPaths => git_status_paths(&git, ctx),
         GitCompletion::TrackedPaths => git_tracked_paths(&git, ctx),
         GitCompletion::Submodules => git_submodules(&git, ctx),
         GitCompletion::Worktrees => git_worktrees(&git, ctx),
+    }
+}
+
+/// only the verbs that take a revision or a path put files beside the
+/// candidates, a remote or a branch name never names a file.
+pub(super) fn files(words: &Words, ctx: &DynCtx) -> Files {
+    let path_verbs = ["checkout", "diff", "log", "show", "reset", "blame"];
+    match git_completion(words, ctx) {
+        Some(GitCompletion::Refs) if !path_verbs.contains(&words.arg(0)) => Files::Replace,
+        Some(
+            GitCompletion::Static { .. }
+            | GitCompletion::TopVerbs
+            | GitCompletion::PushDestinations(_)
+            | GitCompletion::RemoteBranches(_)
+            | GitCompletion::Branches
+            | GitCompletion::Tags
+            | GitCompletion::Remotes
+            | GitCompletion::Stashes
+            | GitCompletion::Submodules
+            | GitCompletion::Worktrees,
+        ) => Files::Replace,
+        Some(
+            GitCompletion::Refs
+            | GitCompletion::Repository
+            | GitCompletion::StatusPaths
+            | GitCompletion::TrackedPaths,
+        )
+        | None => Files::Alongside,
     }
 }
 
@@ -150,17 +184,45 @@ enum GitCompletion<'span> {
         values:      &'static [&'static str],
         description: &'static str,
     },
+    TopVerbs,
     Refs,
     PushDestinations(&'span str),
     RemoteBranches(&'span str),
     Branches,
     Tags,
     Remotes,
+    Repository,
     Stashes,
     StatusPaths,
     TrackedPaths,
     Submodules,
     Worktrees,
+}
+
+fn top_verb_candidates(ctx: &DynCtx) -> Vec<Candidate> {
+    let listing =
+        run(&[ctx.bin("git"), "help".to_owned(), "-a".to_owned()], ctx).unwrap_or_default();
+    let described = help_descriptions(&listing);
+    GIT_TOP_VERBS
+        .iter()
+        .map(|verb| {
+            let description = described.get(verb).copied().unwrap_or("git subcommand");
+            Candidate::new(*verb, description)
+        })
+        .collect()
+}
+
+/// the `   name   description` rows of `git help -a`.
+fn help_descriptions(listing: &str) -> HashMap<&str, &str> {
+    let mut rows = HashMap::new();
+    for line in listing.lines().filter(|line| line.starts_with("   ")) {
+        if let Some((name, rest)) = line.trim_start().split_once(char::is_whitespace)
+            && !rest.trim().is_empty()
+        {
+            rows.entry(name).or_insert_with(|| rest.trim());
+        }
+    }
+    rows
 }
 
 fn static_candidates(values: &'static [&'static str], description: &'static str) -> Vec<Candidate> {
@@ -183,7 +245,7 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         return Some(GitCompletion::Refs);
     }
     if sub == "push" && prev == "--repo" {
-        return Some(GitCompletion::Remotes);
+        return Some(GitCompletion::Repository);
     }
     if sub == "checkout" && ["-b", "-B", "--orphan"].contains(&prev) {
         return None;
@@ -195,10 +257,7 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         return None;
     }
     if words.arg_count() == 0 {
-        return Some(GitCompletion::Static {
-            values:      GIT_TOP_VERBS,
-            description: "git subcommand",
-        });
+        return Some(GitCompletion::TopVerbs);
     }
 
     let nested = match sub {
@@ -210,6 +269,9 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         _ => None,
     };
     if let Some((values, description)) = nested {
+        if boundary {
+            return None;
+        }
         if args_after_sub == 0 {
             return Some(GitCompletion::Static {
                 values,
@@ -223,7 +285,7 @@ fn git_completion<'span>(words: &Words<'span>, ctx: &DynCtx) -> Option<GitComple
         "fetch" if words.has(&["--all"]) => None,
         "fetch" if words.has(&["-m", "--multiple"]) => Some(GitCompletion::Remotes),
         "fetch" | "push" | "pull" if args_after_sub == 0 && words.value(&["--repo"]).is_none() => {
-            Some(GitCompletion::Remotes)
+            Some(GitCompletion::Repository)
         },
         "push" if words.current().contains(':') => {
             let remote = words.value(&["--repo"]).unwrap_or_else(|| words.arg(1));

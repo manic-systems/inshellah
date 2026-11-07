@@ -78,7 +78,7 @@ fn install_fakes(bin_dir: &Path) {
     }
     write_executable(bin_dir, "zig", FAKE_ZIG);
     write_executable(bin_dir, "ps", FAKE_PS);
-    for name in ["ssh", "scp", "sftp", "kill", "pkill"] {
+    for name in ["ssh", "scp", "sftp", "kill", "pkill", "make", "just", "npm"] {
         write_executable(bin_dir, name, "#!/bin/sh\nexit 0\n");
     }
     write_executable(bin_dir, "kubectl", FAKE_KUBECTL);
@@ -94,6 +94,10 @@ if [ "${1:-}" = eval ]; then
   printf 'raw package description\n'
 elif case "$*" in *big#*) true ;; *) false ;; esac; then
   printf 'header\nbig#pkg-a\nbig#pkg-b\nbig#pkg-c\nbig#pkg-d\nbig#pkg-e\nbig#pkg-f\nbig#pkg-g\n'
+elif [ "${1:-}" = store ]; then
+  printf 'normal\nadd\ncopy\n'
+elif [ "${1:-}" = build ]; then
+  printf 'filenames\nresult\n'
 elif [ "${1:-}" = slow ]; then
   sleep 1
   printf 'header\nslow-package\n'
@@ -110,6 +114,7 @@ case "${0##*/}" in
   systemctl)
     case "$*" in
       *"g*"*) printf 'greetd.service loaded active running Greeter\n' ;;
+      *"h*"*) printf 'home.mount not-found inactive dead home.mount\n' ;;
       *) printf 'demo.service loaded active running Demo Unit\n' ;;
     esac
     ;;
@@ -214,6 +219,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "${1:-}" in
+  help)
+    printf 'See git help\n\nMain Porcelain Commands\n   stash                   Stash the changes in a dirty working directory away\n   status                  Show the working tree status\n\nExternal commands\n   frob\n'
+    ;;
   remote)
     printf 'origin\nupstream\n'
     ;;
@@ -268,6 +276,9 @@ printf '%s\n' "$@" > "$INSHELLAH_JJ_ARGS_FILE"
 case "$*" in
   *"log -r main.."*)
     printf 'main..main\tmain change\n\nmain..feature\t feature change\n'
+    ;;
+  *" aliased "*)
+    printf 'list\tList things [default alias: ls]\nls\t\n--all\tShow all\n'
     ;;
 esac
 "#;
@@ -412,6 +423,21 @@ fn nix_top_level_completions_use_get_completions_env() {
     assert!(ok, "stderr={stderr}");
     let cands = parse_output(&stdout).expect("non-null output");
     assert_eq!(cands[0].value, "build");
+}
+
+#[test]
+fn nix_subcommand_slots_answer_without_files_and_installables_keep_them() {
+    let harness = Harness::new("dyn-nix-files");
+    let (store, ..) = harness.run(&["nix", "store", ""], &[]);
+    assert!(
+        !store.contains(r#""fallback""#),
+        "subcommands are plain values, got {store}"
+    );
+    let (build, ..) = harness.run(&["nix", "build", ""], &[]);
+    assert!(
+        build.contains(r#""fallback":true"#),
+        "installables may be paths, got {build}"
+    );
 }
 
 #[test]
@@ -647,6 +673,48 @@ fn systemctl_emits_units_only_for_unit_verbs() {
 }
 
 #[test]
+fn attached_provider_values_complete_like_separate_ones_with_the_lead_kept() {
+    let harness = Harness::new("dyn-attached-values");
+    let (separate, ..) = harness.run(&["journalctl", "-u", "g"], &[]);
+    assert_eq!(
+        Harness::values(&parse_output(&separate).expect("units")),
+        vec!["greetd.service"]
+    );
+    for flag in ["--unit", "--user-unit"] {
+        let (attached, ..) = harness.run(&["journalctl", &format!("{flag}=g")], &[]);
+        assert_eq!(
+            Harness::values(&parse_output(&attached).expect("units")),
+            vec![format!("{flag}=greetd.service")]
+        );
+    }
+    let (empty, ..) = harness.run(&["journalctl", "--unit="], &[]);
+    assert_eq!(
+        Harness::values(&parse_output(&empty).expect("units")),
+        vec!["--unit=demo.service"]
+    );
+
+    let (source, ..) = harness.run(&["git", "restore", "--source=ma"], &[]);
+    assert_eq!(
+        Harness::values(&parse_output(&source).expect("refs")),
+        vec!["--source=main", "--source=origin/main"]
+    );
+    let (repo, ..) = harness.run(&["git", "push", "--repo=up"], &[]);
+    assert_eq!(
+        Harness::values(&parse_output(&repo).expect("remotes")),
+        vec!["--repo=upstream"]
+    );
+}
+
+#[test]
+fn systemctl_units_do_not_repeat_their_name_as_description() {
+    let harness = Harness::new("dyn-systemctl-ghost");
+    let (stdout, ..) = harness.run(&["systemctl", "restart", "h"], &[]);
+    let cands = parse_output(&stdout).expect("units");
+    assert_eq!(Harness::values(&cands), vec!["home.mount"]);
+    assert_eq!(Harness::descriptions(&cands), vec![""]);
+}
+
+#[test]
 fn systemctl_forwards_host_machine_and_scope_to_unit_queries() {
     let harness = Harness::new("dyn-systemctl-scope");
     let (stdout, stderr, ok) = harness.run(
@@ -842,6 +910,37 @@ fn git_top_level_includes_common_verbs() {
 }
 
 #[test]
+fn git_top_level_verbs_take_their_descriptions_from_git_help() {
+    let harness = Harness::new("dyn-git-verb-descriptions");
+    let (stdout, ..) = harness.run(&["git", "st"], &[]);
+    let cands = parse_output(&stdout).expect("verbs");
+    let described: Vec<(String, String)> = cands
+        .iter()
+        .map(|cand| (cand.value.clone(), cand.description.clone()))
+        .collect();
+    assert!(
+        described.contains(&(
+            "stash".to_owned(),
+            "Stash the changes in a dirty working directory away".to_owned()
+        )),
+        "{described:?}"
+    );
+    assert!(
+        described.contains(&(
+            "status".to_owned(),
+            "Show the working tree status".to_owned()
+        )),
+        "{described:?}"
+    );
+    let (every, ..) = harness.run(&["git", ""], &[]);
+    let all = parse_output(&every).expect("all verbs");
+    assert!(
+        all.iter()
+            .any(|cand| cand.value == "worktree" && cand.description == "git subcommand")
+    );
+}
+
+#[test]
 fn git_push_completes_remotes_when_arg_position_is_first() {
     let harness = Harness::new("dyn-git-push");
     let (stdout, ..) = harness.run(&["git", "push", ""], &[]);
@@ -876,8 +975,9 @@ fn git_remote_subcommand_offers_verbs_then_filters_fuzzily() {
     let fuzzy = parse_output(&fuzzy_out).expect("fuzzy-filtered");
     assert_eq!(Harness::values(&fuzzy), vec!["show"]);
 
-    let (exact, ..) = harness.run(&["git", "remote", "show"], &[]);
-    assert_eq!(exact.trim(), "null", "stdout={exact}");
+    let (exact_out, ..) = harness.run(&["git", "remote", "show"], &[]);
+    let exact = parse_output(&exact_out).expect("the exact verb");
+    assert_eq!(Harness::values(&exact), vec!["show"]);
 
     let (named_out, ..) = harness.run(&["git", "remote", "show", ""], &[]);
     let named = parse_output(&named_out).expect("remote names");
@@ -1134,4 +1234,254 @@ fn jj_defers_to_native_completer() {
 
     let (empty, ..) = harness.run(&["jj", "nothing", ""], &[]);
     assert!(parse_output(&empty).is_none());
+}
+
+#[test]
+fn jj_hides_flags_on_an_empty_token_and_bare_aliases() {
+    let harness = Harness::new("dyn-jj-flags");
+    let values = |last: &str, env: &[(&str, &str)]| {
+        let (stdout, ..) = harness.run(&["jj", "aliased", last], env);
+        Harness::values(&parse_output(&stdout).expect("candidates"))
+    };
+    assert_eq!(values("", &[]), vec!["list"]);
+    assert_eq!(values("", &[("INSHELLAH_FLAG_ON_EMPTY", "1")]), vec![
+        "list", "--all"
+    ]);
+    assert!(values("--", &[]).contains(&"--all".to_owned()));
+}
+
+#[test]
+fn git_slots_that_never_take_paths_answer_without_files() {
+    let harness = Harness::new("dyn-git-no-files");
+    for line in [
+        &["git", "push", "origin", ""][..],
+        &["git", "stash", ""],
+        &["git", "remote", ""],
+        &["git", "merge", ""],
+    ] {
+        let (stdout, ..) = harness.run(line, &[]);
+        assert!(
+            !stdout.contains(r#""fallback""#),
+            "{line:?} must not carry the file fallback, got {stdout}"
+        );
+    }
+    for line in [
+        &["git", "checkout", ""][..],
+        &["git", "diff", ""],
+        &["git", "fetch", ""],
+        &["git", "pull", ""],
+        &["git", "push", ""],
+    ] {
+        let (stdout, ..) = harness.run(line, &[]);
+        assert!(
+            stdout.contains(r#""fallback":true"#),
+            "{line:?} takes paths, got {stdout}"
+        );
+    }
+}
+
+#[test]
+fn directory_flag_values_list_only_directories() {
+    let harness = Harness::new("dyn-dir-flags");
+    fs::create_dir_all(harness.root.join("tree/nest")).expect("dir");
+    fs::write(harness.root.join("tree/notes.txt"), "").expect("file");
+    let tree = harness.root.join("tree").display().to_string();
+    let nest = format!("{tree}/nest/");
+
+    for line in [
+        vec!["git".to_owned(), "-C".to_owned(), format!("{tree}/n")],
+        vec!["git".to_owned(), format!("--git-dir={tree}/n")],
+        vec!["make".to_owned(), "-C".to_owned(), format!("{tree}/n")],
+        vec![
+            "make".to_owned(),
+            "build".to_owned(),
+            "-C".to_owned(),
+            format!("{tree}/n"),
+        ],
+    ] {
+        let spans: Vec<&str> = line.iter().map(String::as_str).collect();
+        let (stdout, ..) = harness.run(&spans, &[]);
+        let values = Harness::values(&parse_output(&stdout).unwrap_or_else(|| panic!("{line:?}")));
+        let expected = if line[1].starts_with("--") {
+            format!("--git-dir={nest}")
+        } else {
+            nest.clone()
+        };
+        assert_eq!(values, vec![expected], "{line:?}");
+    }
+
+    let (inner, ..) = harness.run(&["git", "commit", "-C", &format!("{tree}/n")], &[]);
+    assert!(
+        !inner.contains("nest"),
+        "-C after the subcommand is not a directory flag, got {inner}"
+    );
+    let (home, ..) = harness.run(&["git", "--git-dir=~/n"], &[]);
+    assert_eq!(
+        home.trim(),
+        "null",
+        "an attached ~ is not expanded, got {home}"
+    );
+    let (separate, ..) = harness.run(&["git", "-C", "~/definitely-not-a-dir-"], &[]);
+    assert_eq!(separate.trim(), "null");
+}
+
+#[test]
+fn separate_directory_values_keep_the_typed_tilde() {
+    let harness = Harness::new("dyn-dir-tilde");
+    fs::create_dir_all(harness.root.join("home/proj/src")).expect("dir");
+    fs::write(harness.root.join("home/proj/notes.txt"), "").expect("file");
+    let home = harness.root.join("home").display().to_string();
+    for (line, expected) in [
+        (&["git", "-C", "~/pr"][..], "~/proj/"),
+        (&["git", "-C", "~/proj/"][..], "~/proj/src/"),
+        (&["make", "-C", "~/proj/s"][..], "~/proj/src/"),
+        (&["just", "-d", "~/proj/s"][..], "~/proj/src/"),
+        (&["npm", "--prefix", "~/proj/s"][..], "~/proj/src/"),
+    ] {
+        let (stdout, ..) = harness.run(line, &[("HOME", &home)]);
+        let cands = parse_output(&stdout).unwrap_or_else(|| panic!("{line:?} gave {stdout}"));
+        assert_eq!(Harness::values(&cands), vec![expected], "{line:?}");
+    }
+}
+
+#[test]
+fn git_stash_after_double_dash_takes_paths() {
+    let harness = Harness::new("dyn-git-stash-dashes");
+    let (stdout, ..) = harness.run(&["git", "stash", "--", ""], &[]);
+    assert_eq!(stdout.trim(), "null", "paths are the shell's, got {stdout}");
+}
+
+#[test]
+fn provider_value_flags_consume_the_next_word_without_a_cached_entry() {
+    let harness = Harness::new("dyn-git-global-value");
+    seed_command(&harness, "git", &["checkout", "commit"], &[], &[]);
+    let (stdout, ..) = harness.run(&["git", "-C", "/nonexistent-inshellah/"], &[]);
+    assert_eq!(stdout.trim(), "null", "-C takes a directory, got {stdout}");
+
+    let (after, ..) = harness.run(&["git", "-C", "/tmp", "ch"], &[]);
+    let cands = parse_output(&after).expect("subcommands after the flag value");
+    assert!(Harness::values(&cands).contains(&"checkout".to_owned()));
+
+    let (inner, ..) = harness.run(&["git", "commit", "-C", ""], &[]);
+    assert!(
+        !stdout_has_subcommands(&inner),
+        "-C after the subcommand is not the global flag, got {inner}"
+    );
+}
+
+fn stdout_has_subcommands(stdout: &str) -> bool {
+    parse_output(stdout).is_some_and(|cands| Harness::values(&cands).contains(&"checkout".into()))
+}
+
+#[test]
+fn command_wrappers_are_unwrapped_to_the_command_they_run() {
+    let harness = Harness::new("dyn-wrappers");
+    for line in [
+        &["nohup", "git", "remote", "show", ""][..],
+        &["env", "-u", "HOME", "FOO=1", "git", "remote", "show", ""],
+        &["nice", "-n", "5", "git", "remote", "show", ""],
+        &["timeout", "--signal=KILL", "5", "git", "remote", "show", ""],
+        &["xargs", "-n", "1", "git", "remote", "show", ""],
+        &["sudo", "env", "FOO=1", "nice", "git", "remote", "show", ""],
+    ] {
+        let (stdout, ..) = harness.run(line, &[]);
+        let cands = parse_output(&stdout).unwrap_or_else(|| panic!("{line:?} gave {stdout}"));
+        assert!(
+            Harness::values(&cands).contains(&"origin".to_owned()),
+            "{line:?} gave {stdout}"
+        );
+    }
+}
+
+#[test]
+fn attached_path_flag_values_list_files_with_the_flag_prefix() {
+    let harness = Harness::new("dyn-attached-path");
+    let result = ManpageResult {
+        entries:            vec![ManpageEntry {
+            switch: OwnedSwitch::Long("output".to_owned()),
+            param:  Some(OwnedParam::new(ParamKind::Mandatory, "FILE".to_owned())),
+            desc:   String::new(),
+        }],
+        subcommands:        Vec::new(),
+        positional_choices: Vec::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
+    };
+    write_result(&harness.cache_dir, "ssh", "help", &result).expect("seed cache");
+    let files = harness.root.join("files");
+    fs::create_dir_all(files.join("nest")).expect("dir");
+    fs::write(files.join("notes.txt"), "").expect("file");
+    let root = files.display();
+
+    let (stdout, ..) = harness.run(&["ssh", &format!("--output={root}/n")], &[]);
+    let cands = parse_output(&stdout).expect("paths");
+    assert_eq!(Harness::values(&cands), vec![
+        format!("--output={root}/nest/"),
+        format!("--output={root}/notes.txt"),
+    ]);
+
+    for typed in ["~/n", "$HOME/n", "~"] {
+        let (expanded, ..) = harness.run(&["ssh", &format!("--output={typed}")], &[]);
+        assert_eq!(
+            expanded.trim(),
+            "null",
+            "{typed} is not expanded in an attached value, got {expanded}"
+        );
+    }
+
+    let (separate, ..) = harness.run(&["ssh", "--output", &format!("{root}/n")], &[]);
+    assert_eq!(
+        separate.trim(),
+        "null",
+        "a separate value is left to the shell"
+    );
+}
+
+#[test]
+fn attached_directory_values_from_the_cache_list_only_directories() {
+    let harness = Harness::new("dyn-attached-dir");
+    let result = ManpageResult {
+        entries:            vec![ManpageEntry {
+            switch: OwnedSwitch::Long("directory".to_owned()),
+            param:  Some(OwnedParam::new(
+                ParamKind::Mandatory,
+                "DIRECTORY".to_owned(),
+            )),
+            desc:   String::new(),
+        }],
+        subcommands:        Vec::new(),
+        positional_choices: Vec::new(),
+        positionals:        Vec::new(),
+        description:        String::new(),
+    };
+    write_result(&harness.cache_dir, "ssh", "help", &result).expect("seed cache");
+    let files = harness.root.join("files");
+    fs::create_dir_all(files.join("nest")).expect("dir");
+    fs::write(files.join("notes.txt"), "").expect("file");
+    let (stdout, ..) = harness.run(&["ssh", &format!("--directory={}/n", files.display())], &[]);
+    let cands = parse_output(&stdout).expect("directories");
+    assert_eq!(Harness::values(&cands), vec![format!(
+        "--directory={}/nest/",
+        files.display()
+    )]);
+}
+
+#[test]
+fn a_fully_typed_subcommand_completes_to_itself() {
+    let harness = Harness::new("dyn-exact-subcommand");
+    write_executable(&harness.bin_dir, "frobz", "#!/bin/sh\nexit 0\n");
+    seed_command(&harness, "frobz", &["clean", "clone", "init"], &[], &[]);
+    let (stdout, ..) = harness.run(&["frobz", "clean"], &[]);
+    let cands = parse_output(&stdout).expect("the exact match");
+    assert_eq!(Harness::values(&cands), vec!["clean"]);
+
+    for line in [&["git", "stash"][..], &["git", "stash", "push"][..]] {
+        let (typed_out, ..) = harness.run(line, &[]);
+        let typed = parse_output(&typed_out).unwrap_or_else(|| panic!("{line:?} gave {typed_out}"));
+        assert_eq!(
+            Harness::values(&typed),
+            vec![line[line.len() - 1]],
+            "{line:?}"
+        );
+    }
 }

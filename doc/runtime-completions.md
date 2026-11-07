@@ -29,6 +29,47 @@ stripped before lookup: `sudo docker compose up --` resolves against
 `docker`, not `sudo`. absolute paths after the wrapper are recognised
 too.
 
+commands that only run another command are unwrapped the same way, with
+their own flags and operands skipped. these are `nohup`, `env` (flags and
+`NAME=value` words), `nice`, `ionice`, `timeout` (and its duration), `xargs`,
+`time`, `command`, `exec`, `stdbuf`, `setsid`, `chrt`, `taskset`, `strace` and
+`ltrace`. modes that run no command (`command -v`, `chrt -p`, `taskset -p`,
+`ionice -p`, `strace -p`, `ltrace -p`) and
+`env -S`, whose argument is a command line in one word, are left alone.
+
+a flag value attached with `=` stays in the word, so `--output=pa` reaches
+inshellah whole. when the flag takes a path (a `FILE`, `PATH` or `DIR`
+placeholder), inshellah lists the matching files and directories itself, only the directories for a `DIR` or `DIRECTORY` placeholder, and
+keeps the `--output=` lead on every value so the shell can replace the word
+that was typed. directories end in `/`. a value given as a separate word,
+`--output pa`, is left to the shell's own file completion.
+
+an attached value that starts with `~` or `$` is not listed. no shell expands
+either one inside `--output=`, so a listed path would resolve against the
+working directory while the shell shows it as the home directory. the
+position is deferred to the shell instead.
+
+a subcommand typed in full without a trailing space, such as `git stash` or
+`systemctl status`, completes to itself and to any longer subcommands that
+share the prefix, so the shell finishes the word and adds the space.
+
+the top level verbs of `git` take their one line descriptions from `git help
+-a`, and keep a generic description for a verb that listing leaves out.
+
+live providers treat an attached value like a separate one. `journalctl
+--unit=dbus-b` lists units the way `-u dbus-b` does, and `git restore
+--source=ma` lists refs, each value keeping its `--unit=` lead.
+
+`nix` says itself whether a position takes paths, so `nix flake` and `nix
+store` answer with the subcommands alone, while a position that takes
+installables keeps the shell's files beside nix's candidates.
+
+the value of a directory flag, such as `git -C`, `git --git-dir`, `make -C`,
+`just -d` and `npm --prefix`, is answered with only the directories, so
+the shell does not add plain files beside them. when no directory matches, the
+position is deferred to the shell. a typed `~` is expanded for a separate value
+and left alone for an attached one.
+
 ## setup
 
 ```nu
@@ -74,7 +115,7 @@ your shell before nushell starts.
 |---|---|---|
 | `INSHELLAH_DIR` | `$XDG_CACHE_HOME/inshellah` | colon-separated completion dirs, the writable user cache first, used when `--dir` is not given. |
 | `INSHELLAH_FLAG_TRIGGERS` | `-` | characters that surface flag completions when a partial token begins with one of them. set to `-+` to also trigger on `+`; whitespace is ignored. an empty value disables prefix-triggered flags (leaving only `INSHELLAH_FLAG_ON_EMPTY`). |
-| `INSHELLAH_FLAG_ON_EMPTY` | `0` | when truthy (`1`/`true`/`yes`/`on`), also surface flags on an empty token — i.e. right after a space — alongside subcommands. otherwise an empty token hands off to file/dynamic completion. |
+| `INSHELLAH_FLAG_ON_EMPTY` | `0` | when truthy (`1`/`true`/`yes`/`on`), also surface flags on an empty token — i.e. right after a space — alongside subcommands. otherwise an empty token hands off to file/dynamic completion. flags that a live provider lists, as jj does, follow the same rule. |
 | `INSHELLAH_DYNAMIC_TIMEOUT_MS` | `5000` | wall-clock budget in milliseconds shared by live provider subprocesses for one completion request. `0` disables this runtime timeout. on timeout the provider returns no candidates and inshellah prints `null` if nothing else can answer. |
 | `INSHELLAH_DYNAMIC_LIMIT` | `200` | cap passed to live providers that support native limits, such as `git for-each-ref --count` and `docker ps --last`, for the unfiltered listing only, since a typed prefix queries without it. `0` omits those provider-specific limit flags; the nix provider caps its own listing the same way, and other providers without native caps ignore it. |
 | `INSHELLAH_TIMEOUT_MS` | `1200` | per-subprocess timeout for on-the-fly `--help` resolution of uncached commands and subcommands. it also bounds the `adb` and `jj` providers. an explicit `--timeout-ms` flag overrides it. this is separate from `INSHELLAH_DYNAMIC_TIMEOUT_MS`. |

@@ -107,12 +107,18 @@ impl<'span> Slot<'span> {
     }
 }
 
+/// whether a live provider knows `flag` of `cmd` to consume the next word,
+/// where `leading` is true before the subcommand.
+pub fn provider_takes_value(cmd: &str, flag: &str, leading: bool) -> bool {
+    providers::takes_value(cmd, flag, leading)
+}
+
 pub fn provider_kind(cmd: &str) -> Option<&'static str> {
     providers::kind_of(cmd)
 }
 
-/// candidates as JSON, or None to hand off to nu's file completer.
-pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<String>> {
+/// candidates, or None to hand off to nu's file completer.
+pub fn dynamic_complete(spans: &[String], cfg: &Config) -> Option<Vec<Candidate>> {
     dynamic_complete_with_path(spans, None, cfg)
 }
 
@@ -124,6 +130,7 @@ pub fn dynamic_value_completions(
     rest: &[String],
     explicit_cmd_path: Option<&Path>,
     timeout_ms: u64,
+    cfg: &Config,
 ) -> Option<Vec<Candidate>> {
     let mut spans = Vec::with_capacity(rest.len() + 1);
     spans.push(cmd_name.to_owned());
@@ -141,7 +148,28 @@ pub fn dynamic_value_completions(
         slot: Slot::from_spans(&spans),
         flags: CachedFlags::default(),
     };
-    providers::value_completions(&spans, &ctx)
+    let listed = providers::value_completions(&spans, &ctx)?;
+    Some(without_untriggered_flags(
+        listed,
+        rest.last().map_or("", String::as_str),
+        cfg,
+    ))
+}
+
+/// clap lists flags beside values, which must not show on a token that does
+/// not trigger flags.
+fn without_untriggered_flags(
+    candidates: Vec<Candidate>,
+    last: &str,
+    cfg: &Config,
+) -> Vec<Candidate> {
+    if cfg.triggers_flags(last) {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .filter(|candidate| !candidate.value.starts_with('-'))
+        .collect()
 }
 
 /// like `dynamic_complete` but runs `explicit_cmd_path` instead of resolving
@@ -150,7 +178,7 @@ pub fn dynamic_complete_with_path(
     spans: &[String],
     explicit_cmd_path: Option<&Path>,
     cfg: &Config,
-) -> Option<Vec<String>> {
+) -> Option<Vec<Candidate>> {
     dynamic_complete_candidates_with_path(
         spans,
         explicit_cmd_path,
@@ -160,13 +188,7 @@ pub fn dynamic_complete_with_path(
         cfg,
     )
     .into_answer()
-    .map(|answer| {
-        answer
-            .candidates
-            .into_iter()
-            .map(Candidate::into_json)
-            .collect()
-    })
+    .map(|answer| answer.candidates)
 }
 
 pub fn dynamic_complete_candidates_with_path(
@@ -222,7 +244,11 @@ pub fn dynamic_complete_candidates_with_path(
     }
 
     let matching = providers::matching_of(&spans[0]);
-    let mut filtered = filter_candidates(raw, needle, matching).unwrap_or_default();
+    let mut filtered = without_untriggered_flags(
+        filter_candidates(raw, needle, matching).unwrap_or_default(),
+        last,
+        cfg,
+    );
     if let Some(prefix) = &inline {
         for candidate in &mut filtered {
             candidate.value.insert_str(0, prefix);
@@ -275,9 +301,10 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_filter_drops_exact_subcommand_matches() {
+    fn fuzzy_filter_keeps_exact_subcommand_matches() {
         let items = vec![Candidate::new("show", "remote subcommand")];
-        assert!(filter_candidates(items, "show", Matching::Value).is_none());
+        let filtered = filter_candidates(items, "show", Matching::Value).expect("non-empty");
+        assert_eq!(filtered[0].value, "show");
     }
 
     #[test]
