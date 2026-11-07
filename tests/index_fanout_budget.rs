@@ -26,6 +26,8 @@ use std::{
     },
 };
 
+#[path = "common/exec.rs"] mod exec;
+
 fn unique_temp_dir(name: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -48,7 +50,7 @@ fn index_fanout_is_bounded_by_per_root_budget() {
     // list (defeats `self_listed`). uncapped, this fans out to breadth^depth.
     // posix sh + /bin/sh shebang so it runs in the nix build sandbox.
     let hydra = bindir.join("hydra");
-    fs::write(
+    exec::write_executable_file(
         &hydra,
         r#"#!/bin/sh
 n=0
@@ -59,23 +61,10 @@ echo "Commands:"
 i=1
 while [ "$i" -le 8 ]; do echo "  lvl${n}sub$i   level $n child $i"; i=$((i+1)); done
 "#,
-    )
-    .expect("write hydra");
-    let mut hydra_perms = fs::metadata(&hydra).unwrap().permissions();
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        hydra_perms.set_mode(0o755);
-    };
-    fs::set_permissions(&hydra, hydra_perms).expect("chmod");
+    );
 
     let nu = bindir.join("nu");
-    fs::write(&nu, "#!/bin/sh\nprintf '%s\\n' '[\"nu\"]'\n").expect("write fake nu");
-    let mut nu_perms = fs::metadata(&nu).unwrap().permissions();
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        nu_perms.set_mode(0o755);
-    };
-    fs::set_permissions(&nu, nu_perms).expect("chmod fake nu");
+    exec::write_executable_file(&nu, "#!/bin/sh\nprintf '%s\\n' '[\"nu\"]'\n");
 
     let budget = 40_usize;
     let started = Instant::now();

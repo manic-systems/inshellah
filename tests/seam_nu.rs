@@ -18,7 +18,6 @@
 use std::{
     env,
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{
         Path,
         PathBuf,
@@ -36,6 +35,8 @@ use std::{
         UNIX_EPOCH,
     },
 };
+
+#[path = "common/exec.rs"] mod exec;
 
 use inshellah::{
     parsers::manpage::{
@@ -63,12 +64,7 @@ fn unique_temp_dir(name: &str) -> PathBuf {
 }
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
-    fs::create_dir_all(bin_dir).expect("bin dir");
-    let path = bin_dir.join(name);
-    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub executable");
-    let mut perms = fs::metadata(&path).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("chmod");
+    exec::write_executable_file(&bin_dir.join(name), "#!/bin/sh\nexit 0\n");
 }
 
 fn subs(pairs: &[(&str, &str)]) -> ManpageResult {
