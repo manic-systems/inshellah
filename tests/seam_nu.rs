@@ -18,7 +18,6 @@
 use std::{
     env,
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{
         Path,
         PathBuf,
@@ -27,11 +26,17 @@ use std::{
         self,
         Command,
     },
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
+    },
     time::{
         SystemTime,
         UNIX_EPOCH,
     },
 };
+
+#[path = "common/exec.rs"] mod exec;
 
 use inshellah::{
     parsers::manpage::{
@@ -49,20 +54,17 @@ fn nu_available() -> bool {
 }
 
 fn unique_temp_dir(name: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    env::temp_dir().join(format!("{name}-{}-{nanos}-{n}", process::id()))
 }
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
-    fs::create_dir_all(bin_dir).expect("bin dir");
-    let path = bin_dir.join(name);
-    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub executable");
-    let mut perms = fs::metadata(&path).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("chmod");
+    exec::write_executable_file(&bin_dir.join(name), "#!/bin/sh\nexit 0\n");
 }
 
 fn subs(pairs: &[(&str, &str)]) -> ManpageResult {

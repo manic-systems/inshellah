@@ -3,7 +3,6 @@
 use std::{
     env,
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{
         Path,
         PathBuf,
@@ -11,6 +10,10 @@ use std::{
     process::{
         self,
         Command,
+    },
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
     },
     time::{
         Duration,
@@ -38,14 +41,17 @@ use inshellah::{
     },
 };
 
+#[path = "common/exec.rs"] mod exec;
 #[path = "common/temp_dir.rs"] mod temp_dir;
 
 fn unique_temp_dir(name: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    env::temp_dir().join(format!("{name}-{}-{nanos}-{n}", process::id()))
 }
 
 fn write_stub_executable(bin_dir: &Path, name: &str) {
@@ -53,12 +59,7 @@ fn write_stub_executable(bin_dir: &Path, name: &str) {
 }
 
 fn write_executable(bin_dir: &Path, name: &str, script: &str) {
-    fs::create_dir_all(bin_dir).expect("bin dir");
-    let path = bin_dir.join(name);
-    fs::write(&path, script).expect("write executable");
-    let mut perms = fs::metadata(&path).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("chmod");
+    exec::write_executable_file(&bin_dir.join(name), script);
 }
 
 fn path_with_bin(bin_dir: &Path) -> String {
@@ -108,7 +109,7 @@ fn complete_scrapes_missing_subcommand_when_parent_is_cached() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let fakecmd = bin_dir.join("fakecmd");
-    fs::write(
+    exec::write_executable_file(
         &fakecmd,
         r#"#!/bin/sh
 if [ "$1" = "clone" ]; then
@@ -139,11 +140,7 @@ fi
 
 exit 2
 "#,
-    )
-    .expect("write fakecmd");
-    let mut perms = fs::metadata(&fakecmd).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&fakecmd, perms).expect("chmod");
+    );
 
     let parent = ManpageResult {
         entries:            Vec::new(),
@@ -202,7 +199,7 @@ fn complete_descends_through_subcommand_alias() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let fakecmd = bin_dir.join("fakealias");
-    fs::write(
+    exec::write_executable_file(
         &fakecmd,
         r#"#!/bin/sh
 if [ "$1" = "clone" ]; then
@@ -218,11 +215,7 @@ EOF
 fi
 exit 2
 "#,
-    )
-    .expect("write fakealias");
-    let mut perms = fs::metadata(&fakecmd).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&fakecmd, perms).expect("chmod");
+    );
 
     let parent = ManpageResult {
         entries:            Vec::new(),
@@ -281,7 +274,7 @@ fn complete_does_not_cache_timed_out_partial_help() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let slow = bin_dir.join("slowhelp");
-    fs::write(
+    exec::write_executable_file(
         &slow,
         r#"#!/bin/sh
 if [ "$1" = "--help" ]; then
@@ -291,11 +284,7 @@ if [ "$1" = "--help" ]; then
 fi
 exit 2
 "#,
-    )
-    .expect("write slowhelp");
-    let mut perms = fs::metadata(&slow).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&slow, perms).expect("chmod");
+    );
 
     let old_path = env::var_os("PATH").unwrap_or_default();
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
@@ -403,7 +392,7 @@ fn complete_dynamic_git_uses_explicit_executable_path() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let explicit_git = explicit_dir.join("git");
-    fs::write(
+    exec::write_executable_file(
         &explicit_git,
         r#"#!/bin/sh
 if [ "$1" = "remote" ]; then
@@ -412,10 +401,9 @@ if [ "$1" = "remote" ]; then
 fi
 exit 2
 "#,
-    )
-    .expect("write explicit git");
+    );
     let path_git = path_dir.join("git");
-    fs::write(
+    exec::write_executable_file(
         &path_git,
         r#"#!/bin/sh
 if [ "$1" = "remote" ]; then
@@ -424,13 +412,7 @@ if [ "$1" = "remote" ]; then
 fi
 exit 2
 "#,
-    )
-    .expect("write path git");
-    for git in [&explicit_git, &path_git] {
-        let mut perms = fs::metadata(git).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(git, perms).expect("chmod");
-    }
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("complete")
@@ -598,10 +580,7 @@ fn complete_does_not_scan_path_at_command_position() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let fake_git = bin_dir.join("git");
-    fs::write(&fake_git, "#!/bin/sh\nexit 0\n").expect("write fake git");
-    let mut perms = fs::metadata(&fake_git).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&fake_git, perms).expect("chmod");
+    exec::write_executable_file(&fake_git, "#!/bin/sh\nexit 0\n");
 
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("complete")
@@ -911,7 +890,7 @@ fn complete_resolves_absolute_path_after_elevation_wrapper() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let fakecmd = bin_dir.join("fakecmd");
-    fs::write(
+    exec::write_executable_file(
         &fakecmd,
         r#"#!/bin/sh
 if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
@@ -920,11 +899,7 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
 fi
 exit 2
 "#,
-    )
-    .expect("write fakecmd");
-    let mut perms = fs::metadata(&fakecmd).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&fakecmd, perms).expect("chmod");
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
         .arg("complete")
@@ -1347,7 +1322,7 @@ fn runtime_manpage_resolution_supplements_from_help() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let demo = bin_dir.join("demo");
-    fs::write(
+    exec::write_executable_file(
         &demo,
         r#"#!/bin/sh
 if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
@@ -1364,11 +1339,7 @@ EOF
 fi
 exit 2
 "#,
-    )
-    .expect("write demo");
-    let mut perms = fs::metadata(&demo).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&demo, perms).expect("chmod");
+    );
 
     fs::write(
         man_dir.join("demo.1"),
@@ -1454,7 +1425,7 @@ fn index_manpage_results_are_supplemented_from_help() {
     write_fake_nu(&bin_dir, r#"["nu"]"#);
 
     let demo = bin_dir.join("demo");
-    fs::write(
+    exec::write_executable_file(
         &demo,
         r#"#!/bin/sh
 if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
@@ -1471,11 +1442,7 @@ EOF
 fi
 exit 2
 "#,
-    )
-    .expect("write demo");
-    let mut perms = fs::metadata(&demo).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&demo, perms).expect("chmod");
+    );
 
     fs::write(
         man_dir.join("demo.1"),
@@ -1623,7 +1590,7 @@ fn complete_rescrapes_stale_user_cache_past_ttl() {
     fs::create_dir_all(&cache_dir).expect("cache dir");
 
     let fakecmd = bin_dir.join("fakerefresh");
-    fs::write(
+    exec::write_executable_file(
         &fakecmd,
         r#"#!/bin/sh
 if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
@@ -1640,11 +1607,7 @@ EOF
 fi
 exit 2
 "#,
-    )
-    .expect("write fakerefresh");
-    let mut perms = fs::metadata(&fakecmd).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&fakecmd, perms).expect("chmod");
+    );
 
     // seed a cache whose subcommand differs from what --help now emits.
     let stale = ManpageResult {
