@@ -75,11 +75,19 @@ inshellah index /usr /usr/local --workers 16 --timeout-ms 500
 inshellah dump
 ```
 
-wire up the nushell completer in `~/.config/nushell/config.nu`:
+then wire up the nushell completer.
 
 ```nu
-source /path/to/inshellah-completer.nu
+# once, writes the completer next to config.nu
+inshellah init nushell | save -f ~/.config/nushell/inshellah.nu
+
+# ~/.config/nushell/config.nu
+source ~/.config/nushell/inshellah.nu
 ```
+
+if you are on bash, zsh or fish, they also hook in through `inshellah init`,
+and you will want `--shell` when building their index. [shells.md](shells.md)
+covers the setup.
 
 see [nushell-integration.md](nushell-integration.md) for full
 completer details and [runtime-completions.md](runtime-completions.md)

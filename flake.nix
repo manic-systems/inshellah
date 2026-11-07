@@ -107,10 +107,10 @@
             export PATH="${fakeCompletionBackends}/bin:$PATH"
             export INSHELLAH_STATIC_FILE="$TMPDIR/inshellah-static.json"
             : > "$INSHELLAH_STATIC_FILE"
-            nu --no-config-file -c 'source ${./nix/inshellah-completer.nu}; source ${./tests/nushell-completer.nu}'
+            nu --no-config-file -c 'source ${./shells/inshellah.nu}; source ${./tests/nushell-completer.nu}'
 
             cat > "$TMPDIR/config-load.nu" <<'EOF'
-            source ${./nix/inshellah-completer.nu}
+            source ${./shells/inshellah.nu}
 
             def activate [p: path] {
               sudo nix-env --set -p /nix/var/nix/profiles/system $p
@@ -131,10 +131,18 @@
                 ${phase}
                 touch $out
               '';
-          # nushell is in the rust check inputs so the composed seam test
-          # (tests/seam_nu.rs) runs the real binary through the real nu
-          # tokenizer instead of self-skipping when nu is absent.
-          rust = mkShellCheck "inshellah-rust-check" (rustInputs ++ [ pkgs.nushell ]) rustCheckPhase;
+          # the shells are in the rust check inputs so the composed seam tests
+          # (tests/seam_nu.rs, tests/seam_shells.rs) run the real binary
+          # through each real shell instead of self-skipping when it is absent.
+          rust = mkShellCheck "inshellah-rust-check" (
+            rustInputs
+            ++ [
+              pkgs.nushell
+              pkgs.bashInteractive
+              pkgs.zsh
+              pkgs.fish
+            ]
+          ) rustCheckPhase;
           nushell = mkShellCheck "inshellah-nushell-check" [ pkgs.nushell ] nushellCheckPhase;
           package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         in

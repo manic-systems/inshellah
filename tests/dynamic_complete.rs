@@ -78,7 +78,11 @@ fn install_fakes(bin_dir: &Path) {
     }
     write_executable(bin_dir, "zig", FAKE_ZIG);
     write_executable(bin_dir, "ps", FAKE_PS);
-    for name in ["ssh", "scp", "sftp", "kill", "pkill", "make", "just", "npm"] {
+    write_executable(bin_dir, "getent", FAKE_GETENT);
+    write_executable(bin_dir, "dscl", FAKE_DSCL);
+    for name in [
+        "ssh", "scp", "sftp", "kill", "pkill", "pgrep", "make", "just", "npm",
+    ] {
         write_executable(bin_dir, name, "#!/bin/sh\nexit 0\n");
     }
     write_executable(bin_dir, "kubectl", FAKE_KUBECTL);
@@ -152,6 +156,20 @@ esac
 
 const FAKE_PS: &str = r"#!/bin/sh
 printf ' 101 worker\n 202 database server\n'
+";
+
+const FAKE_GETENT: &str = r"#!/bin/sh
+case $1 in
+  passwd) printf 'root:x:0:0::/root:/bin/sh\nnobody:x:65534:65534::/:/bin/false\n' ;;
+  group) printf 'wheel:x:1:root\nusers:x:100:\n' ;;
+esac
+";
+
+const FAKE_DSCL: &str = r"#!/bin/sh
+case $3 in
+  /Users) printf 'root\nnobody\n' ;;
+  /Groups) printf 'wheel\nusers\n' ;;
+esac
 ";
 
 const FAKE_KUBECTL: &str = r#"#!/bin/sh
@@ -360,6 +378,15 @@ impl Harness {
     }
 
     fn run(&self, spans: &[&str], extra_env: &[(&str, &str)]) -> (String, String, bool) {
+        self.run_for(None, spans, extra_env)
+    }
+
+    fn run_for(
+        &self,
+        shell: Option<&str>,
+        spans: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> (String, String, bool) {
         for path in self.aux_files.values() {
             fs::write(path, "").expect("reset aux file");
         }
@@ -368,6 +395,9 @@ impl Harness {
         // short --help budget so the static resolve doesn't sit on fakes
         // that don't respond to --help.
         cmd.arg("--timeout-ms").arg("200");
+        if let Some(name) = shell {
+            cmd.arg("--shell").arg(name);
+        }
         for span in spans {
             cmd.arg(span);
         }
@@ -752,6 +782,209 @@ fn systemctl_option_values_from_the_cache_do_not_leak_unit_candidates() {
 }
 
 // === kill/pkill ===
+
+fn shell_values(harness: &Harness, shell: &str, spans: &[&str]) -> Vec<String> {
+    let (stdout, ..) = harness.run_for(Some(shell), spans, &[]);
+    stdout
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split('\t').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn the_builtin_kill_of_bash_and_zsh_has_its_own_flags_and_signals() {
+    let harness = Harness::new("dyn-kill-builtin");
+    seed_command(&harness, "kill", &[], &["--timeout", "-q"], &["-a", "-p"]);
+    for shell in ["bash", "zsh"] {
+        let mut flags = vec!["-s", "-n", "-l", "-L"];
+        if shell == "zsh" {
+            flags.push("-q");
+        }
+        assert_eq!(shell_values(&harness, shell, &["kill", "-"]), flags);
+        for flag in ["-s", "-n", "-l"] {
+            let signals = shell_values(&harness, shell, &["kill", flag, "TE"]);
+            let first = if shell == "zsh" && flag == "-n" {
+                "15"
+            } else {
+                "TERM"
+            };
+            assert_eq!(signals[0], first, "{shell} {flag}");
+        }
+        assert_eq!(shell_values(&harness, shell, &["kill", "-s", "SIGTE"]), [
+            "SIGTERM"
+        ]);
+        assert_eq!(shell_values(&harness, shell, &["kill", "-sTE"]), ["-sTERM"]);
+        assert_eq!(shell_values(&harness, shell, &["kill", "-sSIGTE"]), [
+            "-sSIGTERM"
+        ]);
+        if shell == "zsh" {
+            let numbers = shell_values(&harness, shell, &["kill", "-n1"]);
+            assert_eq!(numbers.first().map(String::as_str), Some("-n1"));
+        }
+        if cfg!(target_os = "linux") {
+            let rt = shell_values(&harness, shell, &["kill", "-s", "RTMA"]);
+            assert!(rt.contains(&"RTMAX".to_owned()), "{shell} {rt:?}");
+        }
+        let after_dashes = shell_values(&harness, shell, &["kill", "--", "-"]);
+        assert!(
+            !after_dashes.iter().any(|value| value.starts_with("-s")),
+            "{after_dashes:?}"
+        );
+        let group = shell_values(&harness, shell, &["kill", "-S"]);
+        assert!(group.contains(&"-SIGTERM".to_owned()), "{group:?}");
+        assert!(group.contains(&"-STOP".to_owned()), "{group:?}");
+        assert!(!group.iter().any(|value| value == "-HUP"), "{group:?}");
+        assert_eq!(shell_values(&harness, shell, &["kill", "-TE"]), [
+            "-TERM", "-SIGTERM"
+        ]);
+        assert_eq!(shell_values(&harness, shell, &["kill", ""]), ["101", "202"]);
+        assert_eq!(
+            shell_values(&harness, shell, &["kill", "-s", "TERM", ""]),
+            ["101", "202"]
+        );
+    }
+}
+
+#[test]
+fn zsh_kill_has_its_own_q_and_l_flags_and_bash_does_not() {
+    let harness = Harness::new("dyn-kill-zsh-flags");
+    seed_command(&harness, "kill", &[], &["--timeout"], &["-a"]);
+    let zsh = shell_values(&harness, "zsh", &["kill", "-"]);
+    assert_eq!(zsh, ["-s", "-n", "-l", "-L", "-q"]);
+    let bash = shell_values(&harness, "bash", &["kill", "-"]);
+    assert_eq!(bash, ["-s", "-n", "-l", "-L"]);
+    let (listing, ..) = harness.run_for(Some("zsh"), &["kill", "-L"], &[]);
+    assert!(listing.contains("with their numbers"), "{listing}");
+    let (bash_listing, ..) = harness.run_for(Some("bash"), &["kill", "-L"], &[]);
+    assert!(!bash_listing.contains("numbers"), "{bash_listing}");
+    assert!(shell_values(&harness, "zsh", &["kill", "-q", ""]).is_empty());
+    assert_eq!(shell_values(&harness, "zsh", &["kill", "-q", "7", ""]), [
+        "101", "202"
+    ]);
+}
+
+#[test]
+fn builtin_flags_follow_the_shell_behind_command_builtin_and_exec() {
+    let harness = Harness::new("dyn-kill-behind");
+    seed_command(&harness, "kill", &[], &["--timeout"], &["-a"]);
+    let flags = ["-s", "-n", "-l", "-L"];
+    assert_eq!(
+        shell_values(&harness, "bash", &["command", "kill", "-"]),
+        flags
+    );
+    assert_eq!(
+        shell_values(&harness, "bash", &["command", "-p", "kill", "-"]),
+        flags
+    );
+    for shell in ["bash", "zsh"] {
+        assert_eq!(
+            shell_values(&harness, shell, &["builtin", "kill", "-n", ""])
+                .first()
+                .map(String::as_str),
+            Some(if shell == "zsh" { "1" } else { "HUP" }),
+            "{shell}"
+        );
+        assert_eq!(shell_values(&harness, shell, &["builtin", "kill", ""]), [
+            "101", "202"
+        ]);
+    }
+    for line in [&["exec", "kill", "-"][..], &["sudo", "kill", "-"], &[
+        "nohup", "kill", "-",
+    ]] {
+        let found = shell_values(&harness, "bash", line);
+        assert!(
+            found.contains(&"--timeout".to_owned()),
+            "{line:?} {found:?}"
+        );
+    }
+    let found = shell_values(&harness, "zsh", &["command", "kill", "-"]);
+    assert!(found.contains(&"--timeout".to_owned()), "{found:?}");
+}
+
+#[test]
+fn pkill_offers_signals_for_capitalised_words_a_flag_letter_starts() {
+    let harness = Harness::new("dyn-pkill-signal");
+    seed_command(
+        &harness,
+        "pkill",
+        &[],
+        &["-t", "-u", "-O", "-s", "-P", "--terminal"],
+        &["-f", "-x"],
+    );
+    for (typed, wanted) in [
+        ("-TE", "-TERM"),
+        ("-TERM", "-TERM"),
+        ("-QU", "-QUIT"),
+        ("-CO", "-CONT"),
+        ("-SE", "-SEGV"),
+        ("-PI", "-PIPE"),
+        ("-KI", "-KILL"),
+        ("-SIGTE", "-SIGTERM"),
+    ] {
+        for shell in ["bash", "zsh", "fish"] {
+            let found = shell_values(&harness, shell, &["pkill", typed]);
+            assert!(
+                found.contains(&wanted.to_owned()),
+                "{shell} {typed} {found:?}"
+            );
+        }
+    }
+    let after_flag = shell_values(&harness, "bash", &["pkill", "-f", "-TE"]);
+    assert!(!after_flag.contains(&"-TERM".to_owned()), "{after_flag:?}");
+}
+
+#[test]
+fn pkill_and_pgrep_complete_accounts_attached_to_their_flags() {
+    let harness = Harness::new("dyn-pkill-accounts");
+    for command in ["pkill", "pgrep"] {
+        seed_command(&harness, command, &[], &["-u", "-U", "-G"], &["-f", "-x"]);
+        for (typed, wanted) in [
+            ("-uroo", "-uroot"),
+            ("-Uroo", "-Uroot"),
+            ("-furoo", "-furoot"),
+        ] {
+            let found = shell_values(&harness, "bash", &[command, typed]);
+            assert!(
+                found.contains(&wanted.to_owned()),
+                "{command} {typed} {found:?}"
+            );
+        }
+        let detached = shell_values(&harness, "bash", &[command, "-u", "roo"]);
+        assert!(
+            detached.contains(&"root".to_owned()),
+            "{command} {detached:?}"
+        );
+        let flagged = shell_values(&harness, "bash", &[command, "-u", "root", ""]);
+        assert!(
+            !flagged.contains(&"root".to_owned()),
+            "{command} {flagged:?}"
+        );
+    }
+    let pgrep = shell_values(&harness, "bash", &["pgrep", "-TE"]);
+    assert!(!pgrep.contains(&"-TERM".to_owned()), "{pgrep:?}");
+}
+
+#[test]
+fn kill_signal_flag_values_are_signals_for_the_binary_but_not_nushell() {
+    let harness = Harness::new("dyn-kill-binary");
+    for flag in ["-s", "--signal"] {
+        let values = shell_values(&harness, "fish", &["kill", flag, "TE"]);
+        assert_eq!(values[0], "TERM", "{flag}");
+    }
+    let attached = shell_values(&harness, "fish", &["kill", "--signal=TE"]);
+    assert_eq!(attached[0], "--signal=TERM");
+    let (nushell, ..) = harness.run(&["kill", "-s", ""], &[]);
+    assert!(
+        !nushell.contains("TERM"),
+        "nushell's -s is a number, got {nushell}"
+    );
+    let (pids, ..) = harness.run(&["kill", ""], &[]);
+    assert_eq!(Harness::values(&parse_output(&pids).expect("pids")), [
+        "101", "202"
+    ]);
+}
 
 // === kubectl ===
 
@@ -1484,4 +1717,64 @@ fn a_fully_typed_subcommand_completes_to_itself() {
             "{line:?}"
         );
     }
+}
+
+#[test]
+fn only_the_builtin_kill_answers_behind_builtin() {
+    let harness = Harness::new("dyn-behind-builtin");
+    seed_command(&harness, "echo", &[], &[], &["--help", "--version"]);
+    seed_command(&harness, "git", &["status", "stash"], &[], &[]);
+    for (line, expected) in [
+        (&["builtin", "echo", "-"][..], 0),
+        (&["builtin", "git", "sta"], 0),
+        (&["builtin", "builtin", "git", "sta"], 0),
+    ] {
+        let (stdout, ..) = harness.run_for(Some("bash"), line, &[]);
+        assert_eq!(stdout.lines().next(), Some("defer"), "{line:?} {stdout}");
+        assert_eq!(stdout.lines().count(), 1 + expected, "{line:?}");
+    }
+    let found = shell_values(&harness, "bash", &["builtin", "kill", "-TE"]);
+    assert_eq!(found, ["-TERM", "-SIGTERM"]);
+}
+
+#[test]
+fn the_builtin_kill_takes_no_signal_after_a_pid() {
+    let harness = Harness::new("dyn-kill-after-pid");
+    seed_command(&harness, "kill", &[], &["--timeout"], &["-a"]);
+    for shell in ["bash", "zsh"] {
+        for typed in ["-T", "-TE", "-s", "-"] {
+            let found = shell_values(&harness, shell, &["kill", "1", typed]);
+            assert!(found.is_empty(), "{shell} {typed} {found:?}");
+        }
+        let first = shell_values(&harness, shell, &["kill", "-T"]);
+        assert!(first.contains(&"-TERM".to_owned()), "{shell} {first:?}");
+    }
+}
+
+#[test]
+fn a_lone_capital_after_pkill_offers_signals_beside_case_folded_flags() {
+    let harness = Harness::new("dyn-pkill-lone-capital");
+    seed_command(
+        &harness,
+        "pkill",
+        &[],
+        &["-t", "-u", "-O", "-s", "-P", "--signal"],
+        &["-f", "-x"],
+    );
+    for typed in ["-T", "-S"] {
+        for shell in ["bash", "zsh", "fish"] {
+            let found = shell_values(&harness, shell, &["pkill", typed]);
+            let wanted = format!("{typed}ERM");
+            assert!(
+                found.iter().any(|value| {
+                    value.starts_with(typed)
+                        && value.len() > 2
+                        && (value == &wanted || value == "-TERM" || value == "-STOP")
+                }),
+                "{shell} {typed} {found:?}"
+            );
+        }
+    }
+    let exact = shell_values(&harness, "bash", &["pkill", "-P"]);
+    assert_eq!(exact, ["-P"]);
 }

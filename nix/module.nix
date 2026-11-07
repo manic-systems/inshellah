@@ -1,4 +1,4 @@
-# NixOS / nix-darwin module: automatic nushell completion indexing
+# NixOS / nix-darwin module: automatic shell completion indexing
 #
 # Indexes completions using three strategies in priority order:
 #   1. Native completion generators (e.g. CMD completions nushell)
@@ -9,7 +9,8 @@
 # The `complete` command reads from this directory as a system overlay.
 #
 # This module body only uses options shared by NixOS and nix-darwin
-# (environment.{variables,systemPackages,extraSetup}), so the
+# (environment.{variables,systemPackages,extraSetup} and
+# programs.{bash,zsh,fish}.interactiveShellInit), so the
 # same file backs both flake outputs. On macOS the indexer scrapes Mach-O
 # binaries; on Linux, ELF — selected by the inshellah build's target os.
 #
@@ -30,7 +31,8 @@
 
 let
   cfg = config.programs.inshellah;
-  completerSnippet = ./inshellah-completer.nu;
+  completerSnippet = ../shells/inshellah.nu;
+  nushellOnly = lib.all (shell: shell == "nushell") cfg.shells;
   defaultPackage = pkgs.callPackage ./package.nix { };
   wrapperFor =
     buildPkgs: package:
@@ -47,7 +49,30 @@ let
 in
 {
   options.programs.inshellah = {
-    enable = lib.mkEnableOption "nushell completion indexing via inshellah";
+    enable = lib.mkEnableOption "shell completion indexing via inshellah";
+
+    shells = lib.mkOption {
+      type = lib.types.nonEmptyListOf (
+        lib.types.enum [
+          "nushell"
+          "bash"
+          "zsh"
+          "fish"
+        ]
+      );
+      default = [ "nushell" ];
+      example = [
+        "nushell"
+        "zsh"
+      ];
+      description = ''
+        shells to hook inshellah into. nushell gets its external completer
+        installed into its vendor autoload dir, bash, zsh and fish get their
+        hook added to `programs.<shell>.interactiveShellInit`. an index for
+        nushell alone skips binaries named like nushell builtins, any other
+        shell runs those binaries so they are indexed too.
+      '';
+    };
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -62,7 +87,8 @@ in
       defaultText = lib.literalExpression "pkgs.nushell";
       description = ''
         nushell package to use at index time for discovering native nushell
-        commands that should not be indexed as external completions.
+        commands that should not be indexed as external completions. only
+        used when `shells` is nushell alone.
       '';
     };
 
@@ -136,8 +162,8 @@ in
       default = 5000;
       example = 2000;
       description = ''
-        timeout in milliseconds for live dynamic completions in the nushell
-        shim. this bounds runtime calls such as nix, kubectl, and systemctl.
+        timeout in milliseconds for live dynamic completions in every shell.
+        this bounds runtime calls such as nix, kubectl, and systemctl.
         set to 0 to disable the runtime timeout.
       '';
     };
@@ -207,8 +233,8 @@ in
       description = ''
         per-subprocess timeout in milliseconds for the on-the-fly --help
         resolution the completer performs for uncached commands. distinct
-        from `timeoutMs` (build-time indexing) and `dynamicTimeoutMs` (the
-        nushell shim's live providers). null uses the binary's compiled
+        from `timeoutMs` (build-time indexing) and `dynamicTimeoutMs` (live
+        providers). null uses the binary's compiled
         default (currently 1200ms). exported as INSHELLAH_TIMEOUT_MS.
       '';
     };
@@ -261,7 +287,10 @@ in
         helpOnlyFlag = lib.optionalString (cfg.helpOnlyCommands != [ ]) " --help-only ${helpOnlyFile}";
         timeoutFlag = lib.optionalString (cfg.timeoutMs != null) " --timeout-ms ${toString cfg.timeoutMs}";
         workersFlag = lib.optionalString (cfg.workers != null) " --workers ${toString cfg.workers}";
-        indexFlags = "${helpOnlyFlag}${timeoutFlag}${workersFlag}";
+        # the indexer only tells nushell alone from any other mix, so a canonical
+        # flag keeps adding or reordering shells from rebuilding every index.
+        shellFlag = " --shell ${if nushellOnly then "nushell" else "bash"}";
+        indexFlags = "${helpOnlyFlag}${timeoutFlag}${workersFlag}${shellFlag}";
         flags = "${ignoreFlag}${indexFlags}";
         installedOutputs =
           pkg:
@@ -321,8 +350,7 @@ in
                   fi
                 done
 
-                PATH="${tools.nushell}/bin:$PATH" \
-                  ${tools.inshellah}/bin/inshellah index "$PWD/profile" --dir $out --ignore ignore${indexFlags}
+                ${lib.optionalString nushellOnly "PATH=\"${tools.nushell}/bin:$PATH\" "}${tools.inshellah}/bin/inshellah index "$PWD/profile" --dir $out --ignore ignore${indexFlags}
               ''
             ];
           };
@@ -346,15 +374,32 @@ in
       ''
         mkdir -p ${destDir}
 
-        PATH="${mergeTools.nushell}/bin:$PATH" \
-          ${inshellah} merge "$out" --dir ${destDir} --sources ${sourcesFile}${flags}
+        ${lib.optionalString nushellOnly "PATH=\"${mergeTools.nushell}/bin:$PATH\" "}${inshellah} merge "$out" --dir ${destDir} --sources ${sourcesFile}${flags}
 
         find ${destDir} -maxdepth 1 -empty -delete
+
+      ''
+      + lib.optionalString (lib.elem "nushell" cfg.shells) ''
 
         # no per-command stubs: an extern/def makes nu complete its own (empty)
         # declared flags for a leading `-`; the external completer handles all.
         mkdir -p $out/share/nushell/vendor/autoload
         install -m 0644 ${snippetFile} $out/share/nushell/vendor/autoload/inshellah.nu
       '';
+
+    warnings = map (
+      shell:
+      "programs.inshellah.shells lists ${shell}, but programs.${shell}.enable is off, so its hook is never loaded"
+    ) (lib.filter (shell: shell != "nushell" && !(config.programs.${shell}.enable or true)) cfg.shells);
+
+    programs.bash.interactiveShellInit = lib.mkIf (lib.elem "bash" cfg.shells) (
+      lib.mkAfter (builtins.readFile ../shells/inshellah.bash)
+    );
+    programs.zsh.interactiveShellInit = lib.mkIf (lib.elem "zsh" cfg.shells) (
+      builtins.readFile ../shells/inshellah.zsh
+    );
+    programs.fish.interactiveShellInit = lib.mkIf (lib.elem "fish" cfg.shells) (
+      builtins.readFile ../shells/inshellah.fish
+    );
   };
 }

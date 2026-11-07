@@ -124,7 +124,7 @@ fn nu_tokenizer_to_real_binary_seam() {
         .expect("binary dir")
         .to_path_buf();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let completer = manifest.join("nix/inshellah-completer.nu");
+    let completer = manifest.join("shells/inshellah.nu");
     let assertions = manifest.join("tests/seam-completer.nu");
 
     let old_path = env::var_os("PATH").unwrap_or_default();

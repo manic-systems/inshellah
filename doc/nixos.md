@@ -1,6 +1,6 @@
 # nixos / nix-darwin integration
 
-inshellah provides a module that indexes nushell completions for every
+inshellah provides a module that indexes completions for every
 installed package at system build time, and a wrapped binary that knows
 where to find the result. the same module body backs both NixOS and
 nix-darwin — on Linux it scrapes ELF binaries, on macOS Mach-O ones,
@@ -63,8 +63,22 @@ a package in `extraScrapePackages` must install a command under `bin/`. a
 package there does not create a completion because there is no installed
 command to run.
 
-after rebuilding, completions are immediately available through the
-autoloaded nushell shim.
+once you rebuild and open a new shell, completions work right away through the
+autoloaded nushell shim or the hooks for whatever else you listed in
+`programs.inshellah.shells`. for bash, zsh and fish, the module drops those
+hooks into `programs.<shell>.interactiveShellInit`. nixos and nix-darwin only
+write that out when `programs.<shell>.enable` is turned on, so you will get a
+warning if you list a shell that is still disabled. if you manage a shell
+through home-manager instead, load the hook from its own config as shown in
+[shells.md](shells.md).
+
+there is no module option for takeover mode, where inshellah steps in ahead of
+the shell's own completions. export the environment variable across your
+shells instead.
+
+```nix
+environment.variables.INSHELLAH_TAKEOVER = "1";
+```
 
 ## what the module does
 
@@ -74,13 +88,16 @@ autoloaded nushell shim.
 - indexes each installed package in its own derivation, then runs
   `inshellah merge` during the system profile build to select and combine
   completion files under `$out/share/inshellah/`.
-- drops the full nushell external-completer shim into
+- when nushell is in `shells`, drops the full nushell external-completer shim into
   `/share/nushell/vendor/autoload/`, including sudo/doas overrides so elevated
   commands still complete through inshellah. the single external completer
   handles every external command (flags, subcommands, live values); no
   per-command stubs are needed.
 - exposes the same shim as a read-only `snippet` option for users who
   want to source or inspect it manually.
+- adds the bash, zsh and fish hooks to
+  `programs.<shell>.interactiveShellInit` for whichever of them you put in
+  `shells`. [shells.md](shells.md) goes into how each hook works.
 
 ## module options
 
@@ -91,7 +108,12 @@ programs.inshellah = {
   # the inshellah package (set automatically by the flake module)
   package = pkgs.inshellah;
 
-  # nushell used during indexing to discover native commands to skip
+  # shells to hook into, any of nushell, bash, zsh and fish
+  # default: [ "nushell" ]
+  shells = [ "nushell" "zsh" ];
+
+  # nushell used during indexing to discover native commands to skip,
+  # only when shells is nushell alone
   nushellPackage = pkgs.nushell;
 
   # subdirectory of the system profile holding the index files
@@ -229,7 +251,7 @@ snippet's nushell `max_results`.
 | `npm` / `pnpm` / `yarn` | package.json scripts |
 | `make` / `just` | targets and recipes |
 | `cargo` | workspace targets for `--bin`, `--example`, and related slots |
-| `kill` / `pkill` | pid and command pairs |
+| `kill` / `pkill` | pid and command pairs, and signal names for `kill` |
 | `zig` | build.zig steps |
 | cobra programs | the program's own `__complete` |
 | clap `CompleteEnv` programs | the program's own completer via `COMPLETE=fish` |
@@ -261,6 +283,16 @@ home.activation.inshellah-index = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
 '';
 ```
 
+if you are only indexing for bash, zsh or fish, pass `--shell` instead of
+putting nushell on `PATH`. that also keeps binaries in the index when they
+happen to share a name with a nushell builtin.
+
+```nix
+home.activation.inshellah-index = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+  ${pkgs.inshellah}/bin/inshellah index ${config.home.profileDirectory} --shell zsh
+'';
+```
+
 ## troubleshooting
 
 **completions not appearing**: check that the system index exists
@@ -269,7 +301,7 @@ is configured.
 
 **missing completions for a specific command**: check if it's a nushell
 built-in (`help commands | where name == "thecommand"`) — built-ins
-are excluded.
+are excluded when `shells` only has nushell.
 
 **a command's arguments don't complete**: the external completer fires for
 any external on `PATH`, but only commands linked into the system profile or
@@ -280,12 +312,14 @@ just without a prebuilt cache.
 **stale completions after update**: the index regenerates on every
 `nixos-rebuild`. if a command changed its flags, rebuild.
 
-**build-time errors**: index-time discovery requires a working `nu`.
+**build-time errors**: when `shells` only has nushell, index-time
+discovery requires a working `nu`.
 `programs.inshellah.nushellPackage` controls which nushell package is
 used by the module. if discovery or indexing fails, the build fails rather
 than silently shipping an empty or incomplete index. when cross compiling, a
 package is indexed with its build-platform twin, the spliced build package or
 the stock build package when the package is the unmodified stock one. a package
 without a twin, such as an override, is skipped with a warning naming it. a
-`nushellPackage` or `package` without one fails evaluation, since
+`nushellPackage` (when `shells` only has nushell) or `package` without one
+fails evaluation, since
 host-platform tools cannot run on the build machine.
