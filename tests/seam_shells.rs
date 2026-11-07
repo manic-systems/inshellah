@@ -159,7 +159,7 @@ fn expect(got: &str, want: &str) {
 }
 
 const BASH: &str = r#"
-set -e
+set -eu
 source "$SHIM/inshellah.bash"
 comp() { comp_as demotool "$1"; }
 comp_as() {
@@ -217,7 +217,7 @@ unwrap 'nohup demotool al'
 unwrap 'nohup nosuchtool al'
 INSHELLAH_TAKEOVER=1 unwrap 'nohup demotool al'
 INSHELLAH_TAKEOVER=1 unwrap 'nohup nosuchtool al'
-_comp_complete_longopt() { COMPREPLY=(longopt); }
+_comp_complete_longopt() { COMPREPLY=(longopt); [[ ${COMPREPLY-} == *= ]] && :; }
 _inshellah_wrap_longopt
 _inshellah_wrap_longopt
 longopt() {
@@ -226,14 +226,25 @@ longopt() {
     [[ $1 == *' ' ]] && COMP_WORDS+=("")
     COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
     COMPREPLY=()
-    _comp_complete_longopt diff "${COMP_WORDS[COMP_CWORD]}" x
+    local rc=0
+    _comp_complete_longopt diff "${COMP_WORDS[COMP_CWORD]}" x || rc=$?
     printf '%s|' "longopt $1" "${COMPREPLY[@]}"
-    echo
+    echo " rc=$rc"
+}
+nested() {
+    COMP_LINE=$1 COMP_POINT=${#1}
+    _inshellah_nested && echo "open $1" || echo "closed $1"
 }
 longopt 'diff --he'
 longopt 'diff <(demotool al'
 longopt 'diff <(builtin command demotool al'
 longopt 'diff `demotool alpha r'
+longopt 'diff <(true) --ig'
+longopt 'cat <(true) --'
+longopt 'diff <(true) <(demotool al'
+for line in 'a <(b) c' 'a $(b) $(c' 'a $(echo ")") --x' 'a $(echo ")" --x' '"$(a' 'a "$(b)" c' 'a <(b $(c) d' 'a `b` `c' 'a `b` c' 'a "`b' 'a $(echo '\''(' 'a (b) c' 'a $((1+2)) c' 'a $(b \)' 'a "<(b' 'x'\''$('\'' y'; do
+    nested "$line"
+done
 owns() {
     COMP_LINE="$*"
     COMP_POINT=${#COMP_LINE}
@@ -324,10 +335,29 @@ unwrap nohup demotool al|bc|
 unwrap nohup nosuchtool al|bc|
 unwrap nohup demotool al|alpha|
 unwrap nohup nosuchtool al|bc|
-longopt diff --he|longopt|
-longopt diff <(demotool al|alpha|
-longopt diff <(builtin command demotool al|alpha|
-longopt diff `demotool alpha r|run|reset|
+longopt diff --he|longopt| rc=1
+longopt diff <(demotool al|alpha| rc=0
+longopt diff <(builtin command demotool al|alpha| rc=0
+longopt diff `demotool alpha r|run|reset| rc=0
+longopt diff <(true) --ig|longopt| rc=1
+longopt cat <(true) --|longopt| rc=1
+longopt diff <(true) <(demotool al|alpha| rc=0
+closed a <(b) c
+open a $(b) $(c
+closed a $(echo ")") --x
+open a $(echo ")" --x
+open "$(a
+closed a "$(b)" c
+open a <(b $(c) d
+open a `b` `c
+closed a `b` c
+open a "`b
+open a $(echo '(
+closed a (b) c
+closed a $((1+2)) c
+open a $(b \)
+closed a "<(b
+closed x'$(' y
 owns builtin ki
 owns builtin kill
 asks builtin kill -

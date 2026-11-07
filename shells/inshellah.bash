@@ -1,12 +1,46 @@
 # inshellah completions for bash 4.1 or newer. load with
 #   eval "$(inshellah init bash)"
 
-# bash names the outer command in $1, but inside a `$(` still open at the
-# cursor the command being typed is another one. only inshellah's lexer can
-# tell which, so a line holding an opener is decided after it answers.
+# bash names the outer command in $1, but inside a `$(`, `<(`, `>(` or
+# backtick still open at the cursor the command being typed is another one.
+# only inshellah's lexer can tell which, so a line holding an open opener is
+# decided after it answers. substitutions already closed do not count.
 _inshellah_nested() {
-    local line=${COMP_LINE:0:COMP_POINT}
-    [[ $line == *'$('* || $line == *'<('* || $line == *'>('* || $line == *'`'* ]]
+    local line=" ${COMP_LINE:0:COMP_POINT}"
+    [[ $line == *'$('* || $line == *'<('* || $line == *'>('* || $line == *'`'* ]] || return 1
+    local stack= top ch rest i
+    for ((i = 0; i < ${#line}; i++)); do
+        ch=${line:i:1}
+        top=${stack: -1}
+        if [[ $ch == "\\" ]]; then
+            i=$((i + 1))
+        elif [[ $top == '"' ]]; then
+            if [[ $ch == '"' ]]; then
+                stack=${stack%?}
+            elif [[ $ch == '`' ]]; then
+                stack+='`'
+            elif [[ $ch == '$' && ${line:i+1:1} == '(' ]]; then
+                stack+='('
+                i=$((i + 1))
+            fi
+        elif [[ $ch == "'" ]]; then
+            rest=${line:i+1}
+            [[ $rest == *"'"* ]] && rest=${rest%%"'"*}
+            i=$((i + ${#rest} + 1))
+        elif [[ $ch == '"' ]]; then
+            stack+='"'
+        elif [[ $ch == '`' ]]; then
+            if [[ $top == '`' ]]; then stack=${stack%?}; else stack+='`'; fi
+        elif [[ $ch == '(' ]]; then
+            case ${line:i:1}${line:i-1:1} in
+                '($' | '(<' | '(>') stack+='(' ;;
+                *) stack+=p ;;
+            esac
+        elif [[ $ch == ')' && ($top == '(' || $top == p) ]]; then
+            stack=${stack%?}
+        fi
+    done
+    [[ $stack == *['(`']* ]]
 }
 
 # the values parse_bool accepts in the config, so every hook reads the
@@ -214,6 +248,12 @@ _inshellah_borrow() {
 # bash-completion completes builtin names after builtin, the operands of
 # kill and of external commands are inshellah's and the rest stays with bash
 _inshellah_complete_builtin() {
+    local rc=0
+    _inshellah_complete_builtin_body "$@" || rc=$?
+    return $rc
+}
+
+_inshellah_complete_builtin_body() {
     if ! _inshellah_behind_builtin; then
         _inshellah_answer "$@" && return 0
         compopt -o default 2>/dev/null || true
@@ -223,6 +263,12 @@ _inshellah_complete_builtin() {
 }
 
 _inshellah_complete() {
+    local rc=0
+    _inshellah_complete_body "$@" || rc=$?
+    return $rc
+}
+
+_inshellah_complete_body() {
     local takeover=
     _inshellah_takeover && takeover=1
     if [[ -z $takeover ]] && ! _inshellah_nested; then
@@ -252,7 +298,7 @@ _inshellah_wrap_minimal() {
             _inshellah_wraps=$((${_inshellah_wraps:-0} + 1))
             orig=_inshellah_orig$_inshellah_wraps
             eval "$orig$(declare -f "$name")"
-            eval "$name() { _inshellah_answer \"\$@\" || $orig$name \"\$@\"; }"
+            eval "$name() { local rc=0; _inshellah_answer \"\$@\" || $orig$name \"\$@\" || rc=\$?; return \$rc; }"
         fi
         return 0
     done
@@ -269,7 +315,7 @@ _inshellah_wrap_longopt() {
         _inshellah_wraps=$((${_inshellah_wraps:-0} + 1))
         orig=_inshellah_orig$_inshellah_wraps
         eval "$orig$(declare -f "$name")"
-        eval "$name() { if _inshellah_nested; then _inshellah_answer \"\$@\" || compopt -o default 2>/dev/null; return 0; fi; $orig$name \"\$@\"; }"
+        eval "$name() { local rc=0; if _inshellah_nested; then _inshellah_answer \"\$@\" || compopt -o default 2>/dev/null || true; else $orig$name \"\$@\" || rc=\$?; fi; return \$rc; }"
     done
 }
 
@@ -284,7 +330,7 @@ _inshellah_wrap_unwrappers() {
         _inshellah_wraps=$((${_inshellah_wraps:-0} + 1))
         orig=_inshellah_orig$_inshellah_wraps
         eval "$orig$(declare -f "$name")"
-        eval "$name() { ! _inshellah_takeover || ! _inshellah_answer \"\$@\" || return 0; $orig$name \"\$@\"; }"
+        eval "$name() { local rc=0; ! _inshellah_takeover || ! _inshellah_answer \"\$@\" || return 0; $orig$name \"\$@\" || rc=\$?; return \$rc; }"
     done
 }
 
