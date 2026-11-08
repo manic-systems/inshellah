@@ -131,10 +131,18 @@
                 ${phase}
                 touch $out
               '';
-          # nushell is in the rust check inputs so the composed seam test
-          # (tests/seam_nu.rs) runs the real binary through the real nu
-          # tokenizer instead of self-skipping when nu is absent.
-          rust = mkShellCheck "inshellah-rust-check" (rustInputs ++ [ pkgs.nushell ]) rustCheckPhase;
+          # the shells are in the rust check inputs so the composed seam tests
+          # (tests/seam_nu.rs, tests/seam_shells.rs) run the real binary
+          # through each real shell instead of self-skipping when it is absent.
+          rust = mkShellCheck "inshellah-rust-check" (
+            rustInputs
+            ++ [
+              pkgs.nushell
+              pkgs.bashInteractive
+              pkgs.zsh
+              pkgs.fish
+            ]
+          ) rustCheckPhase;
           nushell = mkShellCheck "inshellah-nushell-check" [ pkgs.nushell ] nushellCheckPhase;
           package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         in
