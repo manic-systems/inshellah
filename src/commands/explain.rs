@@ -19,6 +19,7 @@ use inshellah::{
     },
     config::Config,
     dynamic::provider_kind,
+    shell::Shell,
     store::{
         ExeIdentity,
         file_type_of,
@@ -42,6 +43,7 @@ use super::{
 pub fn run(
     dirs: Dirs,
     timeout_override: Option<u64>,
+    shell: Shell,
     line: Line,
     raw: Vec<String>,
 ) -> io::Result<()> {
@@ -50,7 +52,15 @@ pub fn run(
     let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
     let (user_dir, system_dirs) = default_user_dir_and_system_dirs(dirs.resolve_lenient());
     let mandirs = mandirs_for_system_dirs(&system_dirs);
-    explain(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
+    explain(
+        &spans,
+        &user_dir,
+        &system_dirs,
+        &mandirs,
+        timeout_ms,
+        shell,
+        &cfg,
+    )
 }
 
 fn explain(
@@ -59,9 +69,18 @@ fn explain(
     system_dirs: &[PathBuf],
     mandirs: &[PathBuf],
     timeout_ms: u64,
+    shell: Shell,
     cfg: &Config,
 ) -> io::Result<()> {
-    let decision = decide(spans, user_dir, system_dirs, mandirs, timeout_ms, cfg);
+    let decision = decide(
+        spans,
+        user_dir,
+        system_dirs,
+        mandirs,
+        timeout_ms,
+        shell,
+        cfg,
+    );
     let trace = &decision.trace;
     let mut out = io::stdout().lock();
 

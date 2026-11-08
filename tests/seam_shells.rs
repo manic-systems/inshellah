@@ -173,6 +173,7 @@ comp_as 'x$(demotool --color=always |x$(demotool --color=always  ' echo 'echo "x
 comp_as '"$(demotool "alpha"' echo 'echo "$(demotool "al'
 comp_as 'alpha' echo 'echo `demotool al'
 comp_as 'alpha' command 'command demotool al'
+comp_as 'alpha' builtin 'builtin builtin exec demotool al'
 comp_as '' builtin 'builtin demotool al'
 takeover() {
     local state=off
@@ -363,11 +364,19 @@ comp '--out=pdir/sub/ S[] {--out=pdir/sub/  -- directory}' 'dirtool --out=pdir/'
 setopt ksharrays nomatch kshglob shwordsplit nounset
 comp 'run|reset {run    -- run it|reset  -- reset it}' 'demotool alpha r'
 comp '--out=pdir/ S[] {--out=pdir/  -- directory}' 'dirtool --out=pd'
+first comp 'TERM|TTOU|TSTP|TTIN {TERM  -- terminate|TTOU  -- background write to the terminal|TSTP  -- stop from the terminal|TTIN  -- background read from the terminal}' 'kill -s TERM'
+first kindof signals 'kill -n '
+first kindof pids 'command kill -n '
+first kindof pids 'noglob exec -a k kill -n '
+first kindof signals 'builtin kill -n '
 _inshellah_prev_first=_prev first comp 'prev' 'command exec demotool al'
+_inshellah_prev_first=_prev first comp 'prev' 'command builtin kill -'
+first comp 'alpha {alpha  -- first}' 'builtin command demotool al'
 first comp 'alpha {alpha  -- first}' 'exec -cl -a name demotool al'
 first comp 'alpha {alpha  -- first}' 'noglob command -p -- demotool al'
 _inshellah_prev_first=_prev first comp 'prev' 'command -v demotool al'
 _inshellah_prev_first=_prev first comp 'prev' 'builtin demotool al'
+_inshellah_prev_first=_prev service=-first- comp 'prev' 'kill -s TERM'
 first comp 'alpha {alpha  -- first}' 'demotool al'
 memos 1
 _inshellah_reset

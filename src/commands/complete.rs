@@ -41,9 +41,12 @@ use inshellah::{
             Detection,
             Protocol,
         },
+        builtin_completions,
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
         provider_kind,
+        provider_lone_capital,
+        provider_signal_word,
         provider_takes_value,
     },
     executable::{
@@ -133,7 +136,16 @@ pub fn run(
     let response = if parsed.as_ref().is_some_and(|bash| bash.redirect) {
         Response::Defer
     } else {
-        decide(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg).response
+        decide(
+            &spans,
+            &user_dir,
+            &system_dirs,
+            &mandirs,
+            timeout_ms,
+            shell,
+            &cfg,
+        )
+        .response
     };
     let mut out = io::stdout().lock();
     match shell {
@@ -260,6 +272,7 @@ pub fn decide(
     system_dirs: &[PathBuf],
     mandirs: &[PathBuf],
     timeout_ms: u64,
+    shell: Shell,
     cfg: &Config,
 ) -> Decision {
     let mut all_dirs: Vec<PathBuf> = Vec::with_capacity(system_dirs.len() + 1);
@@ -271,7 +284,7 @@ pub fn decide(
         spans: spans.clone(),
         ..Trace::default()
     };
-    if spans.is_empty() || (explicit_cmd_path.is_none() && find_in_path(&spans[0]).is_none()) {
+    if unanswerable(raw_spans, &spans, explicit_cmd_path.as_deref(), shell) {
         return Decision {
             response: Response::Defer,
             reason: Reason::NotOnPath,
@@ -287,13 +300,12 @@ pub fn decide(
     let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, &mut trace);
     trace.dirs.clone_from(&dirs);
 
-    if let Some(response) = value_provider(
-        &spans,
-        explicit_cmd_path.as_deref(),
-        timeout_ms,
-        cfg,
-        &mut trace,
-    ) {
+    let builtin = builtin_provider(raw_spans, shell, timeout_ms, cfg, &mut trace);
+    let provided = builtin.or_else(|| {
+        let path = explicit_cmd_path.as_deref();
+        value_provider(&spans, path, timeout_ms, cfg, &mut trace)
+    });
+    if let Some(response) = provided {
         return Decision {
             response,
             reason: Reason::ValueProvider,
@@ -366,7 +378,7 @@ pub fn decide(
     trace.protocol = protocol_of(user_dir, &trace, timeout_ms);
     // spans are post-elevation, so `sudo nix ...` reaches this as
     // `[nix, ...]` and hits the nix branch.
-    let reply = if typing_flag && !candidates.is_empty() {
+    let reply = if typing_flag && flags_answer(&spans, &candidates, &last_token, shell) {
         Reply::Silent
     } else {
         dynamic_complete_candidates_with_path(
@@ -379,6 +391,7 @@ pub fn decide(
             },
             FlagLists::of(lookup(&dirs, &cmd_name).as_ref(), found.as_ref()).cached(),
             trace.protocol,
+            shell,
             cfg,
         )
     };
@@ -393,6 +406,72 @@ pub fn decide(
         reason,
         trace,
     }
+}
+
+/// whether the cached flags settle a flag word alone. a leading `-SIGNAL` is a
+/// provider's, and a lone capital such as `-T` only matches flags by case
+/// folding, so the signal it starts is offered unless a flag is spelled so.
+fn flags_answer(spans: &[String], flags: &[Candidate], last_token: &str, shell: Shell) -> bool {
+    !flags.is_empty()
+        && !provider_signal_word(spans, shell)
+        && (!provider_lone_capital(spans, shell)
+            || flags.iter().any(|flag| flag.value.starts_with(last_token)))
+}
+
+/// whether the line is not inshellah's to complete. behind `builtin` only the
+/// shell's own kill and a `command` or `exec` running a binary are inshellah's.
+fn unanswerable(
+    raw_spans: &[String],
+    spans: &[String],
+    explicit: Option<&Path>,
+    shell: Shell,
+) -> bool {
+    let behind_builtin = raw_spans.first().is_some_and(|word| word == "builtin")
+        && builtin_kill_at(raw_spans, shell).is_none()
+        && !runs_binary_behind_builtin(raw_spans);
+    behind_builtin || spans.is_empty() || (explicit.is_none() && find_in_path(&spans[0]).is_none())
+}
+
+fn runs_binary_behind_builtin(raw_spans: &[String]) -> bool {
+    let at = raw_spans
+        .iter()
+        .take_while(|word| *word == "builtin")
+        .count();
+    at + 1 < raw_spans.len() && matches!(raw_spans[at].as_str(), "command" | "exec")
+}
+
+/// where the shell's own `kill` starts. `builtin` always reaches it and bash's
+/// `command` does too, while zsh's `command` and every `exec` run the binary.
+fn builtin_kill_at(raw_spans: &[String], shell: Shell) -> Option<usize> {
+    let mut at = 0;
+    while let Some(word) = raw_spans.get(at) {
+        match word.as_str() {
+            "kill" => return (at == 0 || at + 1 < raw_spans.len()).then_some(at),
+            "builtin" => at += 1,
+            "command" if shell == Shell::Bash => {
+                at += 1;
+                while raw_spans.get(at).is_some_and(|flag| flag == "-p") {
+                    at += 1;
+                }
+            },
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// `kill` typed as the first word is the shell's own builtin.
+fn builtin_provider(
+    raw_spans: &[String],
+    shell: Shell,
+    timeout_ms: u64,
+    cfg: &Config,
+    trace: &mut Trace,
+) -> Option<Response> {
+    let kill = builtin_kill_at(raw_spans, shell)?;
+    let candidates = builtin_completions(&raw_spans[kill..], shell, timeout_ms, cfg)?;
+    trace.dynamic = Some(candidates.len());
+    Some(Response::or_defer(candidates))
 }
 
 fn value_provider(
