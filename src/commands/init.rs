@@ -14,7 +14,8 @@ pub fn run(shell: Shell) -> io::Result<()> {
     let script = match shell {
         Shell::Nushell => include_str!("../../shells/inshellah.nu"),
         Shell::Bash => include_str!("../../shells/inshellah.bash"),
-        Shell::Zsh | Shell::Fish => {
+        Shell::Zsh => include_str!("../../shells/inshellah.zsh"),
+        Shell::Fish => {
             return Err(io::Error::other(format!("no {shell} hook yet")));
         },
     };

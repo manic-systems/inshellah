@@ -291,3 +291,131 @@ fn bash_shim_seam() {
     };
     expect(&out, "done");
 }
+
+const ZSH: &str = r#"
+# nixos /etc/zshenv resets PATH even under -f
+export PATH=$SEAM_PATH
+source "$SHIM/inshellah.zsh"
+typeset -A compstate
+compadd() {
+    emulate -L zsh
+    local -a _vals _displays
+    local _suffix=
+    while (($#)); do
+        case $1 in
+            -a) _vals=("${(@P)2}"); shift 2 ;;
+            -d) _displays=("${(@P)2}"); shift 2 ;;
+            -V) shift 2 ;;
+            -S) _suffix=" S[$2]"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    print -rn -- "${(j:|:)_vals}$_suffix"
+    (($#_displays)) && print -rn -- " {${(j:|:)_displays}}"
+    return 0
+}
+_description() { eval "$3=()" }
+_files() { print -rn -- ' +files' }
+_comp_options=(nullglob)
+_default() { local g; g=(/nonexistent*); print -rn -- 'default' }
+_prev() { local g; g=(/nonexistent*); print -rn -- 'prev' }
+setup() {
+    emulate -L zsh
+    words=("${(@z)1}")
+    [[ $1 == *' ' ]] && words+=('')
+    compstate[context]=${ctx:-command}
+    CURRENT=$#words
+    PREFIX=$words[-1]
+}
+run() {
+    _inshellah_reset
+    setup "$1"
+    _inshellah >"$HOME/out"
+    got=$(<"$HOME/out")
+}
+comp() { run "$2"; [[ $got == "$1" ]] || print -r -- "FAIL $2 want <$1> got <$got>" }
+kindof() {
+    run "$2"
+    local kind=pids
+    [[ $got == *'-- TERM'[\|\}]* ]] && kind=signals
+    [[ $kind == "$1" ]] || print -r -- "FAIL $2 want $1 got $kind"
+}
+memos() { emulate -L zsh; local -a k=(${(k)_inshellah_memo}); [[ $#k == "$1" ]] || print -r -- "FAIL memo want $1 got $#k" }
+first() { INSHELLAH_TAKEOVER=1 service=-first- "$@" }
+comp 'alpha {alpha  -- first}' 'demotool al'
+COLUMNS=12 comp 'run|reset {run    -...|reset  -...}' 'demotool alpha r'
+comp '--color=always|--color=never' 'demotool --color='
+comp 'has space {has space  -- quoted}' 'demotool has'
+comp 'alpha|beta|has space {alpha      -- first|beta       -- second|has space  -- quoted}' 'demotool --color always '
+comp 'default' 'pwd -'
+_inshellah_prev_default=_prev comp 'prev' 'pwd -'
+first comp '' 'demotool alpha run '
+service=-first- comp '' 'demotool al'
+INSHELLAH_TAKEOVER=" On " service=-first- comp 'alpha {alpha  -- first}' 'demotool al'
+_inshellah_prev_first=_prev service=-first- comp 'prev' 'demotool al'
+ctx=redirect INSHELLAH_TAKEOVER=1 _inshellah_prev_first=_prev service=-first- comp 'prev' 'cat < pd'
+ctx=redirect service=-first- comp '' 'cat < pd'
+ctx=redirect service=-default- comp '' 'cat < pd'
+mkdir -p $HOME/pdir/sub
+cd $HOME
+comp '--out=pdir/ S[] {--out=pdir/  -- directory}' 'dirtool --out=pd'
+comp '--out=pdir/sub/ S[] {--out=pdir/sub/  -- directory}' 'dirtool --out=pdir/'
+setopt ksharrays nomatch kshglob shwordsplit nounset
+comp 'run|reset {run    -- run it|reset  -- reset it}' 'demotool alpha r'
+comp '--out=pdir/ S[] {--out=pdir/  -- directory}' 'dirtool --out=pd'
+_inshellah_prev_first=_prev first comp 'prev' 'command exec demotool al'
+first comp 'alpha {alpha  -- first}' 'exec -cl -a name demotool al'
+first comp 'alpha {alpha  -- first}' 'noglob command -p -- demotool al'
+_inshellah_prev_first=_prev first comp 'prev' 'command -v demotool al'
+_inshellah_prev_first=_prev first comp 'prev' 'builtin demotool al'
+first comp 'alpha {alpha  -- first}' 'demotool al'
+memos 1
+_inshellah_reset
+memos 0
+typeset -A _comps
+_comps[-default-]=_prev
+compdef() { _comps[$2]=$1 }
+_inshellah_register
+_inshellah_register
+got="${_comps[-first-]} ${_comps[-default-]} ${(j:,:)compprefuncs} $_inshellah_prev_default"
+[[ $got == '_inshellah _inshellah _inshellah_reset _prev' ]] || print -r -- "FAIL registered $got"
+print done
+"#;
+
+#[test]
+fn zsh_shim_seam() {
+    let fixture = Fixture::new("inshellah-seam-zsh");
+    let Some(out) = fixture.run("zsh", &["-f", "-c"], ZSH) else {
+        eprintln!("skipping: zsh not found");
+        return;
+    };
+    expect(&out, "done");
+}
+
+#[test]
+fn zsh_shim_survives_strict_options() {
+    let fixture = Fixture::new("inshellah-seam-zsh-strict");
+    for (strict, errexit) in [
+        ("set -e", "on"),
+        ("set -eu", "on"),
+        ("setopt err_return", "off"),
+    ] {
+        let script = format!(
+            r#"
+export PATH=$SEAM_PATH
+{strict}
+typeset -A _comps
+compdef() {{ _comps[$2]=$1 }}
+source "$SHIM/inshellah.zsh"
+before=$options[errexit]
+_inshellah_register
+print -r -- "survived $before $options[errexit] $_comps[-first-]"
+"#
+        );
+        let Some(out) = fixture.run("zsh", &["-f", "-i", "-c"], &script) else {
+            eprintln!("skipping: zsh not found");
+            return;
+        };
+        expect(&out, &format!("survived {errexit} {errexit} _inshellah"));
+    }
+}
