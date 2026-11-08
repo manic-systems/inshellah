@@ -54,6 +54,8 @@ let
       systemPackages ? [ ],
       extraScrapePackages ? [ ],
       ignoreCommands ? [ ],
+      shells ? [ "nushell" ],
+      extraConfig ? { },
     }:
     lib.evalModules {
       specialArgs = { inherit pkgs; };
@@ -66,9 +68,10 @@ let
             enable = true;
             package = fakeInshellah;
             nushellPackage = fakeNushell;
-            inherit extraScrapePackages ignoreCommands;
+            inherit extraScrapePackages ignoreCommands shells;
           };
         }
+        extraConfig
       ];
     };
   mixedSetup =
@@ -87,6 +90,21 @@ let
   manOnlySetup =
     (evalIndexModule { systemPackages = [ manOnlyPackage ]; }).config.environment.extraSetup;
   emptyEvaluation = evalIndexModule { };
+  posixEvaluation = evalIndexModule {
+    systemPackages = [ profilePackage ];
+    shells = [
+      "bash"
+      "zsh"
+      "fish"
+    ];
+    extraConfig = {
+      programs.bash.enable = true;
+      programs.bash.interactiveShellInit = "echo other-bash-hook";
+      programs.zsh.enable = true;
+    };
+  };
+  posixSetup = posixEvaluation.config.environment.extraSetup;
+  posixHooks = lib.mapAttrs (_: shell: shell.interactiveShellInit) posixEvaluation.config.programs;
   wrapperPackage = lib.findFirst (
     pkg: pkg.outPath != fakeInshellah.outPath && lib.getName pkg == "inshellah"
   ) (throw "generated inshellah wrapper not found") emptyEvaluation.config.environment.systemPackages;
@@ -122,6 +140,48 @@ pkgs.runCommand "inshellah-module-indexing-check" { } ''
     # quoted on purpose, an unmatched bin/* glob used to index a command named *
     test ! -e "$out/share/inshellah/command-*"
   )
+
+  (
+    export out="$TMPDIR/posix-profile"
+    mkdir -p "$out/bin"
+    ln -s ${profilePackage}/bin/profile-tool "$out/bin/profile-tool"
+    ${posixSetup}
+    test -f "$out/share/inshellah/command-profile-tool"
+    test ! -e "$out/share/nushell/vendor/autoload/inshellah.nu"
+  )
+  grep -q -- '--shell bash' <<'EOF'
+  ${posixSetup}
+  EOF
+  ! grep -q '${fakeNushell}' <<'EOF'
+  ${posixSetup}
+  EOF
+  grep -q _inshellah_complete <<'EOF'
+  ${posixHooks.bash}
+  EOF
+  # bash-completion's own setup lands in interactiveShellInit too, the hook goes after it
+  test "$(grep -n -e other-bash-hook -e '_inshellah_complete()' <<'EOF' | cut -d: -f2- | head -1
+  ${posixHooks.bash}
+  EOF
+  )" = 'echo other-bash-hook'
+  test ${toString (builtins.length posixEvaluation.config.warnings)} = 1
+  grep -q 'programs.fish.enable' <<'EOF'
+  ${lib.concatStringsSep "\n" posixEvaluation.config.warnings}
+  EOF
+  grep -q _inshellah_register <<'EOF'
+  ${posixHooks.zsh}
+  EOF
+  grep -q __inshellah_complete <<'EOF'
+  ${posixHooks.fish}
+  EOF
+  test -z ${
+    lib.escapeShellArg (
+      lib.concatMapStrings (shell: emptyEvaluation.config.programs.${shell}.interactiveShellInit) [
+        "bash"
+        "zsh"
+        "fish"
+      ]
+    )
+  }
 
   export INSHELLAH_RECORD_DIR="$TMPDIR/wrapper-record"
   export XDG_CACHE_HOME="$TMPDIR/cache"
