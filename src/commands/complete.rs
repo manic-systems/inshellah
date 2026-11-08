@@ -59,6 +59,11 @@ use inshellah::{
         },
         nushell::nushell_type_of_param,
     },
+    shell::{
+        BASH_WORDBREAKS,
+        BashLine,
+        Shell,
+    },
     store::{
         self,
         ExeIdentity,
@@ -72,23 +77,107 @@ use inshellah::{
         write_fact,
     },
 };
+use pound::Parse;
 
-use super::wrappers::wrapped_command;
+use super::{
+    common::Dirs,
+    wrappers::wrapped_command,
+};
 
 const ELEVATION_COMMANDS: &[&str] = &["sudo", "doas", "pkexec", "su", "run0"];
 
+#[derive(Parse, Debug)]
+pub struct Line {
+    /// a bash command line up to the cursor, split here instead of SPANs
+    #[pound(long, value_name = "LINE")]
+    line:       Option<String>,
+    /// bash's `COMP_WORDBREAKS` for --line
+    #[pound(long, value_name = "CHARS")]
+    wordbreaks: Option<String>,
+}
+
+impl Line {
+    /// the spans to complete, and the line they were split from.
+    ///
+    /// # Errors
+    /// fails when both --line and SPANs are given.
+    pub fn spans(self, raw: Vec<String>) -> io::Result<(Vec<String>, Option<BashLine>)> {
+        let Some(text) = self.line else {
+            return Ok((raw, None));
+        };
+        if !raw.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--line and SPANs exclude each other",
+            ));
+        }
+        let parsed = BashLine::parse(&text, self.wordbreaks.as_deref().unwrap_or(BASH_WORDBREAKS));
+        Ok((parsed.words.clone(), Some(parsed)))
+    }
+}
+
+/// # Errors
+/// fails when both --line and SPANs are given, or stdout cannot be written.
 pub fn run(
-    raw_spans: &[String],
-    user_dir: &Path,
-    system_dirs: &[PathBuf],
-    mandirs: &[PathBuf],
-    timeout_ms: u64,
-    cfg: &Config,
+    dirs: Dirs,
+    timeout_override: Option<u64>,
+    shell: Shell,
+    line: Line,
+    raw: Vec<String>,
 ) -> io::Result<()> {
-    let decision = decide(raw_spans, user_dir, system_dirs, mandirs, timeout_ms, cfg);
+    let (spans, parsed) = line.spans(raw)?;
+    let cfg = Config::from_env();
+    let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
+    let (user_dir, system_dirs) = default_user_dir_and_system_dirs(dirs.resolve_lenient());
+    let mandirs = mandirs_for_system_dirs(&system_dirs);
+    let response = if parsed.as_ref().is_some_and(|bash| bash.redirect) {
+        Response::Defer
+    } else {
+        decide(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg).response
+    };
     let mut out = io::stdout().lock();
-    serde_json::to_writer(&mut out, &decision.response)?;
-    writeln!(out)
+    match shell {
+        Shell::Nushell => {
+            serde_json::to_writer(&mut out, &response)?;
+            writeln!(out)
+        },
+        Shell::Bash => {
+            let bash = parsed.unwrap_or_default();
+            let inserted = for_bash(response, &bash);
+            let command = bash.words.first().map_or("", String::as_str);
+            writeln!(out, "{}", inserted.lines_for(command))
+        },
+        Shell::Zsh | Shell::Fish => writeln!(out, "{}", response.lines()),
+    }
+}
+
+/// candidates as readline inserts them, dropping ones it can't. readline
+/// replaces the word with the candidates' common prefix, so a fuzzy match
+/// that doesn't start with the typed word would delete what was typed.
+fn for_bash(response: Response, line: &BashLine) -> Response {
+    let typed = line.words.last().map_or("", String::as_str);
+    let insert = |candidates: Vec<Candidate>| -> Vec<Candidate> {
+        candidates
+            .into_iter()
+            .filter(|candidate| candidate.value.starts_with(typed))
+            .filter_map(|candidate| {
+                let value = line.insertion(&candidate.value)?;
+                Some(Candidate::new(value, candidate.description))
+            })
+            .collect()
+    };
+    match response {
+        Response::Defer => Response::Defer,
+        Response::Candidates(candidates) if candidates.is_empty() => {
+            Response::Candidates(candidates)
+        },
+        Response::WithFiles(candidates) if line.lead.is_empty() => {
+            Response::WithFiles(insert(candidates))
+        },
+        Response::Candidates(candidates) | Response::WithFiles(candidates) => {
+            Response::or_defer(insert(candidates))
+        },
+    }
 }
 
 /// what `complete` answers, why, and what it looked at on the way.

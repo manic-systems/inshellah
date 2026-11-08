@@ -79,8 +79,11 @@ and left alone for an attached one.
 ## setup
 
 ```nu
+# once, writes the completer next to config.nu
+inshellah init nushell | save -f ~/.config/nushell/inshellah.nu
+
 # ~/.config/nushell/config.nu
-source /path/to/inshellah-completer.nu
+source ~/.config/nushell/inshellah.nu
 ```
 
 the bundled shim wraps `inshellah complete` defensively: malformed JSON

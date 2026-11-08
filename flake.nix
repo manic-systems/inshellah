@@ -107,10 +107,10 @@
             export PATH="${fakeCompletionBackends}/bin:$PATH"
             export INSHELLAH_STATIC_FILE="$TMPDIR/inshellah-static.json"
             : > "$INSHELLAH_STATIC_FILE"
-            nu --no-config-file -c 'source ${./nix/inshellah-completer.nu}; source ${./tests/nushell-completer.nu}'
+            nu --no-config-file -c 'source ${./shells/inshellah.nu}; source ${./tests/nushell-completer.nu}'
 
             cat > "$TMPDIR/config-load.nu" <<'EOF'
-            source ${./nix/inshellah-completer.nu}
+            source ${./shells/inshellah.nu}
 
             def activate [p: path] {
               sudo nix-env --set -p /nix/var/nix/profiles/system $p

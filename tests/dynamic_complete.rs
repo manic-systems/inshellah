@@ -330,6 +330,15 @@ impl Harness {
     }
 
     fn run(&self, spans: &[&str], extra_env: &[(&str, &str)]) -> (String, String, bool) {
+        self.run_for(None, spans, extra_env)
+    }
+
+    fn run_for(
+        &self,
+        shell: Option<&str>,
+        spans: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> (String, String, bool) {
         for path in self.aux_files.values() {
             fs::write(path, "").expect("reset aux file");
         }
@@ -338,6 +347,9 @@ impl Harness {
         // short --help budget so the static resolve doesn't sit on fakes
         // that don't respond to --help.
         cmd.arg("--timeout-ms").arg("200");
+        if let Some(name) = shell {
+            cmd.arg("--shell").arg(name);
+        }
         for span in spans {
             cmd.arg(span);
         }

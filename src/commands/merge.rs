@@ -40,15 +40,9 @@ pub struct Args {
 pub fn run(args: &Args) -> io::Result<()> {
     reject_empty(slice::from_ref(&args.dir), "--dir")?;
     let sources = read_sources(&args.sources)?;
-    cmd_merge(
-        &absolutize(&args.profile)?,
-        &sources,
-        &args.scrape.ignorelist()?,
-        &args.scrape.help_only_list()?,
-        &args.dir,
-        args.scrape.timeout_ms,
-        args.scrape.workers,
-    )
+    let profile = absolutize(&args.profile)?;
+    args.scrape
+        .with_opts(|opts| cmd_merge(&profile, &sources, &args.dir, opts))
 }
 
 fn read_sources(path: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {

@@ -1724,6 +1724,47 @@ fn index_skips_commands_reported_by_nushell_discovery() {
 }
 
 #[test]
+fn index_for_other_shells_keeps_nushell_builtin_names_without_asking_nu() {
+    let tmp = TempDir::new("inshellah-index-other-shells");
+    let root = tmp.path();
+    let prefix = root.join("prefix");
+    let bin_dir = prefix.join("bin");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_executable(&bin_dir, "nu", "#!/bin/sh\nexit 1\n");
+    write_executable(
+        &bin_dir,
+        "ls",
+        "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf 'Usage: ls\\nOptions:\\n  --demo \
+         demo\\n'; fi\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_inshellah"))
+        .arg("index")
+        .arg(&prefix)
+        .arg("--dir")
+        .arg(&cache_dir)
+        .arg("--timeout-ms")
+        .arg("1000")
+        .arg("--shell")
+        .arg("nushell,bash")
+        .env("PATH", path_with_bin(&bin_dir))
+        .output()
+        .expect("run inshellah index");
+    assert!(
+        output.status.success(),
+        "stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        cache_dir
+            .join(format!("{}.json", filename_of_command("ls")))
+            .exists(),
+        "bash runs the ls binary, so it should be indexed"
+    );
+}
+
+#[test]
 fn complete_max_completions_caps_results() {
     let (_tmp, cache_dir) = flag_demo_cache("inshellah-max-completions", &[
         "verbose", "version", "verify", "verbatim",

@@ -9,10 +9,13 @@ use std::{
 };
 
 use commands::common::Dirs;
-use inshellah::config::Config;
+use inshellah::{
+    config::Config,
+    shell::Shell,
+};
 use pound::Parse;
 
-/// nushell completions engine
+/// shell completions engine for nushell, bash, zsh and fish
 #[derive(Parse, Debug)]
 #[pound(
     name = "inshellah",
@@ -46,16 +49,22 @@ enum Cli {
     Manpage { file: PathBuf },
     /// batch-process manpages under a directory
     ManpageDir { dir: PathBuf },
-    /// nushell external completer, printing JSON candidates
+    /// shell completer, printing candidates for --shell
     ///
     /// a command missing from the index is resolved through its --help and
-    /// cached in the first --dir.
+    /// cached in the first --dir. nushell gets JSON, the other shells a
+    /// header line then one `value<TAB>description` per candidate.
     Complete {
         #[pound(flatten)]
         dirs:       Dirs,
         /// --help resolve timeout in milliseconds
         #[pound(long, value_name = "MS")]
         timeout_ms: Option<u64>,
+        /// the shell reading the answer
+        #[pound(long, default = { Shell::Nushell })]
+        shell:      Shell,
+        #[pound(flatten)]
+        line:       commands::complete::Line,
         /// the command line being completed
         #[pound(trailing, value_name = "SPAN")]
         spans:      Vec<String>,
@@ -67,6 +76,8 @@ enum Cli {
         /// --help resolve timeout in milliseconds
         #[pound(long, value_name = "MS")]
         timeout_ms: Option<u64>,
+        #[pound(flatten)]
+        line:       commands::complete::Line,
         /// the command line being completed
         #[pound(trailing, value_name = "SPAN")]
         spans:      Vec<String>,
@@ -117,6 +128,13 @@ enum Cli {
     },
     /// generate nushell completions for inshellah
     Completions,
+    /// print the script that hooks inshellah into SHELL
+    Init { shell: Shell },
+    /// write fish completion stubs for commands on PATH, printing their dir
+    FishStubs {
+        #[pound(flatten)]
+        dirs: Dirs,
+    },
 }
 
 #[expect(
@@ -167,16 +185,11 @@ fn main() {
         Cli::Complete {
             dirs,
             timeout_ms: timeout_override,
+            shell,
+            line,
             spans,
         } => {
-            let cfg = Config::from_env();
-            let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
-            let (user_dir, system_dirs) =
-                commands::complete::default_user_dir_and_system_dirs(dirs.resolve_lenient());
-            let mandirs = commands::complete::mandirs_for_system_dirs(&system_dirs);
-            if let Err(err) =
-                commands::complete::run(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
-            {
+            if let Err(err) = commands::complete::run(dirs, timeout_override, shell, line, spans) {
                 eprintln!("complete failed: {err}");
                 process::exit(1);
             }
@@ -184,16 +197,10 @@ fn main() {
         Cli::Explain {
             dirs,
             timeout_ms: timeout_override,
+            line,
             spans,
         } => {
-            let cfg = Config::from_env();
-            let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
-            let (user_dir, system_dirs) =
-                commands::complete::default_user_dir_and_system_dirs(dirs.resolve_lenient());
-            let mandirs = commands::complete::mandirs_for_system_dirs(&system_dirs);
-            if let Err(err) =
-                commands::explain::run(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
-            {
+            if let Err(err) = commands::explain::run(dirs, timeout_override, line, spans) {
                 eprintln!("explain failed: {err}");
                 process::exit(1);
             }
@@ -246,6 +253,18 @@ fn main() {
         Cli::Completions => {
             if let Err(err) = commands::completions::run(Cli::SPEC) {
                 eprintln!("completions failed: {err}");
+                process::exit(1);
+            }
+        },
+        Cli::Init { shell } => {
+            if let Err(err) = commands::init::run(shell) {
+                eprintln!("init failed: {err}");
+                process::exit(1);
+            }
+        },
+        Cli::FishStubs { dirs } => {
+            if let Err(err) = commands::fish_stubs::run(dirs) {
+                eprintln!("fish-stubs failed: {err}");
                 process::exit(1);
             }
         },

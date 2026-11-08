@@ -26,12 +26,34 @@ use inshellah::{
     },
 };
 
-use super::complete::{
-    StaleReason,
-    decide,
+use super::{
+    common::Dirs,
+    complete::{
+        Line,
+        StaleReason,
+        decide,
+        default_user_dir_and_system_dirs,
+        mandirs_for_system_dirs,
+    },
 };
 
+/// # Errors
+/// fails when both --line and SPANs are given, or stdout cannot be written.
 pub fn run(
+    dirs: Dirs,
+    timeout_override: Option<u64>,
+    line: Line,
+    raw: Vec<String>,
+) -> io::Result<()> {
+    let (spans, _) = line.spans(raw)?;
+    let cfg = Config::from_env();
+    let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
+    let (user_dir, system_dirs) = default_user_dir_and_system_dirs(dirs.resolve_lenient());
+    let mandirs = mandirs_for_system_dirs(&system_dirs);
+    explain(&spans, &user_dir, &system_dirs, &mandirs, timeout_ms, &cfg)
+}
+
+fn explain(
     spans: &[String],
     user_dir: &Path,
     system_dirs: &[PathBuf],
