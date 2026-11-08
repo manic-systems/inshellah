@@ -1,1 +1,1 @@
-[{"value":"check","description":"Analyze the package"},{"value":"clean","description":"Remove build artifacts"}]
+{"completions":[{"value":"check","description":"Analyze the package"},{"value":"clean","description":"Remove build artifacts"}],"options":{"cache":false}}

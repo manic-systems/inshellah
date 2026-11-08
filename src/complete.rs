@@ -73,10 +73,7 @@ impl Display for Response {
             Self::Candidates(candidates) => (candidates, false),
             Self::WithFiles(candidates) => (candidates, true),
         };
-        if with_files {
-            f.write_str(r#"{"completions":"#)?;
-        }
-        f.write_char('[')?;
+        f.write_str(r#"{"completions":["#)?;
         for (idx, candidate) in candidates.iter().enumerate() {
             if idx > 0 {
                 f.write_char(',')?;
@@ -88,11 +85,14 @@ impl Display for Response {
                 JsonEscaped(&candidate.description)
             )?;
         }
-        f.write_char(']')?;
+        // nushell 0.115+ reuses answers across prompts keyed only on the line,
+        // serving stale git refs and pids (nushell#19297). the opt-out is the
+        // unmerged nushell#19346, so this option does nothing until it lands.
+        f.write_str(r#"],"options":{"cache":false}"#)?;
         if with_files {
-            f.write_str(r#","fallback":true}"#)?;
+            f.write_str(r#","fallback":true"#)?;
         }
-        Ok(())
+        f.write_char('}')
     }
 }
 
