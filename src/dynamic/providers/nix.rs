@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: EUPL-1.2
 use crate::{
     complete::Candidate,
-    dynamic::shared::{
-        DynCtx,
-        Words,
-        run_with,
+    dynamic::{
+        Answer,
+        Files,
+        shared::{
+            DynCtx,
+            Words,
+            run_with,
+        },
     },
 };
 pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
+    answer(words, ctx).map(|answer| answer.candidates)
+}
+
+pub(super) fn answer(words: &Words, ctx: &DynCtx) -> Option<Answer> {
     let spans = words.spans();
     if spans.len() < 2 {
         return None;
@@ -21,11 +29,13 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     let raw = run_with(&cmd_args, ctx, |cmd| {
         cmd.env("NIX_GET_COMPLETIONS", nix_index.to_string());
     })?;
-    let mut rows: Vec<Candidate> = raw
-        .split('\n')
-        .skip(1)
-        .filter_map(parse_nix_completion_line)
-        .collect();
+    let mut lines = raw.split('\n');
+    let files = if lines.next().map(str::trim) == Some("filenames") {
+        Files::Alongside
+    } else {
+        Files::Replace
+    };
+    let mut rows: Vec<Candidate> = lines.filter_map(parse_nix_completion_line).collect();
     if rows.is_empty() {
         return None;
     }
@@ -40,14 +50,20 @@ pub(super) fn complete(words: &Words, ctx: &DynCtx) -> Option<Vec<Candidate>> {
     }
     let enrich = rows.len() < 6 && looks_like_flake_pkg(last);
     if !enrich {
-        return Some(rows);
+        return Some(Answer {
+            candidates: rows,
+            files,
+        });
     }
     for row in &mut rows {
         if row.description.is_empty() {
             row.description = nix_eval_description(&row.value, ctx).unwrap_or_default();
         }
     }
-    Some(rows)
+    Some(Answer {
+        candidates: rows,
+        files,
+    })
 }
 
 fn parse_nix_completion_line(line: &str) -> Option<Candidate> {

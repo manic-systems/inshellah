@@ -24,9 +24,11 @@ use inshellah::{
     complete::{
         Candidate,
         Response,
+        attached_directory_candidates,
         choice_candidates,
         entry_for_flag,
         generate_candidates,
+        path_candidates,
     },
     config::Config,
     dynamic::{
@@ -42,6 +44,7 @@ use inshellah::{
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
         provider_kind,
+        provider_takes_value,
     },
     executable::{
         find_in_path,
@@ -70,6 +73,8 @@ use inshellah::{
     },
 };
 
+use super::wrappers::wrapped_command;
+
 const ELEVATION_COMMANDS: &[&str] = &["sudo", "doas", "pkexec", "su", "run0"];
 
 pub fn run(
@@ -81,7 +86,9 @@ pub fn run(
     cfg: &Config,
 ) -> io::Result<()> {
     let decision = decide(raw_spans, user_dir, system_dirs, mandirs, timeout_ms, cfg);
-    writeln!(io::stdout().lock(), "{}", decision.response)
+    let mut out = io::stdout().lock();
+    serde_json::to_writer(&mut out, &decision.response)?;
+    writeln!(out)
 }
 
 /// what `complete` answers, why, and what it looked at on the way.
@@ -127,6 +134,7 @@ pub enum Reason {
     NotOnPath,
     ValueProvider,
     FlagChoices,
+    FlagPaths,
     ProviderWithFiles,
     Provider,
     ProviderOverFiles,
@@ -142,6 +150,10 @@ impl Display for Reason {
             Self::NotOnPath => "the command is not on PATH",
             Self::ValueProvider => "a live provider answers this command before the cache",
             Self::FlagChoices => "the flag takes one of a known set of values",
+            Self::FlagPaths => {
+                "the flag takes a path attached with =, listed here for shells that do not split \
+                 there"
+            },
             Self::ProviderWithFiles => "provider candidates sit beside nushell's file completion",
             Self::Provider => "the cache had nothing here, a live provider answered",
             Self::ProviderOverFiles => "a live provider answered a file-like position",
@@ -186,12 +198,15 @@ pub fn decide(
     let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, &mut trace);
     trace.dirs.clone_from(&dirs);
 
-    if let Some(candidates) =
-        dynamic_value_completions(&cmd_name, &rest, explicit_cmd_path.as_deref(), timeout_ms)
-    {
-        trace.dynamic = Some(candidates.len());
+    if let Some(response) = value_provider(
+        &spans,
+        explicit_cmd_path.as_deref(),
+        timeout_ms,
+        cfg,
+        &mut trace,
+    ) {
         return Decision {
-            response: Response::or_defer(candidates),
+            response,
             reason: Reason::ValueProvider,
             trace,
         };
@@ -218,15 +233,11 @@ pub fn decide(
     trace.node = found.as_ref().map(|node| node.name.clone());
 
     let slot = cmd_path.slot;
-    trace.slot = Some(match slot {
-        ArgSlot::Free => "free".to_owned(),
-        ArgSlot::FlagValue(flag) => format!("value of {flag}"),
-        ArgSlot::AfterDoubleDash => "after --".to_owned(),
-    });
-    if let Some(candidates) = flag_value_choices(found.as_ref(), slot, &last_token, cfg) {
+    trace.slot = Some(slot.to_string());
+    if let Some((candidates, reason)) = flag_value_choices(found.as_ref(), slot, &last_token, cfg) {
         return Decision {
             response: Response::Candidates(candidates),
-            reason: Reason::FlagChoices,
+            reason,
             trace,
         };
     }
@@ -293,6 +304,19 @@ pub fn decide(
         reason,
         trace,
     }
+}
+
+fn value_provider(
+    spans: &[String],
+    explicit_cmd_path: Option<&Path>,
+    timeout_ms: u64,
+    cfg: &Config,
+    trace: &mut Trace,
+) -> Option<Response> {
+    let (cmd_name, rest) = spans.split_first()?;
+    let candidates = dynamic_value_completions(cmd_name, rest, explicit_cmd_path, timeout_ms, cfg)?;
+    trace.dynamic = Some(candidates.len());
+    Some(Response::or_defer(candidates))
 }
 
 struct Resolve<'ctx> {
@@ -426,43 +450,38 @@ pub fn mandirs_with_bin_prefix(mandirs: &[PathBuf], bin_path: Option<&Path>) -> 
     all_mandirs
 }
 
-/// skip past elevation wrappers (sudo, doas) to the real command.
+/// skip past wrappers (sudo, doas, env, nice, ...) to the real command.
 fn strip_elevation(spans: &[String], dirs: &[PathBuf]) -> (Vec<String>, Option<PathBuf>) {
-    let mut explicit_cmd_path: Option<PathBuf> = None;
-    let mut real_spans: Vec<String> = match spans.split_first() {
-        Some((first, rest)) if ELEVATION_COMMANDS.contains(&first.as_str()) => {
-            let mut target_spans = None;
-            for (idx, span) in rest.iter().enumerate() {
-                if let Some(path) = executable_span_path(span)
-                    && let Some(name) = command_name_for_path(&path)
-                {
-                    let mut target = rest[idx..].to_vec();
-                    target[0] = name;
-                    explicit_cmd_path = Some(path);
-                    target_spans = Some(target);
-                    break;
-                }
-                if !span.is_empty()
-                    && !span.starts_with('-')
-                    && (lookup(dirs, span).is_some() || find_in_path(span).is_some())
-                {
-                    target_spans = Some(rest[idx..].to_vec());
-                    break;
-                }
-            }
-            target_spans.unwrap_or_else(|| spans.to_vec())
-        },
-        _ => spans.to_vec(),
-    };
-    if explicit_cmd_path.is_none()
-        && let Some(first) = real_spans.first()
-        && let Some(path) = executable_span_path(first)
-        && let Some(name) = command_name_for_path(&path)
-    {
-        real_spans[0] = name;
-        explicit_cmd_path = Some(path);
+    let mut real_spans = spans.to_vec();
+    while let Some(at) = wrapped_command_index(&real_spans, dirs) {
+        real_spans.drain(..at);
     }
-    (real_spans, explicit_cmd_path)
+    let explicit = real_spans.first().and_then(|first| {
+        let path = executable_span_path(first)?;
+        Some((command_name_for_path(&path)?, path))
+    });
+    match explicit {
+        Some((name, path)) => {
+            real_spans[0] = name;
+            (real_spans, Some(path))
+        },
+        None => (real_spans, None),
+    }
+}
+
+fn wrapped_command_index(spans: &[String], dirs: &[PathBuf]) -> Option<usize> {
+    let (first, rest) = spans.split_first()?;
+    if !ELEVATION_COMMANDS.contains(&first.as_str()) {
+        return wrapped_command(spans, |wrapper| value_flags(lookup(dirs, wrapper).as_ref()));
+    }
+    rest.iter()
+        .position(|span| {
+            (executable_span_path(span).is_some_and(|path| command_name_for_path(&path).is_some()))
+                || (!span.is_empty()
+                    && !span.starts_with('-')
+                    && (lookup(dirs, span).is_some() || find_in_path(span).is_some()))
+        })
+        .map(|idx| idx + 1)
 }
 
 pub fn mandirs_for_system_dirs(system_dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -554,13 +573,14 @@ fn merge_completion_candidates(
     out
 }
 
-/// value choices for `--flag val` and `--flag=val`.
+/// value choices for `--flag val` and `--flag=val`, and the paths of a path
+/// flag typed as `--flag=val`.
 fn flag_value_choices(
     found: Option<&Node>,
     slot: ArgSlot<'_>,
     last_token: &str,
     cfg: &Config,
-) -> Option<Vec<Candidate>> {
+) -> Option<(Vec<Candidate>, Reason)> {
     let (flag, typed, prefix) = match slot {
         ArgSlot::FlagValue(flag) => (flag, last_token, String::new()),
         ArgSlot::Free if last_token.starts_with("--") => {
@@ -570,12 +590,20 @@ fn flag_value_choices(
         ArgSlot::Free | ArgSlot::AfterDoubleDash => return None,
     };
     let param = entry_for_flag(&found?.result, flag)?.param.as_ref()?;
+    let takes_path = nushell_type_of_param(&param.name) == "path";
     if param.choices.is_empty() {
-        return None;
+        if !takes_path || prefix.is_empty() || typed.starts_with(['~', '$']) {
+            return None;
+        }
+        let paths = if matches!(param.name.as_str(), "DIR" | "dir" | "DIRECTORY") {
+            attached_directory_candidates(typed, &prefix, cfg)
+        } else {
+            path_candidates(typed, &prefix, cfg)
+        };
+        return (!paths.is_empty()).then_some((paths, Reason::FlagPaths));
     }
     let candidates = choice_candidates(&param.choices, typed, &prefix, cfg);
-    let takes_path = nushell_type_of_param(&param.name) == "path";
-    (!candidates.is_empty() || !takes_path).then_some(candidates)
+    (!candidates.is_empty() || !takes_path).then_some((candidates, Reason::FlagChoices))
 }
 
 /// the protocol a provider-less traced binary answers, scanned once and cached.
@@ -682,6 +710,16 @@ enum ArgSlot<'rest> {
     AfterDoubleDash,
 }
 
+impl Display for ArgSlot<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Free => f.write_str("free"),
+            Self::FlagValue(flag) => write!(f, "value of {flag}"),
+            Self::AfterDoubleDash => f.write_str("after --"),
+        }
+    }
+}
+
 struct CommandPath<'rest> {
     path:  Vec<String>,
     depth: usize,
@@ -729,6 +767,7 @@ fn command_path<'rest>(
             if current
                 .as_ref()
                 .is_some_and(|result| switch_takes_value(result, token))
+                || (!token.contains('=') && provider_takes_value(cmd_name, token, depth == 1))
             {
                 value_of = Some(token.as_str());
             }

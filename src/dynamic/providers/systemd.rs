@@ -109,8 +109,10 @@ fn unit_candidates(scope: &[String], prefix: &str, ctx: &DynCtx) -> Option<Vec<C
         let _load = rest.next();
         let _active = rest.next();
         let _sub = rest.next();
-        let desc = rest.collect::<Vec<_>>().join(" ");
-        candidates.push(Candidate::new(unit, desc.trim()));
+        let joined = rest.collect::<Vec<_>>().join(" ");
+        // systemd fills the description of a not-found unit with its own name
+        let desc = if joined == unit { "" } else { joined.trim() };
+        candidates.push(Candidate::new(unit, desc));
     }
     if candidates.is_empty() {
         None

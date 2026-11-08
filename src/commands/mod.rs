@@ -13,3 +13,4 @@ pub mod manpage;
 pub mod manpage_dir;
 pub mod merge;
 pub mod query;
+pub mod wrappers;

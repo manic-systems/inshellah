@@ -790,11 +790,7 @@ fn complete_does_not_leak_parent_subs_past_uncached_keyword() {
 }
 
 #[test]
-fn complete_drops_exact_subcommand_match() {
-    // when the typed token exactly equals a cached subcommand, the binary
-    // returns null so a downstream dynamic completer (systemctl unit names,
-    // git remote names, etc.) can take over instead of echoing the
-    // already-typed word back.
+fn complete_keeps_exact_subcommand_match() {
     let tmp = TempDir::new("inshellah-exact-subcommand-drop");
     let root = tmp.path();
     let bin_dir = root.join("bin");
@@ -829,10 +825,9 @@ fn complete_drops_exact_subcommand_match() {
         String::from_utf8_lossy(&exact.stderr)
     );
     let exact_stdout = String::from_utf8(exact.stdout).expect("stdout");
-    assert_eq!(
-        exact_stdout.trim(),
-        "null",
-        "exact match should hand off; stdout = {exact_stdout}"
+    assert!(
+        exact_stdout.contains(r#""value":"status""#) && !exact_stdout.contains("start"),
+        "exact match should complete to itself; stdout = {exact_stdout}"
     );
 
     let partial = Command::new(env!("CARGO_BIN_EXE_inshellah"))
