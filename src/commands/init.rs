@@ -15,9 +15,7 @@ pub fn run(shell: Shell) -> io::Result<()> {
         Shell::Nushell => include_str!("../../shells/inshellah.nu"),
         Shell::Bash => include_str!("../../shells/inshellah.bash"),
         Shell::Zsh => include_str!("../../shells/inshellah.zsh"),
-        Shell::Fish => {
-            return Err(io::Error::other(format!("no {shell} hook yet")));
-        },
+        Shell::Fish => include_str!("../../shells/inshellah.fish"),
     };
     io::stdout().lock().write_all(script.as_bytes())
 }

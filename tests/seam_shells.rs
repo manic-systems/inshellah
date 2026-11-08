@@ -419,3 +419,136 @@ print -r -- "survived $before $options[errexit] $_comps[-first-]"
         expect(&out, &format!("survived {errexit} {errexit} _inshellah"));
     }
 }
+
+const FISH: &str = r#"
+source $SHIM/inshellah.fish
+function chk
+    test "$argv[2]" = "$argv[3..-1]"; or echo "FAIL $argv[1] want <$argv[2]> got <$argv[3..-1]>"
+end
+function show
+    chk $argv[1] "$(printf %b $argv[3])" (complete -C $argv[2] | string join "|")
+end
+show al 'demotool al' 'alpha\tfirst'
+show alpha-r 'demotool alpha r' 'run\trun it|reset\treset it'
+show flags 'demotool --' '--color\tpaint the output <WHEN>|--verbose\tsay more'
+show value 'demotool --color=' '--color=always|--color=never'
+show space 'demotool has' 'has space\tquoted'
+show quote 'demotool "al' 'alpha\tfirst'
+show escaped 'demotool has\\ sp' 'has space\tquoted'
+complete -c twotool -f -a nativechoice
+complete -c fwrap -x -a "(__fish_complete_subcommand)"
+show "fallback keeps fish own" "twotool " nativechoice
+set -g INSHELLAH_TAKEOVER 1
+show "takeover reaches loaded" "twotool al" 'alpha\tfirst'
+show "takeover wrapper" "fwrap demotool al" 'alpha\tfirst'
+show "takeover defers to fish" "twotool alpha run " nativechoice
+set -l before (complete -c twotool | count)
+source $SHIM/inshellah.fish
+show "resourced keeps fish own" "twotool alpha run " nativechoice
+chk "resourced keeps completions" same (test (complete -c twotool | count) -eq $before; and echo same; or echo changed)
+chk "xargs like" wraps (__inshellah_wraps "complete --exclusive xargs -a '(__fish_complete_subcommand)'"; and echo wraps; or echo plain)
+complete -c pendtool -f -a mine
+set -g __inshellah_pre_pendtool fresh (__inshellah_snapshot pendtool)
+set -g __inshellah_pending pendtool
+complete -c pendtool -f -a half
+__inshellah_hook pendtool
+complete -C "pendtool " >/dev/null
+chk "interrupted load" "taken kept 0" (contains pendtool $__inshellah_taken; and echo taken; or echo lost) (string match -q "*half*" (complete -c pendtool); and echo kept; or echo dropped) (count $__inshellah_pending)
+complete -c pendhook -f -a mine
+set -g __inshellah_pending pendhook
+__inshellah_prompt
+chk "prompt restores hook" "hooked 1" (string match -q '*__inshellah_retry*' (complete -c pendhook | string collect); and echo hooked; or echo bare) (count $__inshellah_pending)
+set -e __inshellah_pending
+set -l late $PATH[1]/latetool
+printf '#!/bin/sh\n' > $late
+chmod +x $late
+__inshellah_prompt
+chk "late binary" loaded (contains latetool $__inshellah_loaded; and echo loaded; or echo missed)
+mkdir -p $HOME/slowvend/vendor_completions.d
+printf 'complete -c slowcmd -f -a own\n' > $HOME/slowvend/vendor_completions.d/slowcmd.fish
+set -g fish_complete_path $fish_complete_path $HOME/slowvend/vendor_completions.d
+__inshellah_place
+set -g __inshellah_pending slowcmd
+__inshellah_hook slowcmd
+for round in 1 2
+    complete -C "slowcmd " >/dev/null
+    chk "retried load $round" "1 0 own" (count $__inshellah_orig_slowcmd) (count $__inshellah_pending) (string match -q '*__inshellah_complete*' "$__inshellah_orig_slowcmd"; and echo stub; or echo own)
+end
+printf 'complete -c slowerase -f -a own\n' > $HOME/slowvend/vendor_completions.d/slowerase.fish
+complete -c slowerase -f -a confd
+set -g __inshellah_pre_slowerase fresh (__inshellah_snapshot slowerase)
+set -g __inshellah_pending slowerase
+__inshellah_hook slowerase
+complete -c slowerase -e
+__inshellah_prompt
+complete -C "slowerase " >/dev/null
+chk "erased while pending" "gone 1 0" (string match -q '*confd*' "$__inshellah_orig_slowerase"; and echo back; or echo gone) (count $__inshellah_orig_slowerase) (count $__inshellah_pending)
+printf 'complete -c slowthree -f -a own\nreturn 130\n' > $HOME/slowvend/vendor_completions.d/slowthree.fish
+set -l slowthree $PATH[1]/slowthree
+printf '#!/bin/sh\n' > $slowthree
+chmod +x $slowthree
+__inshellah_load slowthree
+chk "status 130 alone" "0 loaded" (count $__inshellah_pending) (contains slowthree $__inshellah_loaded; and echo loaded; or echo pending)
+complete -C "manynew1 " >/dev/null
+set -l manydir $HOME/manybin
+mkdir -p $manydir
+for i in (seq 40)
+    printf '#!/bin/sh\n' > $manydir/manynew$i
+    chmod +x $manydir/manynew$i
+end
+set -l path_before $fish_complete_path
+set -l have_before (complete -c twotool | count)
+set -p PATH $manydir
+chk "many new names" "path same kept loaded loaded" (test "$path_before" = "$fish_complete_path"; and echo path same; or echo path changed) (test (complete -c twotool | count) -eq $have_before; and echo kept; or echo dropped) (test (complete -c manynew1 | count) -gt 0; and echo loaded; or echo missed) (test (complete -c manynew40 | count) -gt 0; and echo loaded; or echo missed)
+functions -c __inshellah_refresh __seam_refresh
+function __inshellah_refresh
+    set -g refreshes (math 0$refreshes + 1)
+    __seam_refresh
+end
+function localpath
+    set -l PATH $HOME $PATH
+end
+localpath
+set -l local_runs (math 0$refreshes + 0)
+set -a PATH $HOME
+chk "local PATH" "0 1" $local_runs (math 0$refreshes + 0)
+echo done
+"#;
+
+const FISH_USER_DIR: &str = r#"
+set -g fish_complete_path $HOME/usercomp $fish_complete_path
+mkdir -p $HOME/usercomp
+echo "complete -c demotool -f -a userchoice" > $HOME/usercomp/demotool.fish
+set -gx INSHELLAH_TAKEOVER yes
+source $SHIM/inshellah.fish
+echo "user file =>" (complete -C "demotool " | string join "|")
+set -l twice $PATH[1]/usertwice
+printf '#!/bin/sh\n' > $twice
+chmod +x $twice
+printf 'set -g usertwice_runs (math 0$usertwice_runs + 1)\ncomplete -c usertwice -f -a userchoice\n' > $HOME/usercomp/usertwice.fish
+__inshellah_prompt
+complete -C "usertwice " >/dev/null
+echo "user file once =>" $usertwice_runs (complete -c usertwice | count)
+"#;
+
+#[test]
+fn fish_shim_seam() {
+    let fixture = Fixture::new("inshellah-seam-fish");
+    let Some(out) = fixture.run("fish", &["--no-config", "-c"], FISH) else {
+        eprintln!("skipping: fish not found");
+        return;
+    };
+    expect(&out, "done");
+    let user = fixture
+        .run("fish", &["--no-config", "-c"], FISH_USER_DIR)
+        .expect("fish ran once already");
+    expect(&user, "user file => userchoice\nuser file once => 1 1");
+    assert!(
+        fixture
+            .dir
+            .path()
+            .join("inshellah/fish/demotool.fish")
+            .exists(),
+        "fish-stubs wrote no stub for demotool"
+    );
+}
