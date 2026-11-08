@@ -120,6 +120,24 @@ fn flag_line_ending_in_a_colon_is_not_a_section_header() {
 }
 
 #[test]
+fn entry_descriptions_with_header_words_stay_entries() {
+    let result = parse(
+        "Commands:
+  query        print stored completion data
+  dump         list indexed commands
+  diff         report flag and subcommand gaps
+  purge        delete the cache
+",
+    );
+    let names: Vec<&str> = result
+        .subcommands
+        .iter()
+        .map(|sub| sub.name.as_str())
+        .collect();
+    assert_eq!(names, ["query", "dump", "diff", "purge"]);
+}
+
+#[test]
 fn git_negatable_long_with_an_option_value_is_kept() {
     let result = parse(
         "    -s, --[no-]strategy <strategy>
@@ -311,4 +329,283 @@ fn flag_opening_a_description_is_not_a_short_alias() {
         OwnedSwitch::Long("null".to_owned())
     );
     assert!(entry(&result, "null").param.is_none());
+}
+
+#[test]
+fn punctuation_short_flags_pair_with_their_long_names() {
+    let result = parse(
+        "Options:
+    -., --hidden
+        Search hidden files and directories.
+    -?, --help
+        Show help.
+",
+    );
+    assert_eq!(
+        entry(&result, "hidden").switch,
+        OwnedSwitch::Both('.', "hidden".to_owned())
+    );
+    assert_eq!(
+        entry(&result, "help").switch,
+        OwnedSwitch::Both('?', "help".to_owned())
+    );
+}
+
+fn choice_values(result: &ManpageResult, long: &str) -> Vec<String> {
+    entry(result, long)
+        .param
+        .as_ref()
+        .map(|param| {
+            param
+                .choices
+                .iter()
+                .map(|found| found.value.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn wrapped_possible_values_keep_dotted_and_alternate_spellings() {
+    let result = parse(
+        "SORTING OPTIONS:
+  -s, --sort <FIELD>             which field to sort by [default: name] [possible values:
+                                   name, .name, ext,
+                                   size, none]
+  -t, --time <FIELD>             which timestamp field to show [possible values:
+                                   mod|modified, acc|accessed]
+      --time-style <STYLE>       how to format timestamps [possible values:
+                                   default, iso, \"+<CUSTOM_FORMAT>\"]
+",
+    );
+    assert_eq!(choice_values(&result, "sort"), [
+        "name", ".name", "ext", "size", "none"
+    ]);
+    assert_eq!(choice_values(&result, "time"), [
+        "mod", "modified", "acc", "accessed"
+    ]);
+    assert_eq!(choice_values(&result, "time-style"), ["default", "iso"]);
+}
+
+#[test]
+fn quoted_alternative_labels_under_a_colon_header_are_choices() {
+    let result = parse(
+        "Options:
+  -t, --type <filetype>
+          Filter the search by type:
+            'f' or 'file':         regular files
+            'd' or 'dir' or 'directory':    directories
+            'l' or 'symlink':      symbolic links
+
+            'x' or 'executable':   executables
+
+          This option can be specified more than once.
+",
+    );
+    assert_eq!(choice_values(&result, "type"), [
+        "f",
+        "file",
+        "d",
+        "dir",
+        "directory",
+        "l",
+        "symlink",
+        "x",
+        "executable"
+    ]);
+}
+
+#[test]
+fn quoted_label_lists_past_the_first_line_are_not_choices() {
+    let result = parse(
+        "Options:
+  -S, --size <size>
+          Limit results based on the size of files.
+          Allowed unit values:
+              'b':  bytes
+              'k':  kilobytes
+",
+    );
+    assert!(choice_values(&result, "size").is_empty());
+}
+
+#[test]
+fn lowercase_placeholder_before_a_long_form_that_repeats_it() {
+    let result = parse(
+        "Options:
+  -F format, --format=format
+        Specify the file format.
+  -e word, --regexp=other
+        Pattern.
+",
+    );
+    assert_eq!(
+        entry(&result, "format").switch,
+        OwnedSwitch::Both('F', "format".to_owned())
+    );
+    assert!(entry(&result, "format").param.is_some());
+    assert!(
+        result
+            .entries
+            .iter()
+            .all(|found| long_of(found) != Some("regexp"))
+    );
+}
+
+#[test]
+fn doc_wide_metavar_sentence_gives_choices_to_the_matching_param() {
+    let result = parse(
+        "Usage: ls [OPTION]... [FILE]...
+
+  -F, --classify[=WHEN]
+         append indicator to entries WHEN
+      --color[=WHEN]
+         color the output WHEN; more info below
+      --block-size=SIZE
+         scale sizes by SIZE
+      --hyperlink[=BOOL]
+         hyperlink file names
+
+The WHEN argument defaults to 'always' and can also be 'auto' or 'never'.
+The BOOL argument is mostly harmless.
+",
+    );
+    assert_eq!(choice_values(&result, "color"), ["always", "auto", "never"]);
+    assert_eq!(choice_values(&result, "classify"), [
+        "always", "auto", "never"
+    ]);
+    assert!(choice_values(&result, "block-size").is_empty());
+    assert!(choice_values(&result, "hyperlink").is_empty());
+}
+
+#[test]
+fn usage_line_flags_fill_in_what_the_options_section_lacks() {
+    let result = parse(
+        "usage: git [-v | --version] [-h | --help] [-C <path>] [-c <name>=<value>]
+           [--exec-path[=<path>]] [--html-path]
+           [-p | --paginate | -P | --no-pager] [--git-dir=<path>]
+           [--term-{new,bad}=<term>] [-xyz] <command> [<args>]
+
+Options:
+  -h, --help   show help
+",
+    );
+    assert_eq!(
+        entry(&result, "version").switch,
+        OwnedSwitch::Both('v', "version".to_owned())
+    );
+    assert_eq!(
+        entry(&result, "no-pager").switch,
+        OwnedSwitch::Both('P', "no-pager".to_owned())
+    );
+    assert_eq!(param_name(&result, "git-dir"), Some("path"));
+    assert_eq!(param_name(&result, "exec-path"), Some("path"));
+    let help = result
+        .entries
+        .iter()
+        .filter(|found| long_of(found) == Some("help"))
+        .count();
+    assert_eq!(help, 1);
+    let dash_c = result
+        .entries
+        .iter()
+        .find(|found| found.switch == OwnedSwitch::Short('C'))
+        .expect("-C kept");
+    assert_eq!(
+        dash_c.param.as_ref().map(|param| param.name.as_str()),
+        Some("path")
+    );
+    assert!(result.entries.iter().all(|found| {
+        !matches!(
+            &found.switch,
+            OwnedSwitch::Long(long) if long.starts_with("term")
+        ) && found.switch != OwnedSwitch::Short('x')
+    }));
+}
+
+#[test]
+fn usage_only_short_flags_keep_the_word_after_them_as_their_param() {
+    let result = parse(
+        "Usage: ip6tables-restore [-c] [-w secs] [-T table] [-M command] [file]\n\t   [ \
+         --wait=<seconds>\n\t   [ --table=<TABLE> ]\n",
+    );
+    let param_of = |short: char| {
+        result
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.switch, OwnedSwitch::Short(found) if found == short))
+            .and_then(|entry| entry.param.as_ref())
+            .map(|param| param.name.as_str())
+    };
+    assert_eq!(param_of('w'), Some("secs"));
+    assert_eq!(param_of('T'), Some("table"));
+    assert_eq!(param_of('M'), Some("command"));
+    assert_eq!(param_of('c'), None);
+    assert_eq!(param_name(&result, "wait"), Some("seconds"));
+    assert_eq!(param_name(&result, "table"), Some("TABLE"));
+}
+
+#[test]
+fn bracketed_short_switch_clusters_expand_and_junk_does_not() {
+    let result = parse("Usage: fsck.btrfs [-aApy] [<device>...]\n");
+    for short in ['a', 'A', 'p', 'y'] {
+        assert!(
+            result
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.switch, OwnedSwitch::Short(found) if found == short)),
+            "-{short} missing in {:?}",
+            result.entries
+        );
+    }
+    for junk in [
+        "Usage: fmt [-WIDTH] [OPTION]... [FILE]...\n",
+        "Usage: psfxtable [-i infont] [-nt]\n",
+        "Usage: tool [-lName] [-m size]\n",
+    ] {
+        let parsed = parse(junk);
+        assert!(
+            !parsed.entries.iter().any(|entry| {
+                matches!(
+                    entry.switch,
+                    OwnedSwitch::Short('W' | 'D' | 'n' | 't' | 'N' | 'a' | 'e')
+                )
+            }),
+            "{junk}: {:?}",
+            parsed.entries
+        );
+    }
+}
+
+#[test]
+fn flag_and_value_name_squeezed_together_is_not_a_cluster() {
+    let parsed = parse("Usage: gzip [-acfhLV] [-Ssuffix] [name...]\n");
+    assert!(
+        !parsed
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.switch, OwnedSwitch::Short('u' | 'i' | 'x'))),
+        "{:?}",
+        parsed.entries
+    );
+}
+
+#[test]
+fn long_bracket_value_names_stay_and_camel_case_flags_are_not_clusters() {
+    let result = parse("Usage: ssh [-i identity_file] [-noVerify]\n");
+    assert_eq!(result.entries.len(), 1, "{:?}", result.entries);
+    let param = result.entries[0].param.as_ref().expect("param");
+    assert_eq!(param.name, "identity_file");
+}
+
+#[test]
+fn example_value_in_a_usage_bracket_is_not_the_param_name() {
+    let result = parse("Usage: tool [-t ext4] [-o ro] [--mode rw] [-w secs]\n");
+    assert_eq!(param_of(&result, "mode").name, "value");
+    let names: Vec<_> = result
+        .entries
+        .iter()
+        .filter_map(|entry| entry.param.as_ref().map(|param| param.name.as_str()))
+        .collect();
+    assert_eq!(names, ["value", "value", "value", "secs"]);
 }

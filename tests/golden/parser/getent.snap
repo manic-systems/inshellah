@@ -6,6 +6,7 @@ positional_choices:
 flags:
   -s|--service
   --no-idn
+  -?|--help
 positionals:
   database
   key

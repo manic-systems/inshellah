@@ -674,3 +674,28 @@ fn single_space_option_row_after_a_finished_line_is_kept() {
         );
     }
 }
+
+#[test]
+fn lowercase_placeholder_repeated_in_long_form_names_the_param() {
+    let groff = ".TH NANO 1\n.SH NAME\nnano \\- editor\n.SH OPTIONS\n.TP\n.BI \\-r \" number\\fR, \
+                 \" \\-\\-fill= number\nSet the width. If the value is 0 or less, wrapping \
+                 occurs.\n";
+    let result = parse_manpage_string(groff);
+    let entry = result
+        .entries
+        .iter()
+        .find(|entry| entry.switch == OwnedSwitch::Both('r', "fill".to_owned()))
+        .expect("fill entry");
+    let param = entry.param.as_ref().expect("param");
+    assert_eq!(param.name, "number");
+    assert!(param.choices.is_empty(), "{:?}", param.choices);
+}
+
+#[test]
+fn adjective_sentence_about_a_param_is_not_a_choice_list() {
+    let groff = ".TH T 1\n.SH OPTIONS\n.TP\n\\fB\\-\\-dir\\fR=\\fIPATH\\fR\nwhere PATH can be \
+                 absolute or relative\n";
+    let result = parse_manpage_string(groff);
+    let param = result.entries[0].param.as_ref().expect("param");
+    assert!(param.choices.is_empty(), "{:?}", param.choices);
+}
