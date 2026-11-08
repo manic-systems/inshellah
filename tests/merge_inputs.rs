@@ -5,10 +5,7 @@
 
 use std::{
     fs,
-    os::unix::fs::{
-        PermissionsExt as _,
-        symlink,
-    },
+    os::unix::fs::symlink,
     path::{
         Path,
         PathBuf,
@@ -28,15 +25,14 @@ use inshellah::{
     },
 };
 
+#[path = "common/exec.rs"] mod exec;
 #[path = "common/temp_dir.rs"] mod temp_dir;
 
 use temp_dir::TempDir;
 
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
-    fs::create_dir_all(dir).expect("script dir");
     let path = dir.join(name);
-    fs::write(&path, body).expect("write script");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+    exec::write_executable_file(&path, body);
     path.canonicalize().expect("canonical script")
 }
 

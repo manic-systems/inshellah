@@ -16,19 +16,11 @@
 use std::{
     env,
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{
         Path,
         PathBuf,
     },
-    process::{
-        self,
-        Command,
-    },
-    time::{
-        SystemTime,
-        UNIX_EPOCH,
-    },
+    process::Command,
 };
 
 use inshellah::{
@@ -44,17 +36,13 @@ use inshellah::{
 };
 
 mod common;
+#[path = "common/exec.rs"] mod exec;
+#[path = "common/temp_dir.rs"] mod temp_dir;
+
+use temp_dir::TempDir;
 
 // note: ManpageResult.positionals is Vec<(String, Positional)>; the fixtures
 // here use no positionals, so an empty Vec suffices.
-
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    env::temp_dir().join(format!("{name}-{}-{nanos}", process::id()))
-}
 
 fn switch_long(name: &str) -> OwnedSwitch {
     OwnedSwitch::Long(name.to_owned())
@@ -66,10 +54,7 @@ fn switch_both(short: char, long: &str) -> OwnedSwitch {
 
 fn write_stub_executable(bin: &Path, name: &str) {
     let path = bin.join(name);
-    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub executable");
-    let mut perms = fs::metadata(&path).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("chmod");
+    exec::write_executable_file(&path, "#!/bin/sh\nexit 0\n");
 }
 
 fn entry(switch: OwnedSwitch, param: Option<&str>, desc: &str) -> ManpageEntry {
@@ -141,7 +126,7 @@ fn build_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     // fake `tool` binary: resolves the uncached `tool extra` subcommand via
     // --help
     let tool_bin = bin.join("tool");
-    fs::write(
+    exec::write_executable_file(
         &tool_bin,
         r#"#!/bin/sh
 if [ "$1" = "extra" ] && { [ "$2" = "--help" ] || [ "$2" = "-h" ]; }; then
@@ -156,11 +141,7 @@ EOF
 fi
 exit 2
 "#,
-    )
-    .expect("write tool bin");
-    let mut perms = fs::metadata(&tool_bin).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&tool_bin, perms).expect("chmod");
+    );
     write_stub_executable(&bin, "othertool");
 
     (user, system, bin)
@@ -219,8 +200,9 @@ const CASES: &[(&str, &[&str])] = &[
 
 #[test]
 fn golden_completion_matrix() {
-    let root = unique_temp_dir("inshellah-golden-completion");
-    let (user, system, bin) = build_fixture(&root);
+    let tmp = TempDir::new("inshellah-golden-completion");
+    let root = tmp.path();
+    let (user, system, bin) = build_fixture(root);
     for (name, spans) in CASES {
         // fresh user cache per case so on-the-fly resolves are deterministic
         let case_user = root.join(format!("user-{name}"));
@@ -232,5 +214,4 @@ fn golden_completion_matrix() {
         let actual = run_complete(&case_user, &system, &bin, spans);
         common::check_golden("completion", name, "json", &actual);
     }
-    fs::remove_dir_all(&root).expect("remove temp dir");
 }

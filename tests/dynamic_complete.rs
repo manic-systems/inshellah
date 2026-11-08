@@ -11,24 +11,15 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{
         Path,
         PathBuf,
     },
-    process::{
-        self,
-        Command,
-    },
-    sync::atomic::{
-        AtomicU64,
-        Ordering,
-    },
-    time::{
-        SystemTime,
-        UNIX_EPOCH,
-    },
+    process::Command,
 };
+
+#[path = "common/exec.rs"] mod exec;
+#[path = "common/temp_dir.rs"] mod temp_dir;
 
 use inshellah::{
     parsers::manpage::{
@@ -41,26 +32,10 @@ use inshellah::{
     },
     store::write_result,
 };
-
-static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let n = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = env::temp_dir().join(format!("{name}-{}-{}-{}", process::id(), nanos, n));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
-}
+use temp_dir::TempDir;
 
 fn write_executable(bin_dir: &Path, name: &str, script: &str) {
-    let path = bin_dir.join(name);
-    fs::write(&path, script).expect("write fake bin");
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("chmod fake bin");
+    exec::write_executable_file(&bin_dir.join(name), script);
 }
 
 /// fake shims with the minimum output each provider needs to exercise its
@@ -309,7 +284,7 @@ fn parse_output(stdout: &str) -> Option<Vec<Cand>> {
 }
 
 struct Harness {
-    root:      PathBuf,
+    root:      TempDir,
     bin_dir:   PathBuf,
     cache_dir: PathBuf,
     /// arg-capture files (`KUBECTL_ARGS_FILE`, `INSHELLAH_GIT_ARGS_FILE`) the
@@ -317,31 +292,23 @@ struct Harness {
     aux_files: BTreeMap<String, PathBuf>,
 }
 
-impl Drop for Harness {
-    fn drop(&mut self) {
-        drop(fs::remove_dir_all(&self.root));
-    }
-}
-
 impl Harness {
     fn new(name: &str) -> Self {
-        let root = unique_temp_dir(name);
-        let bin_dir = root.join("bin");
+        let root = TempDir::new(name);
+        let dir = root.path().to_path_buf();
+        let bin_dir = dir.join("bin");
         install_fakes(&bin_dir);
-        let cache_dir = root.join("cache");
+        let cache_dir = dir.join("cache");
         fs::create_dir_all(&cache_dir).expect("cache dir");
         let mut aux_files = BTreeMap::new();
-        aux_files.insert("KUBECTL_ARGS_FILE".into(), root.join("kubectl-args.txt"));
-        aux_files.insert(
-            "CONTAINER_ARGS_FILE".into(),
-            root.join("container-args.txt"),
-        );
-        aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), root.join("git-args.txt"));
-        aux_files.insert("INSHELLAH_JJ_ARGS_FILE".into(), root.join("jj-args.txt"));
-        aux_files.insert("ZIG_ARGS_FILE".into(), root.join("zig-args.txt"));
+        aux_files.insert("KUBECTL_ARGS_FILE".into(), dir.join("kubectl-args.txt"));
+        aux_files.insert("CONTAINER_ARGS_FILE".into(), dir.join("container-args.txt"));
+        aux_files.insert("INSHELLAH_GIT_ARGS_FILE".into(), dir.join("git-args.txt"));
+        aux_files.insert("INSHELLAH_JJ_ARGS_FILE".into(), dir.join("jj-args.txt"));
+        aux_files.insert("ZIG_ARGS_FILE".into(), dir.join("zig-args.txt"));
         aux_files.insert(
             "INSHELLAH_SYSTEMD_ARGS_FILE".into(),
-            root.join("systemd-args.txt"),
+            dir.join("systemd-args.txt"),
         );
         Self {
             root,
@@ -491,7 +458,7 @@ fn sorted_values(cands: &[Cand]) -> Vec<String> {
 }
 
 fn ssh_home(harness: &Harness) -> PathBuf {
-    let home = harness.root.join("home");
+    let home = harness.root.path().join("home");
     fs::create_dir_all(home.join(".ssh")).expect("ssh dir");
     home
 }
