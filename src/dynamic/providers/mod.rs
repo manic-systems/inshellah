@@ -13,6 +13,7 @@ use crate::{
             Words,
         },
     },
+    shell::Shell,
 };
 
 pub mod adb;
@@ -337,7 +338,7 @@ const PROVIDERS: &[FunctionProvider] = &[
         answer_fn:   None,
     },
     FunctionProvider {
-        commands:    &["kill", "pkill"],
+        commands:    &["kill", "pkill", "pgrep"],
         kind:        Kind::Fallback,
         files:       Files::Replace,
         matching:    Matching::ValueOrDescription,
@@ -366,6 +367,27 @@ pub fn takes_value(cmd: &str, flag: &str, leading: bool) -> bool {
             provider.value_flags.contains(&flag)
                 && (leading || provider.globals == Globals::Anywhere)
         })
+}
+
+/// the completions of a command the shell runs as a builtin, which the cached
+/// manpage of a binary of the same name does not describe.
+pub fn builtin(spans: &[String], ctx: &DynCtx<'_>) -> Option<Vec<Candidate>> {
+    let provider = PROVIDERS
+        .iter()
+        .find(|provider| provider.commands().contains(&"kill"))?;
+    (spans.first().map(String::as_str) == Some("kill"))
+        .then(|| process::builtin_kill(&provider.words(spans, ctx), ctx))
+}
+
+/// whether the last word is a leading `-SIGNAL`, which a provider answers in
+/// place of static flags.
+pub fn is_signal_word(spans: &[String], shell: Shell) -> bool {
+    process::is_signal_word(spans, shell)
+}
+
+/// whether the last word is a lone capital that begins a `-SIGNAL`.
+pub fn is_lone_capital(spans: &[String], shell: Shell) -> bool {
+    process::is_lone_capital(spans, shell)
 }
 
 pub fn kind_of(cmd: &str) -> Option<&'static str> {

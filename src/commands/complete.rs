@@ -41,9 +41,12 @@ use inshellah::{
             Detection,
             Protocol,
         },
+        builtin_completions,
         dynamic_complete_candidates_with_path,
         dynamic_value_completions,
         provider_kind,
+        provider_lone_capital,
+        provider_signal_word,
         provider_takes_value,
     },
     executable::{
@@ -59,6 +62,11 @@ use inshellah::{
         },
         nushell::nushell_type_of_param,
     },
+    shell::{
+        BASH_WORDBREAKS,
+        BashLine,
+        Shell,
+    },
     store::{
         self,
         ExeIdentity,
@@ -72,23 +80,116 @@ use inshellah::{
         write_fact,
     },
 };
+use pound::Parse;
 
-use super::wrappers::wrapped_command;
+use super::{
+    common::Dirs,
+    wrappers::wrapped_command,
+};
 
 const ELEVATION_COMMANDS: &[&str] = &["sudo", "doas", "pkexec", "su", "run0"];
 
+#[derive(Parse, Debug)]
+pub struct Line {
+    /// a bash command line up to the cursor, split here instead of SPANs
+    #[pound(long, value_name = "LINE")]
+    line:       Option<String>,
+    /// bash's `COMP_WORDBREAKS` for --line
+    #[pound(long, value_name = "CHARS")]
+    wordbreaks: Option<String>,
+}
+
+impl Line {
+    /// the spans to complete, and the line they were split from.
+    ///
+    /// # Errors
+    /// fails when both --line and SPANs are given.
+    pub fn spans(self, raw: Vec<String>) -> io::Result<(Vec<String>, Option<BashLine>)> {
+        let Some(text) = self.line else {
+            return Ok((raw, None));
+        };
+        if !raw.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--line and SPANs exclude each other",
+            ));
+        }
+        let parsed = BashLine::parse(&text, self.wordbreaks.as_deref().unwrap_or(BASH_WORDBREAKS));
+        Ok((parsed.words.clone(), Some(parsed)))
+    }
+}
+
+/// # Errors
+/// fails when both --line and SPANs are given, or stdout cannot be written.
 pub fn run(
-    raw_spans: &[String],
-    user_dir: &Path,
-    system_dirs: &[PathBuf],
-    mandirs: &[PathBuf],
-    timeout_ms: u64,
-    cfg: &Config,
+    dirs: Dirs,
+    timeout_override: Option<u64>,
+    shell: Shell,
+    line: Line,
+    raw: Vec<String>,
 ) -> io::Result<()> {
-    let decision = decide(raw_spans, user_dir, system_dirs, mandirs, timeout_ms, cfg);
+    let (spans, parsed) = line.spans(raw)?;
+    let cfg = Config::from_env();
+    let timeout_ms = timeout_override.unwrap_or(cfg.timeout_ms);
+    let (user_dir, system_dirs) = default_user_dir_and_system_dirs(dirs.resolve_lenient());
+    let mandirs = mandirs_for_system_dirs(&system_dirs);
+    let response = if parsed.as_ref().is_some_and(|bash| bash.redirect) {
+        Response::Defer
+    } else {
+        decide(
+            &spans,
+            &user_dir,
+            &system_dirs,
+            &mandirs,
+            timeout_ms,
+            shell,
+            &cfg,
+        )
+        .response
+    };
     let mut out = io::stdout().lock();
-    serde_json::to_writer(&mut out, &decision.response)?;
-    writeln!(out)
+    match shell {
+        Shell::Nushell => {
+            serde_json::to_writer(&mut out, &response)?;
+            writeln!(out)
+        },
+        Shell::Bash => {
+            let bash = parsed.unwrap_or_default();
+            let inserted = for_bash(response, &bash);
+            let command = bash.words.first().map_or("", String::as_str);
+            writeln!(out, "{}", inserted.lines_for(command))
+        },
+        Shell::Zsh | Shell::Fish => writeln!(out, "{}", response.lines()),
+    }
+}
+
+/// candidates as readline inserts them, dropping ones it can't. readline
+/// replaces the word with the candidates' common prefix, so a fuzzy match
+/// that doesn't start with the typed word would delete what was typed.
+fn for_bash(response: Response, line: &BashLine) -> Response {
+    let typed = line.words.last().map_or("", String::as_str);
+    let insert = |candidates: Vec<Candidate>| -> Vec<Candidate> {
+        candidates
+            .into_iter()
+            .filter(|candidate| candidate.value.starts_with(typed))
+            .filter_map(|candidate| {
+                let value = line.insertion(&candidate.value)?;
+                Some(Candidate::new(value, candidate.description))
+            })
+            .collect()
+    };
+    match response {
+        Response::Defer => Response::Defer,
+        Response::Candidates(candidates) if candidates.is_empty() => {
+            Response::Candidates(candidates)
+        },
+        Response::WithFiles(candidates) if line.lead.is_empty() => {
+            Response::WithFiles(insert(candidates))
+        },
+        Response::Candidates(candidates) | Response::WithFiles(candidates) => {
+            Response::or_defer(insert(candidates))
+        },
+    }
 }
 
 /// what `complete` answers, why, and what it looked at on the way.
@@ -171,6 +272,7 @@ pub fn decide(
     system_dirs: &[PathBuf],
     mandirs: &[PathBuf],
     timeout_ms: u64,
+    shell: Shell,
     cfg: &Config,
 ) -> Decision {
     let mut all_dirs: Vec<PathBuf> = Vec::with_capacity(system_dirs.len() + 1);
@@ -182,7 +284,7 @@ pub fn decide(
         spans: spans.clone(),
         ..Trace::default()
     };
-    if spans.is_empty() || (explicit_cmd_path.is_none() && find_in_path(&spans[0]).is_none()) {
+    if unanswerable(raw_spans, &spans, explicit_cmd_path.as_deref(), shell) {
         return Decision {
             response: Response::Defer,
             reason: Reason::NotOnPath,
@@ -198,13 +300,12 @@ pub fn decide(
     let dirs = dirs_for_binary(all_dirs, user_dir, &cmd_name, &mut trace);
     trace.dirs.clone_from(&dirs);
 
-    if let Some(response) = value_provider(
-        &spans,
-        explicit_cmd_path.as_deref(),
-        timeout_ms,
-        cfg,
-        &mut trace,
-    ) {
+    let builtin = builtin_provider(raw_spans, shell, timeout_ms, cfg, &mut trace);
+    let provided = builtin.or_else(|| {
+        let path = explicit_cmd_path.as_deref();
+        value_provider(&spans, path, timeout_ms, cfg, &mut trace)
+    });
+    if let Some(response) = provided {
         return Decision {
             response,
             reason: Reason::ValueProvider,
@@ -277,7 +378,7 @@ pub fn decide(
     trace.protocol = protocol_of(user_dir, &trace, timeout_ms);
     // spans are post-elevation, so `sudo nix ...` reaches this as
     // `[nix, ...]` and hits the nix branch.
-    let reply = if typing_flag && !candidates.is_empty() {
+    let reply = if typing_flag && flags_answer(&spans, &candidates, &last_token, shell) {
         Reply::Silent
     } else {
         dynamic_complete_candidates_with_path(
@@ -290,6 +391,7 @@ pub fn decide(
             },
             FlagLists::of(lookup(&dirs, &cmd_name).as_ref(), found.as_ref()).cached(),
             trace.protocol,
+            shell,
             cfg,
         )
     };
@@ -304,6 +406,72 @@ pub fn decide(
         reason,
         trace,
     }
+}
+
+/// whether the cached flags settle a flag word alone. a leading `-SIGNAL` is a
+/// provider's, and a lone capital such as `-T` only matches flags by case
+/// folding, so the signal it starts is offered unless a flag is spelled so.
+fn flags_answer(spans: &[String], flags: &[Candidate], last_token: &str, shell: Shell) -> bool {
+    !flags.is_empty()
+        && !provider_signal_word(spans, shell)
+        && (!provider_lone_capital(spans, shell)
+            || flags.iter().any(|flag| flag.value.starts_with(last_token)))
+}
+
+/// whether the line is not inshellah's to complete. behind `builtin` only the
+/// shell's own kill and a `command` or `exec` running a binary are inshellah's.
+fn unanswerable(
+    raw_spans: &[String],
+    spans: &[String],
+    explicit: Option<&Path>,
+    shell: Shell,
+) -> bool {
+    let behind_builtin = raw_spans.first().is_some_and(|word| word == "builtin")
+        && builtin_kill_at(raw_spans, shell).is_none()
+        && !runs_binary_behind_builtin(raw_spans);
+    behind_builtin || spans.is_empty() || (explicit.is_none() && find_in_path(&spans[0]).is_none())
+}
+
+fn runs_binary_behind_builtin(raw_spans: &[String]) -> bool {
+    let at = raw_spans
+        .iter()
+        .take_while(|word| *word == "builtin")
+        .count();
+    at + 1 < raw_spans.len() && matches!(raw_spans[at].as_str(), "command" | "exec")
+}
+
+/// where the shell's own `kill` starts. `builtin` always reaches it and bash's
+/// `command` does too, while zsh's `command` and every `exec` run the binary.
+fn builtin_kill_at(raw_spans: &[String], shell: Shell) -> Option<usize> {
+    let mut at = 0;
+    while let Some(word) = raw_spans.get(at) {
+        match word.as_str() {
+            "kill" => return (at == 0 || at + 1 < raw_spans.len()).then_some(at),
+            "builtin" => at += 1,
+            "command" if shell == Shell::Bash => {
+                at += 1;
+                while raw_spans.get(at).is_some_and(|flag| flag == "-p") {
+                    at += 1;
+                }
+            },
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// `kill` typed as the first word is the shell's own builtin.
+fn builtin_provider(
+    raw_spans: &[String],
+    shell: Shell,
+    timeout_ms: u64,
+    cfg: &Config,
+    trace: &mut Trace,
+) -> Option<Response> {
+    let kill = builtin_kill_at(raw_spans, shell)?;
+    let candidates = builtin_completions(&raw_spans[kill..], shell, timeout_ms, cfg)?;
+    trace.dynamic = Some(candidates.len());
+    Some(Response::or_defer(candidates))
 }
 
 fn value_provider(

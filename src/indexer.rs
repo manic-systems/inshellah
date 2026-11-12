@@ -76,6 +76,7 @@ use crate::{
         Probe,
         resolve_node,
     },
+    shell::Shell,
     store::{
         ExeIdentity,
         NUSHELL_NATIVE_COMMANDS_FILE,
@@ -557,17 +558,36 @@ fn process_pool_job(ctx: &ScrapeCtx, job: &PoolJob, submit: &Submitter<PoolJob>)
     }
 }
 
+/// how `index` and `merge` scrape.
+pub struct Scrape<'opts, S> {
+    pub ignorelist: &'opts HashSet<String, S>,
+    pub help_only:  &'opts HashSet<String, S>,
+    pub timeout_ms: u64,
+    pub workers:    usize,
+    /// the shells the index serves.
+    pub shells:     &'opts [Shell],
+}
+
+/// nushell never hands its builtins to the external completer, so an index
+/// for nushell alone skips binaries that share their names. any other shell
+/// runs those binaries, so `nu` isn't asked at all.
+fn nushell_builtins<S>(opts: &Scrape<'_, S>, dir: &Path) -> io::Result<HashSet<String>> {
+    if opts.shells.iter().any(|shell| *shell != Shell::Nushell) {
+        return Ok(HashSet::new());
+    }
+    let builtins = discover_nushell_native_commands()?;
+    write_nushell_native_commands(dir, &builtins)?;
+    Ok(builtins)
+}
+
 /// # Errors
 ///
 /// fails when the cache dir, `nu` discovery, or a cache write fails.
 pub fn cmd_index<S>(
     bindirs: &[PathBuf],
     mandirs: &[PathBuf],
-    ignorelist: &HashSet<String, S>,
-    help_only: &HashSet<String, S>,
     dir: &Path,
-    timeout_ms: u64,
-    num_workers: usize,
+    opts: &Scrape<'_, S>,
 ) -> io::Result<()>
 where
     S: BuildHasher,
@@ -575,12 +595,11 @@ where
     check_scrape_cwd()?;
     ensure_dir(dir)?;
     sweep_stale_temp_files(dir);
-    let nushell_commands = discover_nushell_native_commands()?;
-    write_nushell_native_commands(dir, &nushell_commands)?;
+    let nushell_commands = nushell_builtins(opts, dir)?;
     let binaries = list_binaries(bindirs, &nushell_commands)?;
-    let profile = ProfileBinaries::new(&binaries, ignorelist);
-    let scraped = ScrapeCtx::new(dir, mandirs, help_only, timeout_ms)
-        .scrape(profile.paths.iter(), num_workers)?;
+    let profile = ProfileBinaries::new(&binaries, opts.ignorelist);
+    let scraped = ScrapeCtx::new(dir, mandirs, opts.help_only, opts.timeout_ms)
+        .scrape(profile.paths.iter(), opts.workers)?;
     let mut indexed = scraped.indexed;
 
     ManpagePass {
@@ -588,10 +607,10 @@ where
         mandirs,
         profile: &profile,
         unexecutable: &scraped.unexecutable,
-        help_only,
+        help_only: opts.help_only,
         nushell_commands: &nushell_commands,
-        timeout_ms,
-        num_workers,
+        timeout_ms: opts.timeout_ms,
+        num_workers: opts.workers,
     }
     .run(&mut indexed)?;
 
@@ -717,11 +736,8 @@ fn collect_candidates(sources: &[(PathBuf, PathBuf)]) -> io::Result<Vec<Candidat
 pub fn cmd_merge<S>(
     profile_dir: &Path,
     sources: &[(PathBuf, PathBuf)],
-    ignorelist: &HashSet<String, S>,
-    help_only: &HashSet<String, S>,
     dir: &Path,
-    timeout_ms: u64,
-    num_workers: usize,
+    opts: &Scrape<'_, S>,
 ) -> io::Result<()>
 where
     S: BuildHasher,
@@ -731,10 +747,9 @@ where
     let resolved_sources = resolve_merge_sources(sources)?;
     ensure_dir(dir)?;
     sweep_stale_temp_files(dir);
-    let nushell_commands = discover_nushell_native_commands()?;
-    write_nushell_native_commands(dir, &nushell_commands)?;
+    let nushell_commands = nushell_builtins(opts, dir)?;
     let binaries = list_binaries(&[profile_dir.join("bin")], &nushell_commands)?;
-    let profile = ProfileBinaries::new(&binaries, ignorelist);
+    let profile = ProfileBinaries::new(&binaries, opts.ignorelist);
     let mandirs = [profile_dir.join("share/man")];
 
     let mut owners = HashMap::<&str, Option<&Path>>::new();
@@ -778,8 +793,8 @@ where
         })
         .filter_map(|candidate| profile.paths.get_key_value(&candidate.cmd))
         .collect();
-    let scraped = ScrapeCtx::new(dir, &mandirs, help_only, timeout_ms)
-        .scrape(rescrape.iter().map(|(cmd, bin)| (*cmd, *bin)), num_workers)?;
+    let scraped = ScrapeCtx::new(dir, &mandirs, opts.help_only, opts.timeout_ms)
+        .scrape(rescrape.iter().map(|(cmd, bin)| (*cmd, *bin)), opts.workers)?;
     let rescraped =
         |root: &String| rescrape.contains_key(root) && !scraped.unexecutable.contains(root);
     for candidate in &owned {
@@ -814,10 +829,10 @@ where
         mandirs: &mandirs,
         profile: &profile,
         unexecutable: &scraped.unexecutable,
-        help_only,
+        help_only: opts.help_only,
         nushell_commands: &nushell_commands,
-        timeout_ms,
-        num_workers,
+        timeout_ms: opts.timeout_ms,
+        num_workers: opts.workers,
     }
     .run(&mut indexed)?;
 

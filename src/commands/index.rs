@@ -3,6 +3,7 @@
 
 use std::{
     collections::HashSet,
+    hash::RandomState,
     io,
     num::NonZero,
     path::{
@@ -17,9 +18,11 @@ use std::{
 use inshellah::{
     config::DEFAULT_TIMEOUT_MS,
     indexer::{
+        Scrape as ScrapeOpts,
         cmd_index,
         load_ignorelist,
     },
+    shell::Shell,
     store::default_store_path,
 };
 use pound::Parse;
@@ -59,9 +62,37 @@ pub struct Scrape {
     /// parallel scrape workers
     #[pound(long, min = 1, default = { available_parallelism().map_or(4, NonZero::get) })]
     pub workers:    usize,
+    /// shells the index serves, nushell when none are given
+    #[pound(long = "shell", value_name = "SHELL", delimiter = ',')]
+    pub shells:     Vec<Shell>,
 }
 
 impl Scrape {
+    pub fn shells(&self) -> &[Shell] {
+        if self.shells.is_empty() {
+            &[Shell::Nushell]
+        } else {
+            &self.shells
+        }
+    }
+
+    /// # Errors
+    /// fails when --ignore or --help-only cannot be read.
+    pub fn with_opts<T, Run>(&self, run: Run) -> io::Result<T>
+    where
+        Run: FnOnce(&ScrapeOpts<'_, RandomState>) -> io::Result<T>,
+    {
+        let ignorelist = self.ignorelist()?;
+        let help_only = self.help_only_list()?;
+        run(&ScrapeOpts {
+            ignorelist: &ignorelist,
+            help_only:  &help_only,
+            timeout_ms: self.timeout_ms,
+            workers:    self.workers,
+            shells:     self.shells(),
+        })
+    }
+
     pub fn ignorelist(&self) -> io::Result<HashSet<String>> {
         load_command_list(self.ignore.as_deref(), "--ignore")
     }
@@ -114,15 +145,8 @@ pub fn run(args: Args) -> io::Result<()> {
         .iter()
         .map(|prefix| man_dir_of_prefix(prefix))
         .collect();
-    cmd_index(
-        &bindirs,
-        &mandirs,
-        &args.scrape.ignorelist()?,
-        &args.scrape.help_only_list()?,
-        &args.dir,
-        args.scrape.timeout_ms,
-        args.scrape.workers,
-    )
+    args.scrape
+        .with_opts(|opts| cmd_index(&bindirs, &mandirs, &args.dir, opts))
 }
 
 fn man_dir_of_prefix(prefix: &Path) -> PathBuf {

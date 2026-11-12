@@ -80,6 +80,10 @@ const WRAPPERS: &[Wrapper] = &[
         ..PLAIN
     },
     Wrapper {
+        name: "builtin",
+        ..PLAIN
+    },
+    Wrapper {
         name: "exec",
         fallback_value: &["-a"],
         ..PLAIN
