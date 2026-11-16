@@ -81,7 +81,9 @@ let
       (indexToolsFor { } defaultPackage).scrape == buildInshellah;
     "a priority wrapped stock package resolves to its build twin" =
       (indexToolsFor { } (lib.hiPrio crossPkgs.hello)).scrape == buildHello;
-    "an overridden scraped package is skipped" = indexToolsFor { } overriddenHello == null;
+    "an overridden scraped package indexes itself with build platform tools" =
+      (indexToolsFor { } overriddenHello).scrape == overriddenHello
+      && indexUsesBuildPlatform overriddenHello;
     "an overridden nushellPackage fails evaluation" = throws (extraSetupFor {
       nushellPackage = overriddenNu;
     });

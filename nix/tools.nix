@@ -81,11 +81,9 @@ in
         tools = hostTools;
         scrape = pkg;
       }
-    else if twin != null then
+    else
       {
         tools = buildTools;
-        scrape = twin;
-      }
-    else
-      lib.warn "programs.inshellah: ${pkg.name} has no build-platform twin to run while cross compiling, so it is not indexed" null;
+        scrape = if twin != null then twin else pkg;
+      };
 }
