@@ -333,9 +333,7 @@ in
             plan = indexToolsFor pkg;
             index = mkIndex pkg.name plan.tools (installedOutputs plan.scrape);
           in
-          lib.optionalString (plan != null) (
-            lib.concatMapStrings (prefix: "${prefix} ${index}\n") (installedOutputs pkg)
-          );
+          lib.concatMapStrings (prefix: "${prefix} ${index}\n") (installedOutputs pkg);
         sourcesFile = pkgs.writeText "inshellah-sources" (
           lib.concatMapStrings indexFor (
             lib.filter lib.isDerivation (config.environment.systemPackages ++ cfg.extraScrapePackages)

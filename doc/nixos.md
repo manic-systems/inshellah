@@ -286,6 +286,7 @@ used by the module. if discovery or indexing fails, the build fails rather
 than silently shipping an empty or incomplete index. when cross compiling, a
 package is indexed with its build-platform twin, the spliced build package or
 the stock build package when the package is the unmodified stock one. a package
-without a twin, such as an override, is skipped with a warning naming it. a
+without a twin, such as an override, is indexed itself with the build-platform
+tools. binaries the build machine cannot run are indexed from their man pages. a
 `nushellPackage` or `package` without one fails evaluation, since
 host-platform tools cannot run on the build machine.
