@@ -131,6 +131,7 @@ fn resolve_dirs(dirs: Dirs) -> Vec<PathBuf> {
 }
 
 fn main() {
+    caress::handle(Cli::SPEC);
     // rust ignores SIGPIPE, so a broken-pipe write becomes a BrokenPipe error
     // that `println!` panics on. restore the default so piping into `head`
     // exits quietly.
